@@ -524,8 +524,10 @@ CURRENT CONVERSATION CONTEXT:
         
         consciousness_prompt += f"\n\n{username}: {message.content}"
         
-        # Process images if present
+        # Process images if present (from current message OR replied message)
         image_parts = []
+        
+        # Get images from current message
         if message.attachments:
             for attachment in message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
@@ -538,6 +540,26 @@ CURRENT CONVERSATION CONTEXT:
                             })
                     except Exception as e:
                         print(f"Error downloading image: {e}")
+        
+        # If replying to a message, also get images from that message
+        if message.reference and not image_parts:  # Only if user didn't send their own images
+            try:
+                replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                if replied_msg.attachments:
+                    print(f"  📸 [{username}] Analyzing images from replied message")
+                    for attachment in replied_msg.attachments:
+                        if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                            try:
+                                image_data = await download_image(attachment.url)
+                                if image_data:
+                                    image_parts.append({
+                                        'mime_type': attachment.content_type,
+                                        'data': image_data
+                                    })
+                            except Exception as e:
+                                print(f"Error downloading replied image: {e}")
+            except Exception as e:
+                print(f"Error fetching replied message images: {e}")
         
         # Let AI decide if internet search is needed
         search_results = None
