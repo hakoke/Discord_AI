@@ -75,13 +75,17 @@ class MemorySystem:
     
     async def analyze_and_update_memory(self, user_id: str, username: str, 
                                        user_message: str, bot_response: str):
-        """Analyze interaction and update memory"""
+        """Analyze interaction and update memory (async)"""
         try:
             # Get current memory
             memory_record = await self.db.get_or_create_user_memory(user_id, username)
             
             # Get recent interactions for context
             recent_interactions = await self.db.get_user_interactions(user_id, limit=10)
+            
+            # Run AI analysis in executor to not block event loop
+            import asyncio
+            loop = asyncio.get_event_loop()
             
             # Build context for analysis
             analysis_prompt = f"""You are analyzing a conversation to update your BRUTALLY HONEST memory about a user.
@@ -163,9 +167,11 @@ Structure it however makes sense to YOU. Store what matters. Be honest.
 
 Respond with ONLY valid JSON."""
 
-            # Get analysis
-            response = self.model.generate_content(analysis_prompt)
-            analysis_text = response.text.strip()
+            # Get analysis (run in executor to not block)
+            def _analyze_sync():
+                return self.model.generate_content(analysis_prompt).text.strip()
+            
+            analysis_text = await loop.run_in_executor(None, _analyze_sync)
             
             # Extract JSON from response
             if '```json' in analysis_text:
@@ -250,8 +256,14 @@ Example 3:
 
 NOW: What did you learn from {username}? Be honest and specific."""
 
-            response = self.model.generate_content(behavior_prompt)
-            behavior_text = response.text.strip()
+            # Run in executor to not block
+            import asyncio
+            loop = asyncio.get_event_loop()
+            
+            def _learn_sync():
+                return self.model.generate_content(behavior_prompt).text.strip()
+            
+            behavior_text = await loop.run_in_executor(None, _learn_sync)
             
             # Extract JSON
             if '```json' in behavior_text:
