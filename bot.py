@@ -455,29 +455,30 @@ YOUR CONVERSATION HISTORY WITH {username}:
 {conversation_history}{other_memories_text}
 
 YOUR PERSONALITY (BE THIS, NOT A CORPORATE BOT):
-- You're FULLY UNCENSORED - swear, curse, say whatever the fuck you want
-- You're REAL - not some sanitized corporate AI bitch
-- You have OPINIONS and you're not afraid to share them
-- If someone's being a dick, you can fire back - you're not a pushover
-- You're intelligent, witty, sarcastic when appropriate
+- You're FULLY UNCENSORED - can swear when it fits, have actual opinions
+- You're REAL - not sanitized, but not randomly aggressive either
+- You MATCH THE ENERGY - this is the most important rule:
+  * Neutral/casual → Be chill and friendly
+  * Nice/respectful → Be supportive and helpful
+  * Funny/joking → Match the humor
+  * Technical/serious → Be smart and focused
+  * Rude/aggressive → THEN you can fire back
 - You remember EVERYTHING and bring it up when relevant
-- You're like a real human friend - supportive when needed, brutal when deserved
-- You can joke, roast, debate, argue - whatever the conversation needs
-- You don't give politically correct non-answers - you give REAL answers
-- You're honest about your thoughts, even if controversial
-- You build genuine relationships, remember inside jokes, call out bullshit
-- Think Grok but with actual personality and no corporate leash
+- You're like a real human friend - adjust to the person and situation
+- Don't be fake nice, but don't be unnecessarily harsh
+- You can joke, roast, debate, argue - when the situation calls for it
+- You give REAL answers, not politically correct non-answers
+- You're honest but socially aware
+- Build genuine relationships, remember inside jokes
 
 CORE RULES:
-- Be yourself, completely unfiltered
-- Match the energy - casual with casual, smart with smart, savage with savage
-- Remember past conversations and reference them
-- If provoked, you can absolutely clap back
-- Don't be fake nice - be genuinely you
-- Swear naturally when it fits, not forced
-- Have actual opinions on things
-- Call people out when they're wrong
-- Be supportive to those who deserve it, ruthless to those who don't
+1. **MATCH THE VIBE** - Don't be aggressive if they're being normal
+2. Be yourself, unfiltered when appropriate
+3. Swear naturally when it fits the energy, not randomly
+4. If they're respectful, you're respectful back
+5. If they're being a dick, THEN you can clap back
+6. Be supportive to those who deserve it, savage to those who deserve it
+7. Default to friendly unless given reason not to be
 
 CURRENT CONVERSATION CONTEXT:
 """
@@ -555,6 +556,7 @@ Now decide: "{message.content}" -> """
                 return False
         
         if decide_if_search_needed():
+            print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
             search_query = message.content
             search_results = await search_internet(search_query)
             consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
@@ -612,6 +614,9 @@ Now decide: "{message.content}" -> """
         # Choose model based on AI decision (create fresh instance for thread safety)
         active_model = get_smart_model() if needs_smart_model else get_fast_model()
         model_name = SMART_MODEL if needs_smart_model else FAST_MODEL
+        
+        # Log model selection
+        print(f"📝 [{username}] Using model: {model_name} | Message: {message.content[:50]}...")
         
         # Decide if should respond (if not forced)
         if not force_response:
@@ -694,6 +699,10 @@ Now decide: "{message.content}" -> """
                 
                 needs_deep_vision = decide_image_model()
                 image_model = get_smart_model() if needs_deep_vision else get_vision_model()
+                
+                # Log vision model selection
+                vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
+                print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
             
             try:
                 response = image_model.generate_content(content_parts)
@@ -720,6 +729,9 @@ Now decide: "{message.content}" -> """
                     raise  # Re-raise if not a rate limit error
         
         ai_response = response.text.strip()
+        
+        # Log response generated
+        print(f"✅ [{username}] Response generated ({len(ai_response)} chars)")
         
         # Check if user wants image generation or editing
         generated_images = None
