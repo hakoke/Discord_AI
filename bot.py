@@ -24,17 +24,29 @@ IMAGEN_AVAILABLE = False
 try:
     from google.cloud import aiplatform
     from vertexai.preview.vision_models import ImageGenerationModel
+    import tempfile
     
-    # Check if service account JSON path is provided
-    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
     
-    if credentials_path or os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
-        # Set credentials path if not already set
-        if not credentials_path:
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+    # Check if credentials JSON is in environment variable or file
+    credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON') or os.getenv('credentials json')
+    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    
+    if credentials_json:
+        # Write JSON to temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json')
+        temp_file.write(credentials_json)
+        temp_file.close()
         
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file.name
+        credentials_path = temp_file.name
+        print(f"✅ Created credentials file from environment variable")
+    elif not credentials_path and os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+        credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+    
+    if credentials_path:
         aiplatform.init(project=project_id, location=location)
         IMAGEN_AVAILABLE = True
         print(f"✅ Imagen 3 initialized with project: {project_id}")
