@@ -782,8 +782,10 @@ Now decide: "{message.content}" -> """
             search_query=search_query if search_results else None
         )
         
-        # Analyze and update user memory
-        await memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
+        # Analyze and update user memory (run in background to not block Discord)
+        asyncio.create_task(
+            memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
+        )
         
         return (ai_response, generated_images)
         
