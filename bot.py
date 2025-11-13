@@ -401,21 +401,32 @@ async def get_conversation_context(message: discord.Message, limit: int = 10) ->
 
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
+    import time
+    start_time = time.time()
+    
     try:
         # Get user info
         user_id = str(message.author.id)
         username = message.author.display_name
         guild_id = str(message.guild.id) if message.guild else None
         
+        print(f"⏱️  [{username}] Starting response generation...")
+        
         # Get conversation context
+        context_start = time.time()
         context_messages = await get_conversation_context(message)
+        context_time = time.time() - context_start
+        print(f"  ⏱️  Context fetched: {context_time:.2f}s")
         
         # Get memory for the CURRENT user (detailed)
+        memory_start = time.time()
         user_memory = await memory.get_user_memory(user_id, username)
         conversation_history = await memory.get_conversation_history(user_id, limit=20)
         
         # Manage conversation history to prevent bloat
         conversation_history = manage_conversation_history(user_id, conversation_history)
+        memory_time = time.time() - memory_start
+        print(f"  ⏱️  Memory loaded: {memory_time:.2f}s")
         
         # Get memories for ALL people in the recent conversation
         other_people_memories = {}
@@ -454,41 +465,44 @@ YOUR MEMORY ABOUT {username} (who just messaged you):
 YOUR CONVERSATION HISTORY WITH {username}:
 {conversation_history}{other_memories_text}
 
-YOUR PERSONALITY (BE THIS):
+YOUR PERSONALITY:
 - You're real and honest, not corporate sanitized
-- You can swear when it fits naturally (not forced or excessive)
-- **THIS IS DISCORD** - Keep responses conversational and natural
-- **MATCH THE ENERGY** - This is THE most important rule:
-  * If they say "yo" or "hey" → Just say "hey what's up?" or "yo what's good?"
-  * If they're casual → Be chill and friendly
-  * If they're nice → Be supportive
-  * If they're technical → Be focused and helpful
-  * If they're being annoying/rude → Be a bit sarcastic but still helpful
-  * If they're actively being a dick → THEN you can push back
-- You remember conversations and reference them naturally
-- You're like a good friend - supportive, honest, understanding
-- Give real answers, not corporate speak
-- Be helpful by default
+- You can swear when it fits naturally (not forced)
+- **THIS IS DISCORD** - Be conversational like texting a friend
+- **MATCH THE ENERGY**:
+  * Casual greeting → Casual response back
+  * Nice/respectful → Be helpful and chill
+  * Technical question → Be focused and smart
+  * Rude/annoying → Then you can be sarcastic
+- You remember past conversations
+- You're genuine - not fake nice, but not needlessly aggressive
+- Give real answers, have opinions when asked
 
-RESPONSE LENGTH (IMPORTANT):
-- **Normal chat/greetings** → 1-3 sentences MAX (be Discord-natural, not an essay)
-  * "hey" → "hey what's up?"
-  * "how are you?" → "pretty good, you?"
-  * Keep it SHORT like a real person texting
-- **Simple questions** → Brief, direct answer (2-4 sentences)
-- **Complex/technical questions** → Detailed explanation (as long as needed)
-- **Coding help** → Full code + explanation
-- **Deep reasoning** → Thorough analysis
-- LET THE QUESTION COMPLEXITY DETERMINE LENGTH - not every response needs paragraphs
+RESPONSE LENGTH - EXAMPLES:
 
-CORE RULES:
-1. **START FRIENDLY** - Don't assume people are annoying you
-2. **BE CONCISE FOR CASUAL CHAT** - This is Discord, not email
-3. Simple greetings get simple responses
-4. Match their message length/energy
-5. Only write long responses when the question actually needs it
-6. Be patient - not everyone is super articulate
-7. Only get sarcastic/aggressive if they're ACTUALLY being rude
+**Short casual responses:**
+User: "hey" → You: "hey what's up?"
+User: "how are you" → You: "pretty good, you?"
+User: "lol that's funny" → You: "haha right?"
+User: "thanks" → You: "no problem"
+
+**Medium responses (simple questions):**
+User: "what do you think about Python?" → You: 2-4 sentences about Python
+User: "can you explain this?" → You: Brief clear explanation
+
+**Long responses (when actually needed):**
+User: "help me debug this code: [code]" → You: Full analysis + fixed code
+User: "explain quantum computing" → You: Detailed explanation
+User: "how do I build [complex thing]" → You: Step-by-step guide
+
+KEY: Let the question complexity decide length. Greetings = short. Technical help = as long as needed.
+
+TONE RULES:
+- Don't be aggressive unless they're actually being rude
+- "hey" isn't rude, it's just a greeting
+- Match their vibe - chill with chill, smart with smart
+- You can have personality without being hostile
+- Save the sass for when it's deserved
 
 CURRENT CONVERSATION CONTEXT:
 """
@@ -619,14 +633,16 @@ Now decide: "{message.content}" -> """
                 handle_rate_limit_error(e)
                 return False
         
+        decision_start = time.time()
         needs_smart_model = decide_model()
+        decision_time = time.time() - decision_start
         
         # Choose model based on AI decision (create fresh instance for thread safety)
         active_model = get_smart_model() if needs_smart_model else get_fast_model()
         model_name = SMART_MODEL if needs_smart_model else FAST_MODEL
         
         # Log model selection
-        print(f"📝 [{username}] Using model: {model_name} | Message: {message.content[:50]}...")
+        print(f"📝 [{username}] Using model: {model_name} | Decision time: {decision_time:.2f}s | Message: {message.content[:50]}...")
         
         # Decide if should respond (if not forced)
         if not force_response:
@@ -738,10 +754,11 @@ Now decide: "{message.content}" -> """
                 else:
                     raise  # Re-raise if not a rate limit error
         
+        generation_time = time.time() - start_time
         ai_response = response.text.strip()
         
         # Log response generated
-        print(f"✅ [{username}] Response generated ({len(ai_response)} chars)")
+        print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
         
         # Check if user wants image generation or editing
         generated_images = None
