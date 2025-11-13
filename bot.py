@@ -490,9 +490,59 @@ CURRENT CONVERSATION CONTEXT:
                     except Exception as e:
                         print(f"Error downloading image: {e}")
         
-        # Check if internet search is needed
+        # Let AI decide if internet search is needed
         search_results = None
-        if any(keyword in message.content.lower() for keyword in ['search', 'look up', 'find', 'what is', 'who is', 'latest', 'current', 'news about']):
+        def decide_if_search_needed():
+            """AI decides if this question needs internet search"""
+            if not SERPER_API_KEY:
+                return False
+            
+            search_decision_prompt = f"""User message: "{message.content}"
+
+Does answering this question require CURRENT INFORMATION from the internet?
+
+NEEDS INTERNET SEARCH:
+- "What's the latest news about [topic]?"
+- "Who won [recent event]?"
+- "Current weather in [place]"
+- "Latest AI developments"
+- "Search for [anything]"
+- "What's happening with [current event]?"
+- Recent/breaking news
+- Live data (stocks, sports scores, etc.)
+- "Look up [fact]"
+
+DOESN'T NEED SEARCH:
+- General knowledge questions
+- Coding help
+- Opinions/advice
+- Image analysis
+- Math problems
+- Creative writing
+- Past historical facts
+- General concepts
+
+Respond with ONLY: "SEARCH" or "NO"
+
+Examples:
+"what's the latest AI news?" -> SEARCH
+"how do I code in Python?" -> NO
+"who won the super bowl yesterday?" -> SEARCH
+"tell me a joke" -> NO
+"search for quantum computing advances" -> SEARCH
+"what's 2+2?" -> NO
+
+Now decide: "{message.content}" -> """
+            
+            try:
+                decision_model = get_fast_model()
+                decision = decision_model.generate_content(search_decision_prompt).text.strip().upper()
+                return 'SEARCH' in decision
+            except Exception as e:
+                handle_rate_limit_error(e)
+                return False
+        
+        if decide_if_search_needed():
             search_query = message.content
             search_results = await search_internet(search_query)
             consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
