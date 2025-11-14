@@ -547,11 +547,24 @@ HTML_TEMPLATE = """
             <div class="header">
                 <div>
                     <a href="/" class="back-btn">← Back to All Servers</a>
-                    <h1 style="margin-top: 15px;">Server Details</h1>
+                    <h1 style="margin-top: 15px;">
+                        {% if server_name %}
+                            {{ server_name }}
+                        {% else %}
+                            Server Details
+                        {% endif %}
+                    </h1>
                     <div class="server-id" style="margin-top: 5px;">{{ server_id }}</div>
                 </div>
-                <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <div id="ban-controls" style="display: flex; gap: 10px;">
+                        <!-- Ban controls will be loaded here -->
+                    </div>
+                    <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
+                </div>
             </div>
+            
+            <div id="ban-status" style="margin: 20px 0;"></div>
             
             {% if server_stats %}
             <div class="stats">
@@ -743,11 +756,15 @@ HTML_TEMPLATE = """
     <script>
         // Server ban management (only on server detail page)
         {% if view == 'server' %}
-        const guildId = '{{ server_id }}';
+        const guildId = '{{ server_id|replace("'", "\\'")|replace('"', '\\"') }}';
         
         async function loadBanStatus() {
             try {
-                const response = await fetch(`/api/server/${guildId}/ban-status`);
+                if (!guildId) {
+                    console.error('No guild ID available');
+                    return;
+                }
+                const response = await fetch('/api/server/' + encodeURIComponent(guildId) + '/ban-status');
                 const data = await response.json();
                 
                 const banControls = document.getElementById('ban-controls');
@@ -766,37 +783,32 @@ HTML_TEMPLATE = """
                     }
                     
                     // Show ban status
-                    let statusHtml = `<div class="ban-status-banner ${ban.ban_type}">`;
-                    statusHtml += `<strong>⚠️ Server is ${isPermanent ? 'PERMANENTLY BANNED' : 'TEMPORARILY BANNED'}</strong><br>`;
-                    if (!isPermanent && expiresAt) {
-                        statusHtml += `Expires: ${expiresAt.toLocaleString()}<br>`;
+                    if (banStatus) {
+                        let statusHtml = '<div class="ban-status-banner ' + ban.ban_type + '">';
+                        statusHtml += '<strong>⚠️ Server is ' + (isPermanent ? 'PERMANENTLY BANNED' : 'TEMPORARILY BANNED') + '</strong><br>';
+                        if (!isPermanent && expiresAt) {
+                            statusHtml += 'Expires: ' + expiresAt.toLocaleString() + '<br>';
+                        }
+                        if (ban.reason) {
+                            statusHtml += 'Reason: ' + ban.reason.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '<br>';
+                        }
+                        statusHtml += 'Banned at: ' + new Date(ban.banned_at).toLocaleString();
+                        statusHtml += '</div>';
+                        banStatus.innerHTML = statusHtml;
                     }
-                    if (ban.reason) {
-                        statusHtml += `Reason: ${ban.reason}<br>`;
-                    }
-                    statusHtml += `Banned at: ${new Date(ban.banned_at).toLocaleString()}`;
-                    statusHtml += `</div>`;
-                    banStatus.innerHTML = statusHtml;
                     
                     // Show unban button
-                    banControls.innerHTML = `
-                        <button class="unban-btn" onclick="unbanServer()">✅ Unban Server</button>
-                    `;
+                    if (banControls) {
+                        banControls.innerHTML = '<button class="unban-btn" onclick="unbanServer()">✅ Unban Server</button>';
+                    }
                 } else {
                     // Show ban button
-                    banControls.innerHTML = `
-                        <div class="ban-dropdown">
-                            <button class="ban-btn" onclick="toggleBanMenu()">🚫 Remove AI from Server</button>
-                            <div id="ban-menu" class="ban-menu">
-                                <div class="ban-option" onclick="banServer('temporary', 7)">Temporary (7 days)</div>
-                                <div class="ban-option" onclick="banServer('temporary', 30)">Temporary (30 days)</div>
-                                <div class="ban-option" onclick="banServerCustom()">Temporary (Custom days)</div>
-                                <div class="ban-option permanent" onclick="banServer('permanent')">Permanent (Forever)</div>
-                                <input type="text" id="ban-reason" class="ban-reason-input" placeholder="Optional reason (leave empty for no reason)">
-                            </div>
-                        </div>
-                    `;
-                    banStatus.innerHTML = '';
+                    if (banControls) {
+                        banControls.innerHTML = '<div class="ban-dropdown"><button class="ban-btn" onclick="toggleBanMenu()">🚫 Remove AI from Server</button><div id="ban-menu" class="ban-menu"><div class="ban-option" onclick="banServer(\'temporary\', 7)">Temporary (7 days)</div><div class="ban-option" onclick="banServer(\'temporary\', 30)">Temporary (30 days)</div><div class="ban-option" onclick="banServerCustom()">Temporary (Custom days)</div><div class="ban-option permanent" onclick="banServer(\'permanent\')">Permanent (Forever)</div><input type="text" id="ban-reason" class="ban-reason-input" placeholder="Optional reason (leave empty for no reason)"></div></div>';
+                    }
+                    if (banStatus) {
+                        banStatus.innerHTML = '';
+                    }
                 }
             } catch (error) {
                 console.error('Error loading ban status:', error);
@@ -817,7 +829,7 @@ HTML_TEMPLATE = """
                 return;
             }
             
-            fetch(`/api/server/${guildId}/ban`, {
+            fetch('/api/server/' + encodeURIComponent(guildId) + '/ban', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -852,7 +864,7 @@ HTML_TEMPLATE = """
                 return;
             }
             
-            fetch(`/api/server/${guildId}/unban`, {
+            fetch('/api/server/' + encodeURIComponent(guildId) + '/unban', {
                 method: 'POST'
             })
             .then(r => r.json())
@@ -957,12 +969,19 @@ async def get_db_data():
         
         servers_list = [dict(s) for s in servers]
         
-        # Fetch Discord server info for each server
-        for server in servers_list:
+        # Fetch Discord server info for each server (in parallel, non-blocking)
+        async def fetch_guild_info(server):
             guild_id = server.get('guild_id')
             if guild_id:
-                guild_info = await get_discord_guild_info(guild_id)
-                server['guild_info'] = guild_info
+                try:
+                    guild_info = await get_discord_guild_info(guild_id)
+                    server['guild_info'] = guild_info
+                except Exception as e:
+                    print(f"Error fetching guild info for {guild_id}: {e}")
+                    server['guild_info'] = None
+        
+        # Fetch all in parallel (faster, but still async)
+        await asyncio.gather(*[fetch_guild_info(server) for server in servers_list], return_exceptions=True)
         
         usage_data_list = [dict(u) for u in usage_data]
         top_users_list = [dict(u) for u in top_users]
