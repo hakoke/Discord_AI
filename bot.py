@@ -1109,6 +1109,34 @@ def _pdf_safe_text(text: str) -> str:
     replaced = ''.join(PDF_ASCII_REPLACEMENTS.get(ch, ch) for ch in normalized)
     return ''.join(ch for ch in replaced if ord(ch) < 128)
 
+PDF_MAX_WORD_LENGTH = 60
+LONG_WORD_PATTERN = re.compile(r'\S{' + str(PDF_MAX_WORD_LENGTH + 1) + r',}')
+
+def _pdf_break_long_words(text: str) -> str:
+    if not text:
+        return text
+
+    def _breaker(match: re.Match) -> str:
+        word = match.group(0)
+        chunks = [word[i:i + PDF_MAX_WORD_LENGTH] for i in range(0, len(word), PDF_MAX_WORD_LENGTH)]
+        return ' '.join(chunks)
+
+    return LONG_WORD_PATTERN.sub(_breaker, text)
+
+def _pdf_prepare_text(text: str) -> str:
+    return _pdf_break_long_words(_pdf_safe_text(text))
+
+def _safe_multi_cell(pdf: FPDF, text: str, line_height: float, **kwargs) -> None:
+    prepared = _pdf_prepare_text(text)
+    try:
+        pdf.multi_cell(0, line_height, prepared, **kwargs)
+    except RuntimeError as error:
+        if "Not enough horizontal space" not in str(error):
+            raise
+        # Force additional breaks and retry once
+        forced = _pdf_break_long_words(prepared.replace('-', '- '))
+        pdf.multi_cell(0, line_height, forced, **kwargs)
+
 def build_document_prompt_section(document_assets: List[Dict[str, Any]]) -> str:
     if not document_assets:
         return ""
@@ -1209,23 +1237,23 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
     title = descriptor.get("title")
     if title:
         pdf.set_font("Helvetica", "B", 18)
-        pdf.multi_cell(0, 10, _pdf_safe_text(title), align='C')
+        _safe_multi_cell(pdf, title, 10, align='C')
         pdf.ln(4)
 
     for section in sections:
         heading = section.get("heading")
         if heading:
             pdf.set_font("Helvetica", "B", 14)
-            pdf.multi_cell(0, 8, _pdf_safe_text(heading))
+            _safe_multi_cell(pdf, heading, 8)
             pdf.ln(2)
 
         body = section.get("body", "")
         if body:
             pdf.set_font("Helvetica", "", 11)
             for paragraph in body.split("\n"):
-                text = _pdf_safe_text(paragraph.strip())
-                if text:
-                    pdf.multi_cell(0, 6, text)
+                paragraph = paragraph.strip()
+                if paragraph:
+                    _safe_multi_cell(pdf, paragraph, 6)
                 else:
                     pdf.ln(4)
             pdf.ln(2)
@@ -1234,11 +1262,11 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
         if bullets:
             pdf.set_font("Helvetica", "", 11)
             for bullet in bullets:
-                bullet_text = _pdf_safe_text(str(bullet).strip())
+                bullet_text = str(bullet).strip()
                 if not bullet_text:
                     continue
                 pdf.set_x(pdf.l_margin)
-                pdf.multi_cell(0, 6, f"- {bullet_text}")
+                _safe_multi_cell(pdf, f"- {bullet_text}", 6)
             pdf.ln(2)
 
     output = pdf.output(dest='S')
