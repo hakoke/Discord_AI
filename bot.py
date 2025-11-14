@@ -181,13 +181,13 @@ memory = MemorySystem(db)
 # Gemini models - Use different models for different tasks
 # Try experimental first, fallback to stable
 try:
-    FAST_MODEL = 'gemini-2.0-flash-exp'  # Experimental (FREE)
+    FAST_MODEL = 'gemini-2.0-flash'  # Stable version (FREE)
     genai.GenerativeModel(FAST_MODEL)  # Test if available
 except:
-    FAST_MODEL = 'gemini-2.0-flash'  # Stable fallback
+    FAST_MODEL = 'gemini-2.0-flash'  # Same stable version
 
 SMART_MODEL = 'gemini-2.5-pro'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks (HAS VISION - multimodal)
-VISION_MODEL = 'gemini-2.0-flash-exp'  # For everyday/simple image analysis
+VISION_MODEL = 'gemini-2.0-flash'  # For everyday/simple image analysis
 
 # Rate limit fallback system
 RATE_LIMIT_FALLBACK = 'gemini-2.0-flash'  # Fallback when exp model is rate limited
@@ -2343,7 +2343,8 @@ Now decide: "{message.content}" -> """
         
         # Choose model based on AI decision (create fresh instance for thread safety)
         active_model = get_smart_model() if needs_smart_model else get_fast_model()
-        model_name = SMART_MODEL if needs_smart_model else FAST_MODEL
+        # Use actual current model (respects rate limit fallback)
+        model_name = SMART_MODEL if needs_smart_model else rate_limit_status['current_fast_model']
         
         # Log model selection
         print(f"📝 [{username}] Using model: {model_name} | Decision time: {decision_time:.2f}s | Message: {message.content[:50]}...")
