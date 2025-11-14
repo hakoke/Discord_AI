@@ -20,6 +20,7 @@ class Database:
                     user_id TEXT NOT NULL,
                     username TEXT NOT NULL,
                     guild_id TEXT,
+                    channel_id TEXT,
                     user_message TEXT NOT NULL,
                     bot_response TEXT NOT NULL,
                     context JSONB,
@@ -32,6 +33,10 @@ class Database:
             await conn.execute('''
                 ALTER TABLE interactions 
                 ADD COLUMN IF NOT EXISTS has_documents BOOLEAN DEFAULT FALSE
+            ''')
+            await conn.execute('''
+                ALTER TABLE interactions 
+                ADD COLUMN IF NOT EXISTS channel_id TEXT
             ''')
             
             # User memory table - stores consciousness/personality per user
