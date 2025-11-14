@@ -532,19 +532,36 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
         
         # Edit the image
         print(f"📡 [IMAGE EDIT] Calling Imagen edit API...")
-        images_response = model.edit_image(
-            base_image=base_image,
-            prompt=prompt,
-            edit_mode="inpainting-insert",  # Can also use "inpainting-remove" or "outpainting"
-        )
-        print(f"✅ [IMAGE EDIT] API call successful")
+        print(f"   - Prompt: {prompt[:100]}...")
+        print(f"   - Edit mode: inpainting-insert")
         
-        result = images_response.images[0]._pil_image if images_response.images else None
-        if result:
-            print(f"🎉 [IMAGE EDIT] Successfully edited image!")
-        else:
-            print(f"⚠️  [IMAGE EDIT] No images returned from API")
-        return result
+        try:
+            images_response = model.edit_image(
+                base_image=base_image,
+                prompt=prompt,
+                edit_mode="inpainting-insert",  # Can also use "inpainting-remove" or "outpainting"
+            )
+            print(f"✅ [IMAGE EDIT] API call successful")
+            print(f"   - Response type: {type(images_response)}")
+            print(f"   - Has images attribute: {hasattr(images_response, 'images')}")
+            
+            if hasattr(images_response, 'images'):
+                print(f"   - Images count: {len(images_response.images) if images_response.images else 0}")
+                result = images_response.images[0]._pil_image if images_response.images and len(images_response.images) > 0 else None
+            else:
+                print(f"   ⚠️  Response object doesn't have 'images' attribute")
+                print(f"   - Response attributes: {dir(images_response)}")
+                result = None
+            
+            if result:
+                print(f"🎉 [IMAGE EDIT] Successfully edited image!")
+            else:
+                print(f"⚠️  [IMAGE EDIT] No images returned from API")
+            return result
+        except Exception as edit_error:
+            print(f"❌ [IMAGE EDIT] Edit API error: {type(edit_error).__name__}")
+            print(f"❌ [IMAGE EDIT] Error message: {str(edit_error)}")
+            raise
     except Exception as e:
         print(f"❌ [IMAGE EDIT] Error occurred: {type(e).__name__}")
         print(f"❌ [IMAGE EDIT] Error message: {str(e)}")
@@ -1394,8 +1411,34 @@ Now decide: "{message.content}" -> """
                 if edited_img:
                     generated_images = [edited_img]
                     ai_response += "\n\n*Generated edited image based on your request*"
+                else:
+                    # Fallback: If editing fails, generate a new image with enhanced prompt
+                    print(f"🔄 [IMAGE EDIT] Edit returned no image, trying generation fallback...")
+                    try:
+                        # Analyze the original image to understand what it is
+                        vision_model = get_vision_model()
+                        loop = asyncio.get_event_loop()
+                        from PIL import Image
+                        from io import BytesIO
+                        pil_image = Image.open(BytesIO(original_img_bytes))
+                        analysis = await loop.run_in_executor(
+                            None,
+                            vision_model.generate_content,
+                            [f"Describe this image in detail. What is it?", pil_image]
+                        )
+                        image_description = analysis.text if hasattr(analysis, 'text') else ""
+                        enhanced_prompt = f"{image_description}. Transform this into: {edit_prompt}"
+                        print(f"🔄 [IMAGE EDIT] Fallback prompt: {enhanced_prompt[:200]}...")
+                        generated_images = await generate_image(enhanced_prompt, num_images=1)
+                        if generated_images:
+                            ai_response += "\n\n*Generated new image based on your transformation request*"
+                    except Exception as fallback_error:
+                        print(f"❌ [IMAGE EDIT] Fallback generation also failed: {fallback_error}")
+                        ai_response += "\n\n(Tried to edit your image but the editing API didn't return results. This might require a different approach.)"
             except Exception as e:
                 print(f"Image edit error: {e}")
+                import traceback
+                print(f"Image edit traceback: {traceback.format_exc()}")
                 ai_response += "\n\n(Tried to edit your image but something went wrong)"
         
         elif wants_image:
