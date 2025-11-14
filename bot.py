@@ -424,7 +424,7 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
             prompt=prompt,
             number_of_images=num_images,
             aspect_ratio="1:1",
-            safety_filter_level="block_none",
+            safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
             person_generation="allow_all",
         )
         print(f"✅ [IMAGE GEN] API call successful, received response")
@@ -553,7 +553,7 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
             images_response = model.generate_images(
                 prompt=f"Based on the provided image: {prompt}",
                 number_of_images=1,
-                safety_filter_level="block_none",
+                safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
                 person_generation="allow_all",
             )
             print(f"✅ [IMAGE EDIT] Fallback: Image generated")
