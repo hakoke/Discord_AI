@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 import asyncio
 import aiohttp
@@ -199,6 +200,12 @@ def get_fast_model():
             "top_p": 0.95,
             "top_k": 40,
             "max_output_tokens": 8192,
+        },
+        safety_settings={
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
 
@@ -211,6 +218,12 @@ def get_smart_model():
             "top_p": 0.95,
             "top_k": 64,
             "max_output_tokens": 8192,
+        },
+        safety_settings={
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
 
@@ -229,6 +242,12 @@ def get_vision_model():
             "top_p": 0.95,
             "top_k": 40,
             "max_output_tokens": 8192,
+        },
+        safety_settings={
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
 
@@ -405,8 +424,8 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
             prompt=prompt,
             number_of_images=num_images,
             aspect_ratio="1:1",
-            safety_filter_level="block_some",
-            person_generation="allow_adult",
+            safety_filter_level="block_none",
+            person_generation="allow_all",
         )
         print(f"✅ [IMAGE GEN] API call successful, received response")
         
@@ -534,6 +553,8 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
             images_response = model.generate_images(
                 prompt=f"Based on the provided image: {prompt}",
                 number_of_images=1,
+                safety_filter_level="block_none",
+                person_generation="allow_all",
             )
             print(f"✅ [IMAGE EDIT] Fallback: Image generated")
             return images_response.images[0]._pil_image if images_response.images else None
@@ -707,6 +728,63 @@ Return ONLY the JSON object."""
         print(f"Reply style decision error: {e}")
     
     return heuristics_guess
+
+def ai_decide_intentions(message: discord.Message, image_parts: list) -> dict:
+    """Use AI to determine if we should generate or edit images."""
+    heuristics = {
+        "generate": False,
+        "edit": bool(image_parts) and 'edit' in (message.content or '').lower(),
+        "analysis": bool(image_parts),
+    }
+    metadata = {
+        "message": (message.content or "").strip(),
+        "attachments_count": len(image_parts),
+        "is_reply": bool(message.reference),
+        "has_user_attachments": bool(message.attachments),
+    }
+    
+    prompt = f"""You are deciding which image capabilities to activate for a Discord assistant.
+
+Capabilities:
+- GENERATE: create new images from text prompts.
+- EDIT: modify existing images based on instructions.
+- ANALYZE: describe or interpret images the user provided.
+
+Return ONLY a JSON object like:
+{{
+  "generate": true,
+  "edit": false,
+  "analysis": true
+}}
+
+Rules:
+- Set "generate" true only if the user clearly wants new images or variations.
+- Set "edit" true only if the user supplied images and wants changes applied to them.
+- Set "analysis" true only if the user wants commentary on provided images.
+- Feel free to set multiple flags to true.
+- Defaults: generate=false, edit=false, analysis=false unless the message suggests otherwise.
+
+Context:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+Return ONLY the JSON object."""
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = decision_model.generate_content(prompt)
+        raw_text = (decision_response.text or "").strip()
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            data = json.loads(match.group(0))
+            return {
+                "generate": bool(data.get("generate")) and bool((message.content or "").strip()),
+                "edit": bool(data.get("edit")) and bool(image_parts),
+                "analysis": bool(data.get("analysis")) and bool(image_parts),
+            }
+    except Exception as e:
+        print(f"Intention decision error: {e}")
+    
+    return heuristics
 
 def _mime_type_to_extension(mime_type: str) -> str:
     mime_type = (mime_type or '').lower()
@@ -982,8 +1060,24 @@ CURRENT CONVERSATION CONTEXT:
             except Exception as e:
                 print(f"Error fetching replied message images: {e}")
         
+        # Determine user intentions and preferred reply style
+        intention = ai_decide_intentions(message, image_parts)
+        wants_image = intention['generate']
+        wants_image_edit = intention['edit']
+        
+        reply_style = ai_decide_reply_style(
+            message,
+            wants_image=wants_image,
+            wants_image_edit=wants_image_edit,
+            has_attachments=bool(image_parts)
+        )
+        small_talk = reply_style == 'SMALL_TALK'
+        detailed_reply = reply_style == 'DETAILED'
+        print(f"💬 [{username}] Reply style selected: {reply_style}")
+        
         # Let AI decide if internet search is needed
         search_results = None
+        search_query = None
         def decide_if_search_needed():
             """AI decides if this question needs internet search"""
             if not SERPER_API_KEY:
@@ -1242,29 +1336,6 @@ Now decide: "{message.content}" -> """
         
         # Check if user wants image generation or editing
         generated_images = None
-        message_lower = message.content.lower()
-        wants_image = any([
-            'generate' in message_lower and ('image' in message_lower or 'picture' in message_lower or 'photo' in message_lower),
-            'create' in message_lower and ('image' in message_lower or 'picture' in message_lower or 'photo' in message_lower),
-            'make me' in message_lower and ('image' in message_lower or 'picture' in message_lower or 'photo' in message_lower or 'art' in message_lower),
-            'draw' in message_lower and ('me' in message_lower or 'a' in message_lower),
-            'generate:' in message_lower or 'draw:' in message_lower or 'create:' in message_lower,
-        ])
-        
-        wants_image_edit = (
-            image_parts and  # User provided an image
-            any(['edit' in message_lower, 'change' in message_lower, 'modify' in message_lower, 'transform' in message_lower])
-        )
-        
-        reply_style = ai_decide_reply_style(
-            message,
-            wants_image=wants_image,
-            wants_image_edit=wants_image_edit,
-            has_attachments=bool(image_parts)
-        )
-        small_talk = reply_style == 'SMALL_TALK'
-        detailed_reply = reply_style == 'DETAILED'
-        print(f"💬 [{username}] Reply style selected: {reply_style}")
         
         if wants_image_edit:
             # Edit the user's image
