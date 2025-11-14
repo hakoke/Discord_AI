@@ -1955,16 +1955,22 @@ Does answering this question require VISUAL IMAGES from Google image search?
 
 NEEDS IMAGE SEARCH:
 - "Search for [topic] how does it look"
-- "Show me [place/thing]"
-- "What does [thing] look like?"
+- "Show me [place/thing]" (when asking to see existing images)
+- "What does [thing] look like?" (when asking about real things)
 - "Find images of [topic]"
 - "Search for pictures of [topic]"
-- "How does [place/thing] look?"
-- Visual descriptions of places, objects, people, events
-- "Show me examples of [thing]"
-- Requests to see visual representations
+- "How does [place/thing] look?" (when asking about real places/things)
+- Visual descriptions of places, objects, people, events (when asking to see real examples)
 
-DOESN'T NEED IMAGE SEARCH:
+DOESN'T NEED IMAGE SEARCH (these should GENERATE images instead):
+- "Make me an image of [thing]"
+- "Create a picture of [thing]"
+- "Generate an image of [thing]"
+- "Draw me [thing]"
+- "Make me a [thing]"
+- Any request to CREATE/GENERATE/MAKE images (not search for existing ones)
+
+ALSO DOESN'T NEED IMAGE SEARCH:
 - Text-only questions
 - Coding help
 - General knowledge without visual component
@@ -1976,10 +1982,11 @@ Respond with ONLY: "IMAGES" or "NO"
 
 Examples:
 "search for georgia countryside how does it look" -> IMAGES
-"what's the capital of France?" -> NO
+"make me an image of countryside" -> NO (this is generation, not search)
 "show me pictures of the Eiffel Tower" -> IMAGES
-"how do I code in Python?" -> NO
+"create a picture of a dog" -> NO (this is generation, not search)
 "what does the Grand Canyon look like?" -> IMAGES
+"make me an image of georgia and a man" -> NO (this is generation, not search)
 "tell me a joke" -> NO
 
 Now decide: "{message.content}" -> """
@@ -2118,7 +2125,7 @@ If you need to search the internet for current information, mention it.{thinking
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
-            response_prompt += f"\n\nIMAGE GENERATION REQUEST:\n- The user wants you to generate images (up to {MAX_GENERATED_IMAGES} images maximum).\n- DO NOT ask clarification questions. Generate the images directly based on your best interpretation of their request.\n- If details are missing, use your creativity to fill in reasonable details (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed.\n- Keep your response brief and confirm what you're generating, then the images will be automatically created and attached."
+            response_prompt += f"\n\nCRITICAL: IMAGE GENERATION REQUEST\n- The user wants you to GENERATE/CREATE images (up to {MAX_GENERATED_IMAGES} images maximum).\n- ABSOLUTELY DO NOT ask clarification questions. Generate the images immediately based on your best interpretation.\n- If details are missing, use your creativity to fill in reasonable details automatically (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed - but for now, just generate what you think they want.\n- Keep your response very brief (1-2 sentences max) - just confirm what you're generating, then the images will be automatically created and attached.\n- DO NOT ask questions like 'what should they wear?' or 'what setting?' - just decide and generate."
         
         if document_request:
             doc_instruction_lines = ["\n\nDOCUMENT WORKFLOW:"]
