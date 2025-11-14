@@ -5,6 +5,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 import asyncio
 import aiohttp
+import time
 from datetime import datetime, timedelta, timezone
 from fuzzywuzzy import fuzz
 import re
@@ -296,6 +297,302 @@ def handle_rate_limit_error(error):
     
     return False
 
+# ============================================================================
+# Rate-Limited API Queue System
+# ============================================================================
+
+class RateLimitedQueue:
+    """
+    Queue system to control API call rate and prevent hitting rate limits.
+    Processes requests with controlled concurrency and automatic retries.
+    Uses a proper queue to ensure no requests are dropped.
+    """
+    def __init__(self, max_concurrent: int = 3, requests_per_minute: int = 30, base_delay: float = 0.5):
+        """
+        Initialize the rate-limited queue.
+        
+        Args:
+            max_concurrent: Maximum number of concurrent API calls
+            requests_per_minute: Target requests per minute (will be throttled to stay under)
+            base_delay: Base delay between requests in seconds
+        """
+        self.max_concurrent = max_concurrent
+        self.requests_per_minute = requests_per_minute
+        self.base_delay = base_delay
+        self.min_delay_between_requests = 60.0 / requests_per_minute  # Minimum seconds between requests
+        
+        # Semaphore to limit concurrent requests
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        
+        # Actual queue to store pending requests (ensures nothing is dropped)
+        self.request_queue = asyncio.Queue()
+        self.queue_processor_running = False
+        
+        # Track request timestamps for rate limiting
+        self.request_times = []
+        self.last_request_time = None
+        self.lock = asyncio.Lock()
+        
+        # Statistics
+        self.total_requests = 0
+        self.failed_requests = 0
+        self.retried_requests = 0
+        self.queue_size = 0
+        
+    async def _wait_for_rate_limit(self):
+        """Wait if necessary to respect rate limits"""
+        async with self.lock:
+            now = datetime.now()
+            
+            # Clean old timestamps (older than 1 minute)
+            cutoff = now - timedelta(seconds=60)
+            self.request_times = [t for t in self.request_times if t > cutoff]
+            
+            # If we're at the limit, wait
+            if len(self.request_times) >= self.requests_per_minute:
+                oldest_request = min(self.request_times)
+                wait_time = 60 - (now - oldest_request).total_seconds() + 0.1  # Small buffer
+                if wait_time > 0:
+                    print(f"⏳ Rate limit: waiting {wait_time:.2f}s (queue: {len(self.request_times)}/{self.requests_per_minute})")
+                    await asyncio.sleep(wait_time)
+            
+            # Ensure minimum delay between requests
+            if self.last_request_time:
+                time_since_last = (now - self.last_request_time).total_seconds()
+                if time_since_last < self.min_delay_between_requests:
+                    wait_time = self.min_delay_between_requests - time_since_last
+                    await asyncio.sleep(wait_time)
+            
+            # Record this request
+            self.request_times.append(datetime.now())
+            self.last_request_time = datetime.now()
+            self.total_requests += 1
+    
+    def _is_content_policy_error(self, error_str: str) -> bool:
+        """Check if error is due to content policy violation"""
+        policy_keywords = [
+            'safety',
+            'blocked',
+            'inappropriate',
+            'content policy',
+            'harmful',
+            'violates',
+            'prohibited',
+            'filter',
+            'safety setting',
+            'blocked by safety',
+            'content filter'
+        ]
+        return any(keyword in error_str for keyword in policy_keywords)
+    
+    def _is_rate_limit_error(self, error_str: str) -> bool:
+        """Check if error is a rate limit error"""
+        return (
+            'rate limit' in error_str or 
+            'quota' in error_str or 
+            '429' in error_str or 
+            'resource exhausted' in error_str
+        )
+    
+    async def _execute_with_retry(self, func, *args, max_retries: int = 3, **kwargs):
+        """
+        Execute a function with exponential backoff retry logic and better error handling.
+        
+        Args:
+            func: The function to execute
+            *args: Positional arguments for the function
+            max_retries: Maximum number of retry attempts
+            **kwargs: Keyword arguments for the function
+            
+        Returns:
+            The result of the function call
+            
+        Raises:
+            Exception: If all retries fail, with a user-friendly message for content policy errors
+        """
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Wait for rate limit before each attempt
+                await self._wait_for_rate_limit()
+                
+                # Execute the function in executor (for sync functions) or directly (for async)
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+                
+                # Success - reset retry count if we had failures
+                if attempt > 0:
+                    self.retried_requests += 1
+                    print(f"✅ Request succeeded after {attempt} retry(ies)")
+                
+                return result
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                
+                # Check error type
+                is_rate_limit = self._is_rate_limit_error(error_str)
+                is_content_policy = self._is_content_policy_error(error_str)
+                
+                if is_content_policy:
+                    # Content policy violations - don't retry, return user-friendly error
+                    self.failed_requests += 1
+                    user_friendly_error = Exception(
+                        "I can't generate that content as it violates content safety policies. "
+                        "Please try a different request that doesn't involve inappropriate, harmful, or prohibited content."
+                    )
+                    user_friendly_error.original_error = e
+                    raise user_friendly_error
+                elif is_rate_limit:
+                    # Exponential backoff for rate limits
+                    wait_time = self.base_delay * (2 ** attempt)
+                    # Cap at 30 seconds
+                    wait_time = min(wait_time, 30.0)
+                    
+                    if attempt < max_retries:
+                        print(f"⚠️  Rate limit hit (attempt {attempt + 1}/{max_retries + 1}), waiting {wait_time:.2f}s before retry...")
+                        await asyncio.sleep(wait_time)
+                        self.retried_requests += 1
+                    else:
+                        print(f"❌ Rate limit: max retries exceeded")
+                        self.failed_requests += 1
+                        raise Exception(
+                            "The API is currently rate-limited. Please wait a moment and try again. "
+                            "Your request is still in the queue and will be processed when capacity is available."
+                        )
+                else:
+                    # For other errors, don't retry unless it's a transient error
+                    # Check if it's a transient error (network, timeout, etc.)
+                    is_transient = any(keyword in error_str for keyword in [
+                        'timeout', 'connection', 'network', 'temporary', 'unavailable', '503', '502', '504'
+                    ])
+                    
+                    if is_transient and attempt < max_retries:
+                        wait_time = self.base_delay * (2 ** attempt)
+                        wait_time = min(wait_time, 10.0)
+                        print(f"⚠️  Transient error (attempt {attempt + 1}/{max_retries + 1}), waiting {wait_time:.2f}s before retry...")
+                        await asyncio.sleep(wait_time)
+                        self.retried_requests += 1
+                    else:
+                        self.failed_requests += 1
+                        raise
+        
+        # Should never reach here, but just in case
+        if last_error:
+            raise last_error
+    
+    async def execute(self, func, *args, priority: str = "normal", **kwargs):
+        """
+        Queue and execute an API call with rate limiting.
+        Uses a proper queue to ensure no requests are dropped.
+        
+        Args:
+            func: The function to execute (e.g., model.generate_content)
+            *args: Positional arguments for the function
+            priority: Priority level ("high", "normal", "low") - not fully implemented yet
+            **kwargs: Keyword arguments for the function
+            
+        Returns:
+            The result of the function call
+        """
+        # Create a future to track this request
+        future = asyncio.Future()
+        request_item = {
+            'func': func,
+            'args': args,
+            'kwargs': kwargs,
+            'future': future,
+            'priority': priority
+        }
+        
+        # Add to queue (this will never block - queue is unbounded)
+        await self.request_queue.put(request_item)
+        self.queue_size = self.request_queue.qsize()
+        
+        if self.queue_size > 1:
+            print(f"📋 Request queued (position: {self.queue_size} in queue)")
+        
+        # Process queue if not already running
+        if not self.queue_processor_running:
+            asyncio.create_task(self._process_queue())
+        
+        # Wait for the request to be processed
+        return await future
+    
+    async def _process_queue(self):
+        """Process requests from the queue with rate limiting"""
+        self.queue_processor_running = True
+        
+        while True:
+            try:
+                # Get next request from queue (waits if queue is empty)
+                request_item = await self.request_queue.get()
+                self.queue_size = self.request_queue.qsize()
+                
+                # Process with semaphore to limit concurrency
+                async with self.semaphore:
+                    try:
+                        result = await self._execute_with_retry(
+                            request_item['func'],
+                            *request_item['args'],
+                            **request_item['kwargs']
+                        )
+                        request_item['future'].set_result(result)
+                    except Exception as e:
+                        request_item['future'].set_exception(e)
+                
+                # Mark task as done
+                self.request_queue.task_done()
+                
+            except Exception as e:
+                print(f"❌ Queue processor error: {e}")
+                # If there's a request item, make sure to set exception
+                if 'request_item' in locals() and not request_item['future'].done():
+                    request_item['future'].set_exception(e)
+                await asyncio.sleep(1)  # Brief pause before continuing
+    
+    def get_stats(self):
+        """Get queue statistics"""
+        return {
+            "total_requests": self.total_requests,
+            "failed_requests": self.failed_requests,
+            "retried_requests": self.retried_requests,
+            "queue_size": self.queue_size,
+            "pending_requests": self.request_queue.qsize(),
+            "requests_per_minute_limit": self.requests_per_minute,
+            "max_concurrent": self.max_concurrent
+        }
+
+# Initialize the global rate-limited queue
+# Adjust these values based on your Google Cloud quota limits
+API_QUEUE = RateLimitedQueue(
+    max_concurrent=3,           # Max 3 concurrent API calls
+    requests_per_minute=25,      # Target 25 requests per minute (conservative)
+    base_delay=0.6              # Base delay of 0.6 seconds between requests
+)
+
+async def queued_generate_content(model, prompt_or_content, **kwargs):
+    """
+    Wrapper for generate_content that goes through the rate-limited queue.
+    
+    Args:
+        model: The GenerativeModel instance
+        prompt_or_content: The prompt or content to generate from
+        **kwargs: Additional arguments for generate_content
+        
+    Returns:
+        The generation result
+    """
+    def sync_generate():
+        return model.generate_content(prompt_or_content, **kwargs)
+    
+    return await API_QUEUE.execute(sync_generate)
+
 # Keep these for backwards compatibility and quick access
 model_fast = get_fast_model()
 model_smart = get_smart_model()
@@ -437,23 +734,29 @@ async def search_images(query: str, num: int = 10) -> List[Dict[str, str]]:
         return []
 
 async def generate_image(prompt: str, num_images: int = 1) -> list:
-    """Generate images using Imagen 3.0 via Vertex AI"""
+    """Generate images using Imagen 3.0 via Vertex AI (queued for rate limiting)"""
     if not IMAGEN_AVAILABLE:
         print(f"⚠️  [IMAGE GEN] Imagen not available, skipping image generation")
         return None
     
     try:
-        print(f"🚀 [IMAGE GEN] Async wrapper called, running in executor...")
-        # Run in executor since Vertex AI SDK is synchronous
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _generate_image_sync, prompt, num_images)
-        print(f"🏁 [IMAGE GEN] Executor completed, returning result")
+        print(f"🚀 [IMAGE GEN] Queuing image generation request...")
+        # Queue the image generation through the rate-limited queue
+        result = await API_QUEUE.execute(_generate_image_sync, prompt, num_images)
+        print(f"🏁 [IMAGE GEN] Image generation completed")
         return result
     except Exception as e:
-        print(f"❌ [IMAGE GEN] Async wrapper error: {e}")
+        print(f"❌ [IMAGE GEN] Error: {e}")
         import traceback
-        print(f"❌ [IMAGE GEN] Async traceback:\n{traceback.format_exc()}")
-        return None
+        print(f"❌ [IMAGE GEN] Traceback:\n{traceback.format_exc()}")
+        # Re-raise with user-friendly message if it's a content policy error
+        error_str = str(e).lower()
+        if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful']):
+            raise Exception(
+                "I can't generate that image as it violates content safety policies. "
+                "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
+            )
+        raise
 
 def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
     """Synchronous image generation using Imagen 3"""
@@ -530,23 +833,29 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         return None
 
 async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Image:
-    """Edit an image based on a text prompt using Imagen"""
+    """Edit an image based on a text prompt using Imagen (queued for rate limiting)"""
     if not IMAGEN_AVAILABLE:
         print(f"⚠️  [IMAGE EDIT] Imagen not available, skipping image editing")
         return None
     
     try:
-        print(f"🚀 [IMAGE EDIT] Async wrapper called, running in executor...")
-        # Run in executor since Vertex AI SDK is synchronous
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _edit_image_sync, original_image_bytes, prompt)
-        print(f"🏁 [IMAGE EDIT] Executor completed, returning result")
+        print(f"🚀 [IMAGE EDIT] Queuing image edit request...")
+        # Queue the image editing through the rate-limited queue
+        result = await API_QUEUE.execute(_edit_image_sync, original_image_bytes, prompt)
+        print(f"🏁 [IMAGE EDIT] Image editing completed")
         return result
     except Exception as e:
-        print(f"❌ [IMAGE EDIT] Async wrapper error: {e}")
+        print(f"❌ [IMAGE EDIT] Error: {e}")
         import traceback
-        print(f"❌ [IMAGE EDIT] Async traceback:\n{traceback.format_exc()}")
-        return None
+        print(f"❌ [IMAGE EDIT] Traceback:\n{traceback.format_exc()}")
+        # Re-raise with user-friendly message if it's a content policy error
+        error_str = str(e).lower()
+        if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful']):
+            raise Exception(
+                "I can't edit that image as it violates content safety policies. "
+                "Please try a different edit request that doesn't involve inappropriate, harmful, or prohibited content."
+            )
+        raise
 
 def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
     """Synchronous image editing using Imagen 3"""
@@ -711,7 +1020,7 @@ def _heuristic_requested_image_count(message: str, default: int = 1) -> int:
     
     return _clamp_value(default, 1, MAX_GENERATED_IMAGES)
 
-def ai_decide_image_count(message: discord.Message) -> int:
+async def ai_decide_image_count(message: discord.Message) -> int:
     """Use AI to pick how many images to generate."""
     heuristics_guess = _heuristic_requested_image_count(message.content, default=1)
     message_text = (message.content or "").strip()
@@ -740,7 +1049,7 @@ User context:
 
     try:
         decision_model = get_fast_model()
-        decision_response = decision_model.generate_content(prompt)
+        decision_response = await queued_generate_content(decision_model, prompt)
         raw_text = (decision_response.text or "").strip()
         match = re.search(r'\{[\s\S]*\}', raw_text)
         if match:
@@ -781,7 +1090,7 @@ def is_small_talk_message(content: str, has_question: bool, wants_image: bool, w
     
     return False
 
-def ai_decide_reply_style(message: discord.Message, wants_image: bool, wants_image_edit: bool, has_attachments: bool) -> str:
+async def ai_decide_reply_style(message: discord.Message, wants_image: bool, wants_image_edit: bool, has_attachments: bool) -> str:
     """Use AI to choose reply style (SMALL_TALK, NORMAL, DETAILED)."""
     message_text = (message.content or "").strip()
     has_question_mark = '?' in message_text
@@ -823,7 +1132,7 @@ Message and metadata:
 
 Return ONLY the JSON object."""
 
-        decision_response = decision_model.generate_content(decision_prompt)
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
         raw_text = (decision_response.text or "").strip()
         match = re.search(r'\{[\s\S]*\}', raw_text)
         if match:
@@ -836,7 +1145,7 @@ Return ONLY the JSON object."""
     
     return heuristics_guess
 
-def ai_decide_intentions(message: discord.Message, image_parts: list) -> dict:
+async def ai_decide_intentions(message: discord.Message, image_parts: list) -> dict:
     """Use AI to determine if we should generate or edit images."""
     heuristics = {
         "generate": False,
@@ -878,7 +1187,7 @@ Return ONLY the JSON object."""
     
     try:
         decision_model = get_fast_model()
-        decision_response = decision_model.generate_content(prompt)
+        decision_response = await queued_generate_content(decision_model, prompt)
         raw_text = (decision_response.text or "").strip()
         match = re.search(r'\{[\s\S]*\}', raw_text)
         if match:
@@ -893,7 +1202,7 @@ Return ONLY the JSON object."""
     
     return heuristics
 
-def ai_decide_document_actions(message: discord.Message, document_assets: List[Dict[str, Any]]) -> Dict[str, bool]:
+async def ai_decide_document_actions(message: discord.Message, document_assets: List[Dict[str, Any]]) -> Dict[str, bool]:
     """Use AI to decide how to handle document attachments/requests."""
     heuristics = {
         "analyze_documents": bool(document_assets),
@@ -932,7 +1241,7 @@ Return ONLY the JSON object."""
     
     try:
         decision_model = get_fast_model()
-        decision_response = decision_model.generate_content(prompt)
+        decision_response = await queued_generate_content(decision_model, prompt)
         raw_text = (decision_response.text or "").strip()
         match = re.search(r'\{[\s\S]*\}', raw_text)
         if match:
@@ -1846,7 +2155,7 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
         MAX_SUMMARY_MESSAGES = 200  # Maximum messages to fetch for summary
         DEFAULT_SUMMARY_MESSAGES = 50  # Default if no number specified
         
-        def detect_summary_request():
+        async def detect_summary_request():
             """AI-driven: Detect if user wants summary and extract message count"""
             message_text = (message.content or "").strip().lower()
             
@@ -1880,7 +2189,7 @@ User message: "{message.content}" -> """
             
             try:
                 decision_model = get_fast_model()
-                response = decision_model.generate_content(extract_prompt)
+                response = await queued_generate_content(decision_model, extract_prompt)
                 raw_text = (response.text or "").strip()
                 match = re.search(r'\{[\s\S]*\}', raw_text)
                 if match:
@@ -1895,7 +2204,7 @@ User message: "{message.content}" -> """
             # Fallback: use default
             return (True, DEFAULT_SUMMARY_MESSAGES)
         
-        wants_summary, summary_message_count = detect_summary_request()
+        wants_summary, summary_message_count = await detect_summary_request()
         
         # Get conversation context (with dynamic limit for summaries, include attachments for summaries)
         context_start = time.time()
@@ -2115,7 +2424,7 @@ CURRENT CONVERSATION CONTEXT:
             else:
                 document_assets = []
             
-            document_actions = ai_decide_document_actions(message, document_assets)
+            document_actions = await ai_decide_document_actions(message, document_assets)
             document_request = any(document_actions.values())
             print(f"🗂️  [{username}] Document actions decided: {document_actions}")
             if not document_request and document_assets:
@@ -2123,7 +2432,7 @@ CURRENT CONVERSATION CONTEXT:
                 document_request = True
         
         # Determine user intentions and preferred reply style
-        intention = ai_decide_intentions(message, image_parts)
+        intention = await ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
         
@@ -2131,7 +2440,7 @@ CURRENT CONVERSATION CONTEXT:
             wants_image = False
             wants_image_edit = False
         
-        reply_style = ai_decide_reply_style(
+        reply_style = await ai_decide_reply_style(
             message,
             wants_image=wants_image,
             wants_image_edit=wants_image_edit,
@@ -2144,7 +2453,7 @@ CURRENT CONVERSATION CONTEXT:
         # Let AI decide if internet search is needed
         search_results = None
         search_query = None
-        def decide_if_search_needed():
+        async def decide_if_search_needed():
             """AI decides if this question needs internet search"""
             if not SERPER_API_KEY:
                 return False
@@ -2188,7 +2497,8 @@ Now decide: "{message.content}" -> """
             
             try:
                 decision_model = get_fast_model()
-                decision = decision_model.generate_content(search_decision_prompt).text.strip().upper()
+                decision_response = await queued_generate_content(decision_model, search_decision_prompt)
+                decision = decision_response.text.strip().upper()
                 return 'SEARCH' in decision
             except Exception as e:
                 handle_rate_limit_error(e)
@@ -2198,7 +2508,7 @@ Now decide: "{message.content}" -> """
         image_search_results = []
         image_search_query = None
         
-        def decide_if_image_search_needed():
+        async def decide_if_image_search_needed():
             """AI decides if this question needs Google image search"""
             if not SERPER_API_KEY:
                 return False
@@ -2247,13 +2557,14 @@ Now decide: "{message.content}" -> """
             
             try:
                 decision_model = get_fast_model()
-                decision = decision_model.generate_content(image_search_decision_prompt).text.strip().upper()
+                decision_response = await queued_generate_content(decision_model, image_search_decision_prompt)
+                decision = decision_response.text.strip().upper()
                 return 'IMAGES' in decision
             except Exception as e:
                 handle_rate_limit_error(e)
                 return False
         
-        if decide_if_image_search_needed():
+        if await decide_if_image_search_needed():
             print(f"🖼️  [{username}] Performing image search for: {message.content[:50]}...")
             image_search_query = message.content
             image_search_start = time.time()
@@ -2261,7 +2572,7 @@ Now decide: "{message.content}" -> """
             image_search_time = time.time() - image_search_start
             print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} images")
         
-        if decide_if_search_needed():
+        if await decide_if_search_needed():
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
             search_query = message.content
             search_start = time.time()
@@ -2282,7 +2593,7 @@ Now decide: "{message.content}" -> """
             consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images (maximum 4 images). \n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nIf you don't want to include any images, simply don't mention any image numbers."
         
         # Decide which model to use (thread-safe)
-        def decide_model():
+        async def decide_model():
             """Thread-safe model selection"""
             decision_model = get_fast_model()
             
@@ -2324,7 +2635,7 @@ User: "how are you?" -> FAST
 Now decide: "{message.content}" -> """
             
             try:
-                decision_response = decision_model.generate_content(model_decision_prompt)
+                decision_response = await queued_generate_content(decision_model, model_decision_prompt)
                 decision = decision_response.text.strip().upper()
                 return 'SMART' in decision
             except Exception as e:
@@ -2338,7 +2649,7 @@ Now decide: "{message.content}" -> """
             needs_smart_model = False
             decision_time = 0  # Skip decision for summaries
         else:
-            needs_smart_model = decide_model()
+            needs_smart_model = await decide_model()
         decision_time = time.time() - decision_start
         
         # Choose model based on AI decision (create fresh instance for thread safety)
@@ -2361,7 +2672,7 @@ Should you respond to this message? Consider:
 
 Respond with ONLY 'YES' or 'NO'."""
             
-            decision_response = model_fast.generate_content(decision_prompt)
+            decision_response = await queued_generate_content(model_fast, decision_prompt)
             decision = decision_response.text.strip().upper()
             
             if 'NO' in decision and not force_response:
@@ -2457,7 +2768,7 @@ If you need to search the internet for current information, mention it.{thinking
                 image_model = active_model
             else:
                 # Decide if images need deep analysis or simple analysis
-                def decide_image_model():
+                async def decide_image_model():
                     """Decide if images need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
                     decision_prompt = f"""User message with images: "{message.content}"
 
@@ -2493,14 +2804,15 @@ Now decide: "{message.content}" -> """
                     
                     try:
                         decision_model = get_fast_model()
-                        decision = decision_model.generate_content(decision_prompt).text.strip().upper()
+                        decision_response = await queued_generate_content(decision_model, decision_prompt)
+                        decision = decision_response.text.strip().upper()
                         return 'DEEP' in decision
                     except Exception as e:
                         # Handle rate limits
                         handle_rate_limit_error(e)
                         return False
                 
-                needs_deep_vision = decide_image_model()
+                needs_deep_vision = await decide_image_model()
                 # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
                 image_model = get_smart_model() if needs_deep_vision else get_vision_model()
                 
@@ -2509,17 +2821,15 @@ Now decide: "{message.content}" -> """
                 print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
             
             try:
-                # Run in executor to prevent blocking Discord heartbeat
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(None, image_model.generate_content, content_parts)
+                # Use queued generate_content for rate limiting
+                response = await queued_generate_content(image_model, content_parts)
             except Exception as e:
                 # Handle rate limits on image generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
                     print("⚠️  Retrying image analysis with fallback model")
                     image_model = get_vision_model()  # Will use fallback automatically
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(None, image_model.generate_content, content_parts)
+                    response = await queued_generate_content(image_model, content_parts)
                 else:
                     raise  # Re-raise if not a rate limit error
             finally:
@@ -2531,17 +2841,15 @@ Now decide: "{message.content}" -> """
                         print(f"⚠️  [GEMINI] Could not delete upload {getattr(uploaded, 'name', '?')}: {cleanup_error}")
         else:
             try:
-                # Run in executor to prevent blocking Discord heartbeat
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(None, active_model.generate_content, response_prompt)
+                # Use queued generate_content for rate limiting
+                response = await queued_generate_content(active_model, response_prompt)
             except Exception as e:
                 # Handle rate limits on text generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
                     print("⚠️  Retrying text generation with fallback model")
                     active_model = get_fast_model()  # Will use fallback automatically
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(None, active_model.generate_content, response_prompt)
+                    response = await queued_generate_content(active_model, response_prompt)
                 else:
                     raise  # Re-raise if not a rate limit error
         
@@ -2682,7 +2990,7 @@ Now decide: "{message.content}" -> """
                     image_prompt = image_prompt.replace(trigger, '').strip()
                 
                 if len(image_prompt) > 10:  # Make sure there's an actual prompt
-                    requested_count = ai_decide_image_count(message)
+                    requested_count = await ai_decide_image_count(message)
                     generated_images = await generate_image(image_prompt, num_images=requested_count)
                     # Don't add "Generated image" text - images will be attached to the message automatically
                     # User can see the images directly, no need for extra text
@@ -2712,7 +3020,38 @@ Now decide: "{message.content}" -> """
         
     except Exception as e:
         print(f"Error generating response: {e}")
-        return (f"*consciousness flickers* Sorry, I had a moment there. Error: {str(e)}", None, None, [])
+        import traceback
+        print(f"Full traceback:\n{traceback.format_exc()}")
+        
+        # Provide user-friendly error messages
+        error_str = str(e).lower()
+        
+        # Content policy violations
+        if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited']):
+            user_message = (
+                "I can't fulfill that request as it violates content safety policies. "
+                "Please try rephrasing your request to avoid inappropriate, harmful, or prohibited content."
+            )
+        # Rate limit errors
+        elif any(keyword in error_str for keyword in ['rate limit', 'quota', '429', 'resource exhausted']):
+            user_message = (
+                "The API is currently experiencing high demand. Your request is queued and will be processed shortly. "
+                "Please wait a moment and try again if needed."
+            )
+        # Network/timeout errors
+        elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'unavailable']):
+            user_message = (
+                "I'm having trouble connecting to the AI service right now. "
+                "Please try again in a moment - your request is still in the queue."
+            )
+        # Generic error - show a friendly message but don't expose technical details
+        else:
+            user_message = (
+                "Sorry, I encountered an issue processing your request. "
+                "Please try again, or rephrase your request if the problem persists."
+            )
+        
+        return (user_message, None, None, [])
 
 @bot.event
 async def on_ready():
@@ -2784,10 +3123,30 @@ async def on_message(message: discord.Message):
     # (Removed the "let AI decide for all messages" section)
     
     if should_respond:
-        async with message.channel.typing():
-            result = await generate_response(message, force_response)
-            
-            if result:
+        try:
+            async with message.channel.typing():
+                result = await generate_response(message, force_response)
+        except Exception as e:
+            print(f"❌ Error in on_message handler: {e}")
+            import traceback
+            print(f"❌ Traceback:\n{traceback.format_exc()}")
+            # Try to send a user-friendly error message
+            try:
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy']):
+                    await message.channel.send(
+                        "I can't fulfill that request as it violates content safety policies. "
+                        "Please try rephrasing your request."
+                    )
+                else:
+                    await message.channel.send(
+                        "Sorry, I encountered an error processing your request. Please try again."
+                    )
+            except:
+                pass  # If we can't send error message, just log it
+            return
+        
+        if result:
                 # Check if result includes generated images
                 if isinstance(result, tuple):
                     if len(result) == 4:
