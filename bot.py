@@ -1501,12 +1501,33 @@ def build_gemini_content_with_images(prompt: str, image_parts: list) -> tuple:
     
     return content_parts, uploaded_files
 
-async def download_bytes(url: str) -> bytes:
-    """Download raw bytes from URL."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                return await response.read()
+async def download_bytes(url: str, max_retries: int = 2) -> bytes:
+    """Download raw bytes from URL with retry logic."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=True) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        if data and len(data) > 0:
+                            return data
+                        else:
+                            last_error = f"Empty response (status 200, but 0 bytes)"
+                    else:
+                        last_error = f"HTTP {response.status}"
+        except asyncio.TimeoutError:
+            last_error = "Timeout"
+        except aiohttp.ClientError as e:
+            last_error = f"Client error: {str(e)}"
+        except Exception as e:
+            last_error = f"Error: {str(e)}"
+        
+        # Wait before retry (exponential backoff)
+        if attempt < max_retries - 1:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    
     return None
 
 async def download_image(url: str) -> bytes:
@@ -2904,7 +2925,7 @@ Return ONLY the search query, nothing else:"""
             user_query_lower = (message.content or "").lower()
             search_query_lower = (image_search_query or "").lower()
             
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\nCRITICAL INSTRUCTIONS FOR IMAGE SELECTION:\n\n1. You MUST select images that are RELEVANT to what the user asked for. Look at the image titles and URLs to determine relevance.\n2. The user's request was: \"{message.content}\"\n3. The search query used was: \"{image_search_query}\"\n4. Select images whose titles/URLs match the search query and user's intent. For example:\n   - If user asked for 'MUST egypt', select images about MUST university in Egypt, NOT general Egypt images\n   - If user asked for 'university of wollongong dubai', select images of that specific university, NOT other universities\n   - If user asked for 'mushrif mall', select images of Mushrif Mall, NOT other malls\n5. CRITICAL: If the user asks for multiple items with 'an image of each' or 'with images' (e.g., 'top 3 malls with an image of each', 'top 5 countries with images'), you MUST select ONE image for EACH item they mentioned. For example:\n   - 'top 3 malls with an image of each' = select 3 images (one for each mall)\n   - 'top 5 countries with images' = select 5 images (one for each country, up to 4 max)\n   - 'list 4 places with pictures' = select 4 images (one for each place)\n6. If the user asked for a specific number of images (e.g., '3 images', '2 photos'), try to match that number (up to 4 max).\n7. If no images are relevant or you can't find good matches, you can select 0 images, but you MUST tell the user clearly: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. You can choose 1-4 images (maximum 4 images).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n\nIf you cannot find any relevant images from the search results, you MUST tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'"
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\n🤖 FULLY AI-DRIVEN IMAGE SELECTION - YOU HAVE COMPLETE CONTROL:\n\nYOUR DECISIONS (ALL AI-DRIVEN, NO HARDCODING):\n1. HOW MANY images to include: You decide 0, 1, 2, 3, or 4 images (your choice, based on what makes sense)\n2. WHICH images to select: You analyze and choose the most relevant images from the list above\n3. WHICH image matches WHICH item: You intelligently match images to items you're discussing\n4. HOW to label them: You label them correctly (first, second, third, etc.) based on YOUR selection order\n\nCRITICAL - YOU DECIDE EVERYTHING:\n\n1. NUMBER OF IMAGES (YOUR CHOICE):\n   - You can choose 0 images if none are relevant (just don't include [IMAGE_NUMBERS: ...])\n   - You can choose 1 image if only one is relevant\n   - You can choose 2, 3, or 4 images if multiple are relevant\n   - Maximum is 4 images (Discord limit), but YOU decide how many (0-4)\n   - NO minimum requirement - you can choose 0 if appropriate\n\n2. WHICH IMAGES TO SELECT (YOUR ANALYSIS):\n   - Analyze each image's title and URL from the search results above\n   - Determine relevance to the user's request\n   - Select the images YOU think are most relevant\n   - You make the decision - no hardcoded rules\n\n3. MATCHING IMAGES TO ITEMS (YOUR INTELLIGENCE):\n   - If user asks for 'top 3 malls with an image of each':\n     * YOU analyze which image best represents the first mall\n     * YOU analyze which image best represents the second mall\n     * YOU analyze which image best represents the third mall\n     * YOU select them in order: first mall's image first, second mall's image second, etc.\n   - You match based on titles, URLs, and your understanding - fully AI-driven\n\n4. LABELING (YOUR RESPONSIBILITY):\n   - The FIRST image YOU select = label it 'the first image' or 'the first photo'\n   - The SECOND image YOU select = label it 'the second image' or 'the second photo'\n   - The THIRD image YOU select = label it 'the third image' or 'the third photo'\n   - You MUST know which images you selected and label them correctly\n   - Match labels to items: 'The first image shows [first item]', 'The second image displays [second item]'\n\n5. SELECTION FORMAT:\n   - To include images, add [IMAGE_NUMBERS: X,Y,Z] at the END of your response\n   - X, Y, Z are image numbers (1-{len(image_search_results)}) from the search results above\n   - Order matters: first number = first image, second number = second image, etc.\n   - If you don't want any images, simply don't include [IMAGE_NUMBERS: ...]\n\n6. EXAMPLES OF YOUR DECISIONS:\n   \n   Example 1 - User: 'top 3 malls with an image of each'\n   YOUR PROCESS:\n   a) YOU analyze: Find images for Dubai Mall (#1), Mall of Emirates (#2), Yas Mall (#3)\n   b) YOU decide: Select 3 images (one for each mall)\n   c) YOU choose: [IMAGE_NUMBERS: 1, 4, 6] (if those match best)\n   d) YOU label: 'The first image shows The Dubai Mall...', 'The second image displays Mall of the Emirates...', 'The third image captures Yas Mall...'\n   \n   Example 2 - User: 'show me pictures of cats'\n   YOUR PROCESS:\n   a) YOU analyze: Multiple cat images available\n   b) YOU decide: Maybe 2-3 images would be good\n   c) YOU choose: [IMAGE_NUMBERS: 2, 5] (if you want 2)\n   d) YOU label: 'The first image shows...', 'The second image displays...'\n   \n   Example 3 - User: 'tell me about quantum physics'\n   YOUR PROCESS:\n   a) YOU analyze: Images might not be relevant to this text question\n   b) YOU decide: 0 images (don't include [IMAGE_NUMBERS: ...])\n   c) YOU respond: Just text, no images\n\n7. IF NO RELEVANT IMAGES:\n   - YOU can choose 0 images\n   - Tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nREMEMBER: EVERYTHING is YOUR decision:\n- How many images (0-4): YOUR CHOICE\n- Which images: YOUR ANALYSIS\n- Which image for which item: YOUR MATCHING\n- How to label: YOUR RESPONSIBILITY\n- You know exactly which images you selected and label them accordingly\n\nNO HARDCODING - YOU ARE IN FULL CONTROL!"
         elif image_search_query:
             # Image search was attempted but returned no results
             consciousness_prompt += f"\n\nIMPORTANT: The user requested images for '{image_search_query}', but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
@@ -3029,6 +3050,10 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 attachment_info += f"\n- Images shared in conversation: {img_list}"
             
             response_prompt += f"\n\nCRITICAL: CONVERSATION SUMMARY REQUEST\n- The user wants you to summarize the last {len(context_messages)} messages from the conversation.{attachment_info}\n- Provide a clear, organized summary of the key topics, decisions, and important points discussed.\n- Group related topics together and highlight any action items or conclusions.\n- Mention any documents or images that were shared and what they were about (if relevant to the conversation).\n- Be concise but comprehensive - capture the essence of the conversation.\n- If there are multiple people in the conversation, note who said what when relevant.\n- Format the summary in a readable way (use bullet points or sections if helpful)."
+        
+        if image_search_results and len(image_search_results) > 0:
+            # Add reminder about proper image labeling when images are available
+            response_prompt += f"\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
@@ -3215,10 +3240,16 @@ Now decide: "{message.content}" -> """
                 # Import PIL Image and BytesIO here to ensure they're in scope
                 from PIL import Image as PILImage
                 from io import BytesIO
+                
+                # Track which images we've tried (to avoid duplicates in fallback)
+                tried_indices = set()
+                failed_images = []
+                
                 # Download selected images
                 for num in selected_numbers:
                     idx = num - 1  # Convert to 0-based index
                     if 0 <= idx < len(image_search_results):
+                        tried_indices.add(idx)
                         img_data = image_search_results[idx]
                         print(f"🔄 [{username}] Attempting to download image {num} (index {idx}): {img_data.get('title', 'Unknown')[:50]}")
                         try:
@@ -3241,19 +3272,60 @@ Now decide: "{message.content}" -> """
                                     print(f"✅ [{username}] Successfully downloaded and processed image {num}: {img_data.get('title', 'Unknown')[:50]}")
                                 except Exception as img_error:
                                     print(f"⚠️  [{username}] Failed to process image {num} after download: {img_error}")
+                                    failed_images.append((num, idx, img_data))
                                     import traceback
                                     print(f"⚠️  [{username}] Traceback: {traceback.format_exc()}")
                             else:
                                 print(f"⚠️  [{username}] Image {num} download returned empty/None bytes from URL: {img_data.get('url', 'Unknown')[:100]}")
+                                failed_images.append((num, idx, img_data))
                         except Exception as download_error:
                             print(f"⚠️  [{username}] Failed to download image {num} from URL {img_data.get('url', 'Unknown')[:100]}: {download_error}")
+                            failed_images.append((num, idx, img_data))
                             import traceback
                             print(f"⚠️  [{username}] Download error traceback: {traceback.format_exc()}")
                     else:
                         print(f"⚠️  [{username}] Image number {num} is out of range (max: {len(image_search_results)})")
                 
+                # If we have failed images and need more, try fallback images from remaining search results
+                if failed_images and len(searched_images) < len(selected_numbers):
+                    needed_count = len(selected_numbers) - len(searched_images)
+                    print(f"🔄 [{username}] Trying fallback images: {needed_count} needed, {len(failed_images)} failed")
+                    
+                    # Try to find alternative images from remaining search results
+                    for alt_idx in range(len(image_search_results)):
+                        if alt_idx in tried_indices:
+                            continue
+                        if len(searched_images) >= len(selected_numbers):
+                            break
+                        
+                        alt_img_data = image_search_results[alt_idx]
+                        alt_num = alt_idx + 1
+                        print(f"🔄 [{username}] Trying fallback image {alt_num} (index {alt_idx}): {alt_img_data.get('title', 'Unknown')[:50]}")
+                        tried_indices.add(alt_idx)
+                        
+                        try:
+                            img_bytes = await download_image(alt_img_data['url'])
+                            if img_bytes and len(img_bytes) > 0:
+                                try:
+                                    img = PILImage.open(BytesIO(img_bytes))
+                                    if img.mode in ('RGBA', 'LA', 'P'):
+                                        rgb_img = PILImage.new('RGB', img.size, (255, 255, 255))
+                                        if img.mode == 'P':
+                                            img = img.convert('RGBA')
+                                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                                        img = rgb_img
+                                    else:
+                                        img = img.convert('RGB')
+                                    
+                                    searched_images.append(img)
+                                    print(f"✅ [{username}] Successfully downloaded fallback image {alt_num}: {alt_img_data.get('title', 'Unknown')[:50]}")
+                                except Exception as img_error:
+                                    print(f"⚠️  [{username}] Failed to process fallback image {alt_num}: {img_error}")
+                        except Exception as download_error:
+                            print(f"⚠️  [{username}] Failed to download fallback image {alt_num}: {download_error}")
+                
                 if len(searched_images) < len(selected_numbers):
-                    print(f"⚠️  [{username}] WARNING: Only {len(searched_images)}/{len(selected_numbers)} images were successfully downloaded and processed")
+                    print(f"⚠️  [{username}] WARNING: Only {len(searched_images)}/{len(selected_numbers)} images were successfully downloaded and processed (after fallback attempts)")
                 
                 # Remove the [IMAGE_NUMBERS: ...] marker from response if present
                 ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
