@@ -2617,11 +2617,17 @@ CURRENT CONVERSATION CONTEXT:
             if not SERPER_API_KEY:
                 return False
             
-            search_decision_prompt = f"""User message: "{message.content}"
+            # Check if there are images attached - if so, include that context
+            has_images = len(image_parts) > 0
+            image_context = f"\n\nIMPORTANT: The user has attached {len(image_parts)} image(s) with this message. If you need to identify something in the image (a person, place, object, etc.) and you're not certain, you should search for it." if has_images else ""
+            
+            search_decision_prompt = f"""User message: "{message.content}"{image_context}
 
-Does answering this question require CURRENT INFORMATION from the internet?
+Does answering this question require internet search?
 
-NEEDS INTERNET SEARCH:
+ALWAYS SEARCH IF:
+- You DON'T KNOW the answer or are UNCERTAIN
+- You need CURRENT/UP-TO-DATE information
 - "What's the latest news about [topic]?"
 - "Who won [recent event]?"
 - "Current weather in [place]"
@@ -2631,26 +2637,32 @@ NEEDS INTERNET SEARCH:
 - Recent/breaking news
 - Live data (stocks, sports scores, etc.)
 - "Look up [fact]"
+- Identifying a person, place, or thing you're not certain about (especially in images)
+- "Who is this?" or "What is this place?" when you're not sure
+- Any question where you need to verify or get current information
 
-DOESN'T NEED SEARCH:
-- General knowledge questions
-- Coding help
-- Opinions/advice
-- Image analysis
-- Math problems
-- Creative writing
-- Past historical facts
-- General concepts
+DON'T SEARCH IF:
+- You're CERTAIN you know the answer from your training
+- Simple math problems
+- Basic coding syntax questions
+- General concepts you're confident about
+- Creative writing prompts
+- Questions you can answer definitively without current information
+
+CRITICAL: If you're UNCERTAIN or DON'T KNOW something, you should search. It's better to search and get accurate information than to guess or say "I don't know" without trying.
 
 Respond with ONLY: "SEARCH" or "NO"
 
 Examples:
 "what's the latest AI news?" -> SEARCH
-"how do I code in Python?" -> NO
-"who won the super bowl yesterday?" -> SEARCH
+"how do I code in Python?" -> NO (you know this)
+"who won the super bowl yesterday?" -> SEARCH (current event)
 "tell me a joke" -> NO
 "search for quantum computing advances" -> SEARCH
-"what's 2+2?" -> NO
+"what's 2+2?" -> NO (you know this)
+"who is this person?" (with image) -> SEARCH (if uncertain)
+"what is this place?" (with image) -> SEARCH (if uncertain)
+"I'm not sure what this is" -> SEARCH
 
 Now decide: "{message.content}" -> """
             
@@ -2749,7 +2761,7 @@ Now decide: "{message.content}" -> """
                 f"{idx+1}. {img['title']} - {img['url']}"
                 for idx, img in enumerate(image_search_results)
             ])
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images (maximum 4 images). \n\nCRITICAL: If the user asks for multiple items (e.g., 'top 3 countries', 'list 4 things', 'show me 2 examples'), you MUST select one image for EACH item they requested. For example, if they ask for 'top 3 countries with images', select 3 different images (one for each country). If they ask for 'list 5 places', select up to 4 images (the maximum allowed). Match the number of images to the number of items they're asking about (up to the 4 image limit).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nIf you don't want to include any images, simply don't mention any image numbers."
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images (maximum 4 images). \n\nCRITICAL: If the user asks for multiple items (e.g., 'top 3 countries', 'list 4 things', 'show me 2 examples'), you MUST select one image for EACH item they requested. For example, if they ask for 'top 3 countries with images', select 3 different images (one for each country). If they ask for 'list 5 places', select up to 4 images (the maximum allowed). Match the number of images to the number of items they're asking about (up to the 4 image limit).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n- You can answer questions about attached images dynamically: 'what's in the first image?', 'who is this?', 'what place is shown in the second image?', etc.\n\nIf you don't want to include any images, simply don't mention any image numbers."
         
         # Decide which model to use (thread-safe)
         async def decide_model():
@@ -2839,12 +2851,17 @@ Respond with ONLY 'YES' or 'NO'."""
         
         # Generate response
         thinking_note = f" [Using {model_name} for this]" if needs_smart_model else ""
-        response_prompt = f"""{consciousness_prompt}
+        search_instruction = ""
+        if search_results:
+            search_instruction = f"\n\nINTERNET SEARCH RESULTS ARE AVAILABLE (see above). Use this information to provide accurate, up-to-date answers."
+        elif SERPER_API_KEY:
+            search_instruction = f"\n\nIMPORTANT: If you don't know something or are uncertain, the system can search the internet for you. If you find yourself saying 'I don't know' or 'I'm not sure', the system will automatically search. However, if you're confident you know the answer, just provide it directly."
+        
+        response_prompt = f"""{consciousness_prompt}{search_instruction}
 
 Respond with empathy, clarity, and practical help. Focus on solving the user's request, celebrate their wins, and stay respectful even under pressure.
 Do not repeat or quote the user's words unless it helps clarify your answer.
-Keep responses purposeful and avoid mentioning internal system status.
-If you need to search the internet for current information, mention it.{thinking_note}"""
+Keep responses purposeful and avoid mentioning internal system status.{thinking_note}"""
         
         if small_talk:
             response_prompt += "\n\nThe user is engaging in light conversation or giving quick feedback. Reply warmly and concisely (no more than two short sentences) while keeping the door open for further help."
@@ -2907,7 +2924,7 @@ If you need to search the internet for current information, mention it.{thinking
         
         # Add images to prompt if present
         if image_parts:
-            response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them."
+            response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
             uploaded_files = []
             try:
                 content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts)
@@ -3421,6 +3438,9 @@ async def on_message(message: discord.Message):
                         except Exception as img_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to compress {image_type} image {idx+1}: {img_error}")
                     return compressed_files
+                
+                # Note: The AI is already instructed in the prompt to reference images by position (first, second, third)
+                # The prompt instructions handle this dynamically, so no post-processing needed here
                 
                 # Send text response with all images attached (if any)
                 if response:
