@@ -18,7 +18,7 @@ from memory import MemorySystem
 # Configure Gemini (uses API key)
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# Imagen 3 configuration (requires Vertex AI)
+# Imagen configuration (requires Vertex AI)
 # Will be initialized if credentials are available
 IMAGEN_AVAILABLE = False
 try:
@@ -28,6 +28,30 @@ try:
     
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+    
+    # Allow runtime override of Imagen model choices via env vars
+    def _build_candidate_list(env_key: str, defaults: list[str]) -> list[str]:
+        """Helper to build ordered list of model candidates with env override."""
+        override = os.getenv(env_key, '')
+        candidates = []
+        if override:
+            candidates.extend([name.strip() for name in override.split(',') if name.strip()])
+        candidates.extend([name for name in defaults if name not in candidates])
+        return candidates
+    
+    IMAGEN_GENERATE_MODELS = _build_candidate_list(
+        'IMAGEN_GENERATE_MODELS',
+        [
+            'imagen-4.0-ultra-generate-001',  # Latest GA generate model
+            'imagen-3.0-generate',            # Stable legacy generate model
+        ]
+    )
+    IMAGEN_EDIT_MODELS = _build_candidate_list(
+        'IMAGEN_EDIT_MODELS',
+        [
+            'imagegeneration@002',            # Official editing/upscaling model
+        ]
+    )
     
     # PRIORITY 1: Check for local credentials file (committed to private repo)
     credentials_path = None
@@ -344,10 +368,20 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         vertexai.init(project=project_id, location=location)
         print(f"✅ [IMAGE GEN] Vertex AI initialized successfully")
         
-        model_name = "imagen-3.0-generate"
-        print(f"🔄 [IMAGE GEN] Loading Imagen 3 model: {model_name}")
-        model = ImageGenerationModel.from_pretrained(model_name)
-        print(f"✅ [IMAGE GEN] Model loaded successfully: {model_name}")
+        model = None
+        last_error = None
+        for model_name in IMAGEN_GENERATE_MODELS:
+            try:
+                print(f"🔄 [IMAGE GEN] Loading Imagen model: {model_name}")
+                model = ImageGenerationModel.from_pretrained(model_name)
+                print(f"✅ [IMAGE GEN] Model loaded successfully: {model_name}")
+                break
+            except Exception as model_error:
+                last_error = model_error
+                print(f"   ⚠️  Model '{model_name}' not available: {model_error}")
+        
+        if not model:
+            raise last_error or Exception("No Imagen generate model could be loaded.")
         
         print(f"📡 [IMAGE GEN] Calling Imagen API (generating {num_images} image(s))...")
         images_response = model.generate_images(
@@ -427,10 +461,20 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
         vertexai.init(project=project_id, location=location)
         print(f"✅ [IMAGE EDIT] Vertex AI initialized successfully")
         
-        model_name = "imagegeneration@002"
-        print(f"🔄 [IMAGE EDIT] Loading Imagen editing model: {model_name}")
-        model = ImageGenerationModel.from_pretrained(model_name)
-        print(f"✅ [IMAGE EDIT] Model loaded successfully: {model_name}")
+        model = None
+        last_error = None
+        for model_name in IMAGEN_EDIT_MODELS:
+            try:
+                print(f"🔄 [IMAGE EDIT] Loading Imagen editing model: {model_name}")
+                model = ImageGenerationModel.from_pretrained(model_name)
+                print(f"✅ [IMAGE EDIT] Model loaded successfully: {model_name}")
+                break
+            except Exception as model_error:
+                last_error = model_error
+                print(f"   ⚠️  Model '{model_name}' not available: {model_error}")
+        
+        if not model:
+            raise last_error or Exception("No Imagen editing model could be loaded.")
         
         # Convert bytes to Vertex AI Image
         print(f"🖼️  [IMAGE EDIT] Converting base image ({len(original_image_bytes)} bytes)...")
@@ -465,7 +509,9 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
                          location=os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1'))
             print(f"✅ [IMAGE EDIT] Fallback: Vertex AI re-initialized")
             
-            model = ImageGenerationModel.from_pretrained("imagen-3.0-generate")
+            fallback_generate_model = IMAGEN_GENERATE_MODELS[0]
+            print(f"🔄 [IMAGE EDIT] Fallback: Loading generate model {fallback_generate_model}")
+            model = ImageGenerationModel.from_pretrained(fallback_generate_model)
             print(f"✅ [IMAGE EDIT] Fallback: Model loaded")
             
             images_response = model.generate_images(
