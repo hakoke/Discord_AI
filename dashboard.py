@@ -346,20 +346,21 @@ HTML_TEMPLATE = """
             <script>
                 // Usage chart
                 const usageData = {{ usage_data | tojson }};
-                const ctx = document.getElementById('usageChart').getContext('2d');
-                new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: usageData.map(d => new Date(d.date).toLocaleDateString()),
-                        datasets: [{
-                            label: 'Interactions',
-                            data: usageData.map(d => d.count),
-                            borderColor: '#58a6ff',
-                            backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                            tension: 0.4,
-                            fill: true
-                        }]
-                    },
+                const ctx = document.getElementById('usageChart');
+                if (ctx && usageData && usageData.length > 0) {
+                    new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: usageData.map(d => new Date(d.date).toLocaleDateString()),
+                            datasets: [{
+                                label: 'Interactions',
+                                data: usageData.map(d => d.count),
+                                borderColor: '#58a6ff',
+                                backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                                tension: 0.4,
+                                fill: true
+                            }]
+                        },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
@@ -385,7 +386,10 @@ HTML_TEMPLATE = """
                             }
                         }
                     }
-                });
+                    });
+                } else {
+                    ctx.getContext('2d').fillText('No data available', 10, 50);
+                }
             </script>
             
         {% elif view == 'server' %}
@@ -530,20 +534,21 @@ HTML_TEMPLATE = """
             <script>
                 // Server usage chart
                 const serverUsageData = {{ server_usage_data | tojson }};
-                const serverCtx = document.getElementById('serverUsageChart').getContext('2d');
-                new Chart(serverCtx, {
-                    type: 'line',
-                    data: {
-                        labels: serverUsageData.map(d => new Date(d.date).toLocaleDateString()),
-                        datasets: [{
-                            label: 'Interactions',
-                            data: serverUsageData.map(d => d.count),
-                            borderColor: '#58a6ff',
-                            backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                            tension: 0.4,
-                            fill: true
-                        }]
-                    },
+                const serverCtx = document.getElementById('serverUsageChart');
+                if (serverCtx && serverUsageData && serverUsageData.length > 0) {
+                    new Chart(serverCtx, {
+                        type: 'line',
+                        data: {
+                            labels: serverUsageData.map(d => new Date(d.date).toLocaleDateString()),
+                            datasets: [{
+                                label: 'Interactions',
+                                data: serverUsageData.map(d => d.count),
+                                borderColor: '#58a6ff',
+                                backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                                tension: 0.4,
+                                fill: true
+                            }]
+                        },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
@@ -569,7 +574,10 @@ HTML_TEMPLATE = """
                             }
                         }
                     }
-                });
+                    });
+                } else {
+                    serverCtx.getContext('2d').fillText('No data available', 10, 50);
+                }
             </script>
             {% else %}
             <p style="color: #8b949e; text-align: center; padding: 40px;">Server not found or has no data.</p>
@@ -586,7 +594,11 @@ HTML_TEMPLATE = """
 
 async def get_db_data():
     """Fetch all database data for home page"""
-    conn = await asyncpg.connect(os.getenv('DATABASE_URL'))
+    database_url = os.getenv('DATABASE_URL')
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable is not set")
+    
+    conn = await asyncpg.connect(database_url)
     
     try:
         # Overall stats
@@ -645,7 +657,11 @@ async def get_db_data():
 
 async def get_server_data(guild_id: str):
     """Fetch data for a specific server"""
-    conn = await asyncpg.connect(os.getenv('DATABASE_URL'))
+    database_url = os.getenv('DATABASE_URL')
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable is not set")
+    
+    conn = await asyncpg.connect(database_url)
     
     try:
         # Server stats
@@ -736,60 +752,85 @@ async def get_server_data(guild_id: str):
     finally:
         await conn.close()
 
+def run_async(coro):
+    """Run async function in sync context - works with gunicorn"""
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+    except RuntimeError:
+        # Create new event loop if none exists
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        # Don't close the loop - gunicorn workers reuse it
+        pass
+
 @app.route('/')
 def index():
     """Main dashboard page - shows all servers"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    data = loop.run_until_complete(get_db_data())
-    
-    return render_template_string(
-        HTML_TEMPLATE,
-        view='home',
-        stats=data['stats'],
-        servers=data['servers'],
-        usage_data=data['usage_data'],
-        top_users=data['top_users'],
-        now=datetime.utcnow()
-    )
+    try:
+        data = run_async(get_db_data())
+        
+        return render_template_string(
+            HTML_TEMPLATE,
+            view='home',
+            stats=data['stats'],
+            servers=data['servers'],
+            usage_data=data['usage_data'],
+            top_users=data['top_users'],
+            now=datetime.utcnow()
+        )
+    except Exception as e:
+        import traceback
+        error_msg = f"Error loading dashboard: {str(e)}\n\n{traceback.format_exc()}"
+        return f"<pre style='color: red; background: #0d1117; padding: 20px;'>{error_msg}</pre>", 500
 
 @app.route('/server/<guild_id>')
 def server_detail(guild_id):
     """Server detail page"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    data = loop.run_until_complete(get_server_data(guild_id))
-    
-    if not data:
+    try:
+        data = run_async(get_server_data(guild_id))
+        
+        if not data:
+            return render_template_string(
+                HTML_TEMPLATE,
+                view='server',
+                server_id=guild_id,
+                server_stats=None,
+                server_users=[],
+                recent_interactions=[],
+                server_usage_data=[],
+                now=datetime.utcnow()
+            )
+        
         return render_template_string(
             HTML_TEMPLATE,
             view='server',
             server_id=guild_id,
-            server_stats=None,
-            server_users=[],
-            recent_interactions=[],
-            server_usage_data=[],
+            server_stats=data['server_stats'],
+            server_users=data['server_users'],
+            recent_interactions=data['recent_interactions'],
+            server_usage_data=data['server_usage_data'],
             now=datetime.utcnow()
         )
-    
-    return render_template_string(
-        HTML_TEMPLATE,
-        view='server',
-        server_id=guild_id,
-        server_stats=data['server_stats'],
-        server_users=data['server_users'],
-        recent_interactions=data['recent_interactions'],
-        server_usage_data=data['server_usage_data'],
-        now=datetime.utcnow()
-    )
+    except Exception as e:
+        import traceback
+        error_msg = f"Error loading server data: {str(e)}\n\n{traceback.format_exc()}"
+        return f"<pre style='color: red; background: #0d1117; padding: 20px;'>{error_msg}</pre>", 500
 
 @app.route('/api/stats')
 def api_stats():
     """API endpoint for stats"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    data = loop.run_until_complete(get_db_data())
-    return jsonify(data['stats'])
+    try:
+        data = run_async(get_db_data())
+        return jsonify(data['stats'])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
