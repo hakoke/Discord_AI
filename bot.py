@@ -1403,7 +1403,7 @@ Now decide: "{message.content}" -> """
         
         if wants_image_edit:
             # AI decides if this is a style transformation (use generation) or actual editing (use edit API)
-            def decide_edit_vs_generate():
+            async def decide_edit_vs_generate():
                 """AI decides if request needs style transformation (generate) or actual editing (edit API)"""
                 decision_prompt = f"""User wants to modify an image they provided. Their request: "{message.content}"
 
