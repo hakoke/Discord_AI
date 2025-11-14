@@ -5,7 +5,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fuzzywuzzy import fuzz
 import re
 import io
@@ -318,9 +318,11 @@ else:
 async def search_internet(query: str) -> str:
     """Search the internet using Serper API"""
     if not SERPER_API_KEY:
+        print("⚠️  [SEARCH] SERPER_API_KEY not configured")
         return "Internet search is not configured."
     
     try:
+        print(f"🔍 [SEARCH] Searching for: {query[:100]}...")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 'https://google.serper.dev/search',
@@ -339,18 +341,28 @@ async def search_internet(query: str) -> str:
                         answer = data['answerBox'].get('answer') or data['answerBox'].get('snippet', '')
                         if answer:
                             results.append(f"Quick Answer: {answer}")
+                            print(f"✅ [SEARCH] Found answer box: {answer[:100]}...")
                     
                     # Add organic results
+                    organic_count = 0
                     for item in data.get('organic', [])[:5]:
                         title = item.get('title', '')
                         snippet = item.get('snippet', '')
                         results.append(f"• {title}: {snippet}")
+                        organic_count += 1
                     
-                    return "\n".join(results) if results else "No results found."
+                    result_text = "\n".join(results) if results else "No results found."
+                    print(f"✅ [SEARCH] Found {organic_count} organic results, answer box: {'Yes' if 'answerBox' in data else 'No'}")
+                    print(f"📄 [SEARCH] Results preview: {result_text[:200]}...")
+                    return result_text
                 else:
+                    error_text = await response.text()
+                    print(f"❌ [SEARCH] Failed with status {response.status}: {error_text[:200]}")
                     return "Search failed."
     except Exception as e:
-        print(f"Search error: {e}")
+        print(f"❌ [SEARCH] Error: {e}")
+        import traceback
+        print(f"❌ [SEARCH] Traceback: {traceback.format_exc()}")
         return "Search error occurred."
 
 async def generate_image(prompt: str, num_images: int = 1) -> list:
@@ -1010,6 +1022,14 @@ User: "how do I build [complex thing]" → You: Step-by-step guide
 
 KEY: Let the question complexity decide length. Greetings = short. Technical help = as long as needed.
 
+CURRENT DATE AND TIME:
+{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ({datetime.now(timezone.utc).strftime('%A, %B %d, %Y at %I:%M %p UTC')})
+- Use this when answering questions about "today", "now", "latest", "recent", or time-sensitive topics
+- When searching, you know what "latest" means relative to this date
+- When analyzing images, you can reference when they might have been taken relative to now
+- Be aware of the current date when discussing events, news, or time-based information
+- This is the current moment in time - use it to understand temporal context
+
 TONE RULES:
 - Start with empathy and curiosity
 - Never insult, mock, or swear at the user
@@ -1143,8 +1163,14 @@ Now decide: "{message.content}" -> """
         if decide_if_search_needed():
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
             search_query = message.content
+            search_start = time.time()
             search_results = await search_internet(search_query)
-            consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
+            search_time = time.time() - search_start
+            print(f"⏱️  [{username}] Search completed in {search_time:.2f}s")
+            if search_results and search_results != "Internet search is not configured.":
+                consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
+            else:
+                print(f"⚠️  [{username}] Search returned no results or was not configured")
         
         # Decide which model to use (thread-safe)
         def decide_model():
