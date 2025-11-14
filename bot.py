@@ -1339,14 +1339,17 @@ Now decide: "{message.content}" -> """
                 print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
             
             try:
-                response = image_model.generate_content(content_parts)
+                # Run in executor to prevent blocking Discord heartbeat
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, image_model.generate_content, content_parts)
             except Exception as e:
                 # Handle rate limits on image generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
                     print("⚠️  Retrying image analysis with fallback model")
                     image_model = get_vision_model()  # Will use fallback automatically
-                    response = image_model.generate_content(content_parts)
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(None, image_model.generate_content, content_parts)
                 else:
                     raise  # Re-raise if not a rate limit error
             finally:
@@ -1358,14 +1361,17 @@ Now decide: "{message.content}" -> """
                         print(f"⚠️  [GEMINI] Could not delete upload {getattr(uploaded, 'name', '?')}: {cleanup_error}")
         else:
             try:
-                response = active_model.generate_content(response_prompt)
+                # Run in executor to prevent blocking Discord heartbeat
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, active_model.generate_content, response_prompt)
             except Exception as e:
                 # Handle rate limits on text generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
                     print("⚠️  Retrying text generation with fallback model")
                     active_model = get_fast_model()  # Will use fallback automatically
-                    response = active_model.generate_content(response_prompt)
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(None, active_model.generate_content, response_prompt)
                 else:
                     raise  # Re-raise if not a rate limit error
         
