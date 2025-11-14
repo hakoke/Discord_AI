@@ -756,7 +756,7 @@ HTML_TEMPLATE = """
     <script>
         // Server ban management (only on server detail page)
         {% if view == 'server' %}
-        const guildId = '{{ server_id|replace("'", "\\'")|replace('"', '\\"') }}';
+        const guildId = String({{ server_id }});
         
         async function loadBanStatus() {
             try {
@@ -799,12 +799,64 @@ HTML_TEMPLATE = """
                     
                     // Show unban button
                     if (banControls) {
-                        banControls.innerHTML = '<button class="unban-btn" onclick="unbanServer()">✅ Unban Server</button>';
+                        banControls.innerHTML = '';
+                        const unbanBtn = document.createElement('button');
+                        unbanBtn.className = 'unban-btn';
+                        unbanBtn.textContent = '✅ Unban Server';
+                        unbanBtn.onclick = unbanServer;
+                        banControls.appendChild(unbanBtn);
                     }
                 } else {
                     // Show ban button
                     if (banControls) {
-                        banControls.innerHTML = '<div class="ban-dropdown"><button class="ban-btn" onclick="toggleBanMenu()">🚫 Remove AI from Server</button><div id="ban-menu" class="ban-menu"><div class="ban-option" onclick="banServer(\'temporary\', 7)">Temporary (7 days)</div><div class="ban-option" onclick="banServer(\'temporary\', 30)">Temporary (30 days)</div><div class="ban-option" onclick="banServerCustom()">Temporary (Custom days)</div><div class="ban-option permanent" onclick="banServer(\'permanent\')">Permanent (Forever)</div><input type="text" id="ban-reason" class="ban-reason-input" placeholder="Optional reason (leave empty for no reason)"></div></div>';
+                        banControls.innerHTML = '';
+                        
+                        const dropdown = document.createElement('div');
+                        dropdown.className = 'ban-dropdown';
+                        
+                        const banBtn = document.createElement('button');
+                        banBtn.className = 'ban-btn';
+                        banBtn.textContent = '🚫 Remove AI from Server';
+                        banBtn.onclick = toggleBanMenu;
+                        dropdown.appendChild(banBtn);
+                        
+                        const menu = document.createElement('div');
+                        menu.id = 'ban-menu';
+                        menu.className = 'ban-menu';
+                        
+                        const option7 = document.createElement('div');
+                        option7.className = 'ban-option';
+                        option7.textContent = 'Temporary (7 days)';
+                        option7.onclick = () => banServer('temporary', 7);
+                        menu.appendChild(option7);
+                        
+                        const option30 = document.createElement('div');
+                        option30.className = 'ban-option';
+                        option30.textContent = 'Temporary (30 days)';
+                        option30.onclick = () => banServer('temporary', 30);
+                        menu.appendChild(option30);
+                        
+                        const optionCustom = document.createElement('div');
+                        optionCustom.className = 'ban-option';
+                        optionCustom.textContent = 'Temporary (Custom days)';
+                        optionCustom.onclick = banServerCustom;
+                        menu.appendChild(optionCustom);
+                        
+                        const optionPermanent = document.createElement('div');
+                        optionPermanent.className = 'ban-option permanent';
+                        optionPermanent.textContent = 'Permanent (Forever)';
+                        optionPermanent.onclick = () => banServer('permanent');
+                        menu.appendChild(optionPermanent);
+                        
+                        const reasonInput = document.createElement('input');
+                        reasonInput.type = 'text';
+                        reasonInput.id = 'ban-reason';
+                        reasonInput.className = 'ban-reason-input';
+                        reasonInput.placeholder = 'Optional reason (leave empty for no reason)';
+                        menu.appendChild(reasonInput);
+                        
+                        dropdown.appendChild(menu);
+                        banControls.appendChild(dropdown);
                     }
                     if (banStatus) {
                         banStatus.innerHTML = '';
