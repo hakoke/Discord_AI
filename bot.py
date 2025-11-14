@@ -381,7 +381,9 @@ class RateLimitedQueue:
             'filter',
             'safety setting',
             'blocked by safety',
-            'content filter'
+            'content filter',
+            'image_bytes or gcs_uri must be provided',  # This ValueError indicates blocked content
+            'either image_bytes or gcs_uri must be provided'
         ]
         return any(keyword in error_str for keyword in policy_keywords)
     
@@ -749,13 +751,8 @@ async def generate_image(prompt: str, num_images: int = 1) -> list:
         print(f"❌ [IMAGE GEN] Error: {e}")
         import traceback
         print(f"❌ [IMAGE GEN] Traceback:\n{traceback.format_exc()}")
-        # Re-raise with user-friendly message if it's a content policy error
-        error_str = str(e).lower()
-        if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful']):
-            raise Exception(
-                "I can't generate that image as it violates content safety policies. "
-                "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
-            )
+        # Don't re-raise - the error message should already be user-friendly
+        # Just re-raise as-is (it might already have a user-friendly message)
         raise
 
 def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
@@ -807,21 +804,64 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
             raise last_error or Exception("No Imagen generate model could be loaded.")
         
         print(f"📡 [IMAGE GEN] Calling Imagen API (generating {num_images} image(s))...")
-        images_response = model.generate_images(
-            prompt=prompt,
-            number_of_images=num_images,
-            aspect_ratio="1:1",
-            safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
-            person_generation="allow_all",
-        )
-        print(f"✅ [IMAGE GEN] API call successful, received response")
+        try:
+            images_response = model.generate_images(
+                prompt=prompt,
+                number_of_images=num_images,
+                aspect_ratio="1:1",
+                safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
+                person_generation="allow_all",
+            )
+            print(f"✅ [IMAGE GEN] API call successful, received response")
+        except Exception as api_error:
+            error_str = str(api_error).lower()
+            # Check if it's a content policy/safety error
+            if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited', 'filter']):
+                raise Exception(
+                    "I can't generate that image as it violates content safety policies. "
+                    "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
+                )
+            # Re-raise other errors
+            raise
+        
+        # Check if we got any images back
+        if not hasattr(images_response, 'images') or not images_response.images or len(images_response.images) == 0:
+            raise Exception(
+                "The image generation was blocked by content safety filters. "
+                "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
+            )
         
         print(f"🖼️  [IMAGE GEN] Converting {len(images_response.images)} image(s) to PIL format...")
         images = []
         for idx, image in enumerate(images_response.images):
-            # Convert from Vertex AI image to PIL Image
-            images.append(image._pil_image)
-            print(f"   ✓ Image {idx + 1}/{len(images_response.images)} converted")
+            try:
+                # Try to get PIL image - check if image has the required data
+                if hasattr(image, '_pil_image'):
+                    images.append(image._pil_image)
+                    print(f"   ✓ Image {idx + 1}/{len(images_response.images)} converted")
+                elif hasattr(image, '_image_bytes'):
+                    # Fallback: convert from bytes
+                    from io import BytesIO
+                    pil_image = Image.open(BytesIO(image._image_bytes))
+                    images.append(pil_image)
+                    print(f"   ✓ Image {idx + 1}/{len(images_response.images)} converted (from bytes)")
+                else:
+                    print(f"   ⚠️  Image {idx + 1} has no accessible image data")
+            except Exception as img_error:
+                print(f"   ❌ Failed to convert image {idx + 1}: {img_error}")
+                # If it's a ValueError about missing image_bytes/gcs_uri, it means the image was blocked
+                if 'image_bytes' in str(img_error).lower() or 'gcs_uri' in str(img_error).lower():
+                    raise Exception(
+                        "The image generation was blocked by content safety filters. "
+                        "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
+                    )
+                raise
+        
+        if len(images) == 0:
+            raise Exception(
+                "No images could be generated. This may be due to content safety filters. "
+                "Please try a different image request."
+            )
         
         print(f"🎉 [IMAGE GEN] Successfully generated {len(images)} image(s)!")
         return images
@@ -2996,7 +3036,15 @@ Now decide: "{message.content}" -> """
                     # User can see the images directly, no need for extra text
             except Exception as e:
                 print(f"Image generation error: {e}")
-                ai_response += "\n\n(Image generation failed)"
+                error_str = str(e).lower()
+                # Provide user-friendly message for content policy violations
+                if any(keyword in error_str for keyword in [
+                    'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+                    'image_bytes or gcs_uri must be provided', 'content safety filters', 'blocked by content safety'
+                ]):
+                    ai_response += "\n\n(I can't generate that image as it violates content safety policies. Please try a different image request.)"
+                else:
+                    ai_response += "\n\n(Image generation failed - please try again)"
         
         # Store interaction in memory
         await memory.store_interaction(
@@ -3026,8 +3074,12 @@ Now decide: "{message.content}" -> """
         # Provide user-friendly error messages
         error_str = str(e).lower()
         
-        # Content policy violations
-        if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited']):
+        # Content policy violations (including ValueError about missing image data)
+        if any(keyword in error_str for keyword in [
+            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+            'image_bytes or gcs_uri must be provided', 'either image_bytes or gcs_uri must be provided',
+            'content safety filters', 'blocked by content safety', 'was blocked by content safety'
+        ]):
             user_message = (
                 "I can't fulfill that request as it violates content safety policies. "
                 "Please try rephrasing your request to avoid inappropriate, harmful, or prohibited content."
