@@ -1624,42 +1624,57 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
 
     return cleaned_text.strip(), generated_documents
 
-async def get_conversation_context(message: discord.Message, limit: int = 10) -> list:
-    """Get conversation context from the channel"""
+async def get_conversation_context(message: discord.Message, limit: int = 10, include_attachments: bool = False) -> list:
+    """Get conversation context from the channel
+    
+    Args:
+        message: The Discord message
+        limit: Number of messages to fetch
+        include_attachments: If True, include attachment metadata and optionally process documents/images
+    """
     context_messages = []
     
     # If replying to a message, get that thread
     if message.reference:
         try:
             replied_msg = await message.channel.fetch_message(message.reference.message_id)
-            context_messages.append({
+            msg_data = {
                 'author': replied_msg.author.display_name,
                 'user_id': str(replied_msg.author.id),
                 'content': replied_msg.content,
                 'timestamp': replied_msg.created_at.isoformat()
-            })
+            }
+            if include_attachments and replied_msg.attachments:
+                msg_data['attachments'] = [{'filename': att.filename, 'url': att.url, 'content_type': att.content_type} for att in replied_msg.attachments]
+            context_messages.append(msg_data)
             
             # Get messages around the replied message
             async for msg in message.channel.history(limit=limit, around=replied_msg.created_at):
                 if msg.id != replied_msg.id and msg.id != message.id:
-                    context_messages.append({
+                    msg_data = {
                         'author': msg.author.display_name,
                         'user_id': str(msg.author.id),
                         'content': msg.content,
                         'timestamp': msg.created_at.isoformat()
-                    })
+                    }
+                    if include_attachments and msg.attachments:
+                        msg_data['attachments'] = [{'filename': att.filename, 'url': att.url, 'content_type': att.content_type} for att in msg.attachments]
+                    context_messages.append(msg_data)
         except:
             pass
     else:
         # Get recent messages
         async for msg in message.channel.history(limit=limit):
             if msg.id != message.id:
-                context_messages.append({
+                msg_data = {
                     'author': msg.author.display_name,
                     'user_id': str(msg.author.id),
                     'content': msg.content,
                     'timestamp': msg.created_at.isoformat()
-                })
+                }
+                if include_attachments and msg.attachments:
+                    msg_data['attachments'] = [{'filename': att.filename, 'url': att.url, 'content_type': att.content_type} for att in msg.attachments]
+                context_messages.append(msg_data)
     
     return list(reversed(context_messages))
 
@@ -1676,11 +1691,93 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
         
         print(f"⏱️  [{username}] Starting response generation...")
         
-        # Get conversation context
+        # Check if user wants a conversation summary
+        MAX_SUMMARY_MESSAGES = 200  # Maximum messages to fetch for summary
+        DEFAULT_SUMMARY_MESSAGES = 50  # Default if no number specified
+        
+        def detect_summary_request():
+            """AI-driven: Detect if user wants summary and extract message count"""
+            message_text = (message.content or "").strip().lower()
+            
+            # Quick heuristic check first
+            summary_keywords = ['summarize', 'summary', 'summarise', 'recap', 'recap the', 'what happened', 'what did we talk about']
+            is_summary_request = any(keyword in message_text for keyword in summary_keywords)
+            
+            if not is_summary_request:
+                return (False, 10)  # Normal context limit
+            
+            # Extract number from request using AI
+            extract_prompt = f"""User message: "{message.content}"
+
+The user wants a summary of conversation messages. Extract how many messages they want to summarize.
+
+Examples:
+"summarize the convo" -> 50 (default)
+"summarize last 50 messages" -> 50
+"summarize last 100 messages" -> 100
+"summarize the conversation" -> 50 (default)
+"recap the last 60 messages" -> 60
+"what did we talk about in the last 30 messages" -> 30
+
+If no number is specified, use {DEFAULT_SUMMARY_MESSAGES} as default.
+Maximum allowed: {MAX_SUMMARY_MESSAGES}
+
+Return ONLY a JSON object like:
+{{"message_count": 50}}
+
+User message: "{message.content}" -> """
+            
+            try:
+                decision_model = get_fast_model()
+                response = decision_model.generate_content(extract_prompt)
+                raw_text = (response.text or "").strip()
+                match = re.search(r'\{[\s\S]*\}', raw_text)
+                if match:
+                    data = json.loads(match.group(0))
+                    count = int(data.get("message_count", DEFAULT_SUMMARY_MESSAGES))
+                    # Clamp to max
+                    count = min(max(1, count), MAX_SUMMARY_MESSAGES)
+                    return (True, count)
+            except Exception as e:
+                print(f"⚠️  Summary detection error: {e}")
+            
+            # Fallback: use default
+            return (True, DEFAULT_SUMMARY_MESSAGES)
+        
+        wants_summary, summary_message_count = detect_summary_request()
+        
+        # Get conversation context (with dynamic limit for summaries, include attachments for summaries)
         context_start = time.time()
-        context_messages = await get_conversation_context(message)
+        context_limit = summary_message_count if wants_summary else 10
+        context_messages = await get_conversation_context(message, limit=context_limit, include_attachments=wants_summary)
         context_time = time.time() - context_start
-        print(f"  ⏱️  Context fetched: {context_time:.2f}s")
+        print(f"  ⏱️  Context fetched: {context_time:.2f}s ({len(context_messages)} messages)")
+        
+        # Process documents/images from context messages if summarizing
+        context_documents = []
+        context_images_info = []
+        if wants_summary:
+            print(f"  📎 Processing attachments from {len(context_messages)} messages for summary...")
+            for ctx_msg in context_messages:
+                if 'attachments' in ctx_msg:
+                    for att in ctx_msg['attachments']:
+                        filename = att.get('filename', '')
+                        if filename:
+                            ext = filename.lower().split('.')[-1] if '.' in filename else ''
+                            if ext in ['pdf', 'docx', 'txt']:
+                                context_documents.append({
+                                    'filename': filename,
+                                    'author': ctx_msg['author'],
+                                    'timestamp': ctx_msg['timestamp']
+                                })
+                            elif ext in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
+                                context_images_info.append({
+                                    'filename': filename,
+                                    'author': ctx_msg['author'],
+                                    'timestamp': ctx_msg['timestamp']
+                                })
+            if context_documents or context_images_info:
+                print(f"  📎 Found {len(context_documents)} document(s) and {len(context_images_info)} image(s) in conversation history")
         
         # Get memory for the CURRENT user (detailed)
         memory_start = time.time()
@@ -2123,6 +2220,20 @@ If you need to search the internet for current information, mention it.{thinking
         else:
             response_prompt += "\n\nOffer a helpful response with the amount of detail that feels appropriate—enough to be useful without overwhelming them."
         
+        if wants_summary:
+            # Add instructions for conversation summarization
+            attachment_info = ""
+            if context_documents:
+                doc_list = ", ".join([f"{doc['filename']} (shared by {doc['author']})" for doc in context_documents])
+                attachment_info += f"\n- Documents shared in conversation: {doc_list}"
+            if context_images_info:
+                img_list = ", ".join([f"{img['filename']} (shared by {img['author']})" for img in context_images_info[:10]])  # Limit to 10 for brevity
+                if len(context_images_info) > 10:
+                    img_list += f" and {len(context_images_info) - 10} more"
+                attachment_info += f"\n- Images shared in conversation: {img_list}"
+            
+            response_prompt += f"\n\nCRITICAL: CONVERSATION SUMMARY REQUEST\n- The user wants you to summarize the last {len(context_messages)} messages from the conversation.{attachment_info}\n- Provide a clear, organized summary of the key topics, decisions, and important points discussed.\n- Group related topics together and highlight any action items or conclusions.\n- Mention any documents or images that were shared and what they were about (if relevant to the conversation).\n- Be concise but comprehensive - capture the essence of the conversation.\n- If there are multiple people in the conversation, note who said what when relevant.\n- Format the summary in a readable way (use bullet points or sections if helpful)."
+        
         if wants_image and not image_search_results:
             # Add instructions for image generation
             response_prompt += f"\n\nCRITICAL: IMAGE GENERATION REQUEST\n- The user wants you to GENERATE/CREATE images (up to {MAX_GENERATED_IMAGES} images maximum).\n- ABSOLUTELY DO NOT ask clarification questions. Generate the images immediately based on your best interpretation.\n- If details are missing, use your creativity to fill in reasonable details automatically (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed - but for now, just generate what you think they want.\n- Keep your response very brief (1-2 sentences max) - just confirm what you're generating, then the images will be automatically created and attached.\n- DO NOT ask questions like 'what should they wear?' or 'what setting?' - just decide and generate."
@@ -2501,10 +2612,8 @@ async def on_message(message: discord.Message):
         should_respond = True
         force_response = True
     
-    # For other messages, let AI decide
-    elif message.channel.type == discord.ChannelType.text:
-        should_respond = True
-        force_response = False
+    # Only respond if mentioned or replied to - don't monitor all messages
+    # (Removed the "let AI decide for all messages" section)
     
     if should_respond:
         async with message.channel.typing():
