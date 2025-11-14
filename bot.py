@@ -718,8 +718,12 @@ CURRENT CONVERSATION CONTEXT:
                     try:
                         image_data = await download_image(attachment.url)
                         if image_data:
+                            mime_type = attachment.content_type
+                            if not mime_type:
+                                ext = attachment.filename.split('.')[-1].lower()
+                                mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
                             image_parts.append({
-                                'mime_type': attachment.content_type,
+                                'mime_type': mime_type,
                                 'data': image_data
                             })
                     except Exception as e:
@@ -736,8 +740,12 @@ CURRENT CONVERSATION CONTEXT:
                             try:
                                 image_data = await download_image(attachment.url)
                                 if image_data:
+                                    mime_type = attachment.content_type
+                                    if not mime_type:
+                                        ext = attachment.filename.split('.')[-1].lower()
+                                        mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
                                     image_parts.append({
-                                        'mime_type': attachment.content_type,
+                                        'mime_type': mime_type,
                                         'data': image_data
                                     })
                             except Exception as e:
@@ -890,7 +898,12 @@ If you need to search the internet for current information, mention it.{thinking
         # Add images to prompt if present
         if image_parts:
             response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them."
-            content_parts = [response_prompt] + [genai.types.Part.from_bytes(data=img['data'], mime_type=img['mime_type']) for img in image_parts]
+            content_parts = [response_prompt]
+            for img in image_parts:
+                content_parts.append({
+                    "mime_type": img['mime_type'],
+                    "data": img['data'],
+                })
             
             # Decide which model to use for images
             # If we already decided on smart model (complex reasoning), use it for images too
