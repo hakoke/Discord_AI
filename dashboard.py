@@ -6,7 +6,7 @@ from flask import Flask, render_template_string, jsonify, request
 import asyncpg
 import os
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import json
 
 app = Flask(__name__)
@@ -14,8 +14,14 @@ app = Flask(__name__)
 # Add custom Jinja2 filters
 @app.template_filter('tojson')
 def tojson_filter(obj):
-    """Convert object to JSON string"""
-    return json.dumps(obj)
+    """Convert object to JSON string, handling date/datetime objects"""
+    def json_serial(obj):
+        """JSON serializer for objects not serializable by default json code"""
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        raise TypeError(f"Type {type(obj)} not serializable")
+    
+    return json.dumps(obj, default=json_serial)
 
 # Main HTML Template
 HTML_TEMPLATE = """
@@ -646,11 +652,29 @@ async def get_db_data():
             LIMIT 10
         ''')
         
+        # Convert date objects (not datetime) to strings for JSON serialization
+        # Keep datetime objects for template .strftime() calls
+        def convert_dates(obj):
+            """Recursively convert date objects (not datetime) to ISO format strings"""
+            if isinstance(obj, dict):
+                return {k: convert_dates(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_dates(item) for item in obj]
+            elif isinstance(obj, date) and not isinstance(obj, datetime):
+                # Convert date objects to strings (for chart data)
+                return obj.isoformat()
+            # Keep datetime objects for template .strftime()
+            return obj
+        
+        servers_list = [dict(s) for s in servers]
+        usage_data_list = [dict(u) for u in usage_data]
+        top_users_list = [dict(u) for u in top_users]
+        
         return {
             'stats': stats,
-            'servers': [dict(s) for s in servers],
-            'usage_data': [dict(u) for u in usage_data],
-            'top_users': [dict(u) for u in top_users],
+            'servers': convert_dates(servers_list),
+            'usage_data': convert_dates(usage_data_list),
+            'top_users': convert_dates(top_users_list),
         }
     finally:
         await conn.close()
@@ -743,11 +767,29 @@ async def get_server_data(guild_id: str):
             ORDER BY date ASC
         ''', guild_id)
         
+        # Convert date objects (not datetime) to strings for JSON serialization
+        # Keep datetime objects for template .strftime() calls
+        def convert_dates(obj):
+            """Recursively convert date objects (not datetime) to ISO format strings"""
+            if isinstance(obj, dict):
+                return {k: convert_dates(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_dates(item) for item in obj]
+            elif isinstance(obj, date) and not isinstance(obj, datetime):
+                # Convert date objects to strings (for chart data)
+                return obj.isoformat()
+            # Keep datetime objects for template .strftime()
+            return obj
+        
+        server_stats_dict = dict(server_stats)
+        recent_interactions_list = [dict(r) for r in recent_interactions]
+        server_usage_data_list = [dict(u) for u in server_usage_data]
+        
         return {
-            'server_stats': dict(server_stats),
-            'server_users': users_with_memory,
-            'recent_interactions': [dict(r) for r in recent_interactions],
-            'server_usage_data': [dict(u) for u in server_usage_data],
+            'server_stats': convert_dates(server_stats_dict),
+            'server_users': convert_dates(users_with_memory),
+            'recent_interactions': convert_dates(recent_interactions_list),
+            'server_usage_data': convert_dates(server_usage_data_list),
         }
     finally:
         await conn.close()
