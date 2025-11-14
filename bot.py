@@ -190,7 +190,7 @@ SMART_MODEL = 'gemini-2.5-pro'  # SMARTEST MODEL - Deep reasoning, coding, compl
 VISION_MODEL = 'gemini-2.0-flash-exp'  # For everyday/simple image analysis
 
 # Rate limit fallback system
-RATE_LIMIT_FALLBACK = 'gemini-1.5-flash'  # Fallback when exp model is rate limited
+RATE_LIMIT_FALLBACK = 'gemini-2.0-flash'  # Fallback when exp model is rate limited
 rate_limit_status = {
     'fast_model_limited': False,
     'limited_since': None,
