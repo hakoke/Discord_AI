@@ -29,35 +29,50 @@ try:
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
     
-    # Check if credentials JSON is in environment variable or file
-    credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON') or os.getenv('credentials json')
-    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-    
-    if credentials_json:
-        # Write JSON to temporary file
-        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json')
-        temp_file.write(credentials_json)
-        temp_file.close()
+    # PRIORITY 1: Check for local credentials file (committed to private repo)
+    credentials_path = None
+    if os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
+        credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
+        print(f"✅ Using local credentials file from repo: {credentials_path}")
         
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file.name
-        credentials_path = temp_file.name
-        print(f"✅ Created credentials file from environment variable")
-        print(f"   - Temp file path: {temp_file.name}")
-        print(f"   - Credentials JSON length: {len(credentials_json)} chars")
-        
-        # Verify the file was written correctly
+        # Verify the file is valid JSON
         try:
-            with open(temp_file.name, 'r') as f:
+            with open(credentials_path, 'r') as f:
                 verify_json = json.load(f)
                 print(f"   - JSON keys: {list(verify_json.keys())}")
-                print(f"   - Project ID in JSON: {verify_json.get('project_id', 'NOT FOUND')}")
+                print(f"   - Project ID: {verify_json.get('project_id', 'NOT FOUND')}")
+                print(f"   - Client email: {verify_json.get('client_email', 'NOT FOUND')}")
         except Exception as verify_error:
             print(f"   ⚠️ Could not verify credentials file: {verify_error}")
+    
+    # PRIORITY 2: Check environment variable for credentials path
+    elif os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
+        credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        print(f"✅ Using credentials path from environment: {credentials_path}")
+    
+    # PRIORITY 3: Check for credentials JSON string (legacy support)
+    elif os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON') or os.getenv('credentials json'):
+        credentials_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON') or os.getenv('credentials json')
+        print(f"⚠️  Found credentials JSON in environment variable (not recommended)")
+        print(f"   - Attempting to parse and write to temp file...")
+        
+        try:
+            # Parse JSON first to validate and remove control characters
+            parsed_json = json.loads(credentials_json)
             
-    elif not credentials_path and os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
-        credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
-        print(f"✅ Using local credentials file: {credentials_path}")
+            # Write properly formatted JSON to temp file
+            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json')
+            json.dump(parsed_json, temp_file, indent=2)
+            temp_file.close()
+            
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file.name
+            credentials_path = temp_file.name
+            print(f"   ✅ Created valid credentials file: {temp_file.name}")
+            print(f"   - Project ID: {parsed_json.get('project_id', 'NOT FOUND')}")
+        except json.JSONDecodeError as json_error:
+            print(f"   ❌ Failed to parse credentials JSON: {json_error}")
+            credentials_path = None
     
     if credentials_path:
         print(f"🔧 Initializing Vertex AI at startup...")

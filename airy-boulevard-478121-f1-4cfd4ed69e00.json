@@ -1,0 +1,13 @@
+ {
+  "type": "service_account",
+  "project_id": "airy-boulevard-478121-f1",
+  "private_key_id": "4cfd4ed69e00c949249d0b2e77426149b852ead3",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCb0WETxigk6uXh\nH6MYTbx3DkYa3SYgkMRxqJh90X9Mwy6Sw2yUSj0JyOAW21JabWJ7bAqQvAQ/wud3\nszJWTXsDZ9IQH9aqVEUE9bjAZTQaSbfgVuunMvGlmLJ2e5KMKzUPoSM5ZfuUgbhq\ngS7JJwP33fuqtkD6M/wKnZ15FcU1rqPXDFDbgvoGrtoNHJf2HHqLu9xhZCaKoPmU\n820MSs0Bns04g3aOoRvAbdyLIz7k39O0fCPv06Yf00zDd8CiOFYaWmL3GptiCQLA\nfeV3ZQwFL+7nJK2PGNXeum+kLtjbUQsc7KxmxiMgNp4CtOH4lPGzwYBEeIiC1n3D\ngHcEUyblAgMBAAECggEAAYJU5gRmGpjQlRM/LI6CB6kBTrzCvKg8vjbBnN9ENnp1\nnOZaBdK6F036GGcxAJLR8cf+SltCRtCVZT6Bjxu6nRR76U+u3ErrCA5N9buvCexy\nn7pC3I9Fe3zBEvXZCu1+gkI0YlK89SY2yhGWdcKC7/s0mYMqmgQ3uJU3DpKCcaXV\ncjaD1iQOiluALzMTqEh7tyVEX0vlPiYzn0icdxo1/jQQoJjEllT6NjoryYb6Cnz1\nnSKyKvmEYnVMrXW8AkDsbJ36bOlJlUYU3thfEHmi6jCPd1Ti7+4fimsUp5/07Q8G\nVU1YP9LVmfm/R/hNrL63RusdrNURqF1yzidlw13ZkQKBgQDRVcJSSJ3t0GBwnbIY\ngu3pplds4kMQJeiqGa8Jbm0K8vtwEWm6rDUhYt9ZxoZR3OEMIkSJpiMEC4W3W/kV\nBuVmXweSZn/6C1xYkKN7F+rdxzAGG3TGhxkKPuIBNFQeq6MHQjwWavjy9hgfXLVP\nHtrx5jGbQ55QG3uBts9T7yxrqQKBgQC+jYdHeyBXG/cba6ZXENbMPaYncny/4O8h\nUp+v+ay7TB8E1n6BYNI7rtOU1mRrAWr3zqcDlCrpWlgzinrGG0wGFYk2/aW9RGGO\n1lO6NvyXNOtex4rvzr/1WfHHtH9+iP0UFoLZrHANIwNyPntB01k5dGTTWw0ezdFu\nGftVv3pG3QKBgCwkpYGshoEru+qDlpbMpVbsGOuBGxtAozubhum6O4xfiN4tDdqr\njdiofOj1kEWbCmoAn+tW+XNU6rGr126zsZRQ3cvliX80/hg/B/phJMn3wwzGpW1n\n98PNVuNiIYsGLq7NLNadYDn740JZznIM06bHIBbZv3ytDvJfloDgosFhAoGBAKGD\nGn/nCBFtnbS7OQGhPz9cncHf04db47SN8NZavSMAMWaLXCzTYT6/P41vbywXxpAG\ntB9fbkPelNYS8V+LcZPSmzxmIB5doIdOeSdkRhLwAvSSE9yRlLkkpL/N6SbafBCT\nyBMyisNHwzsJZLX1qzH8yx0ult9eOr6k/RjANKdtAoGAbWcA5t7PB0cxLbdDqn6O\nFen1XEgoj3JdoadPJA48yDlzFfq66aj3drTp28i6w9nLGPvb80II5hNsYb80zvsy\nivNn0Y83m0QhKe5hhracOe1Tn9oHxmL4LF9q4eRBWA7q5ztJeHcTyLangIz8Kj2p\nBs+HlxC5u3cY7+GV/HveMCY=\n-----END PRIVATE KEY-----\n",
+  "client_email": "servermate@airy-boulevard-478121-f1.iam.gserviceaccount.com",
+  "client_id": "112066104935360860393",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/servermate%40airy-boulevard-478121-f1.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
