@@ -2292,8 +2292,9 @@ Now decide: "{message.content}" -> """
             selected_numbers = extract_image_numbers(raw_ai_response)
             if selected_numbers:
                 print(f"🖼️  [{username}] AI selected images: {selected_numbers}")
-                # Import PIL Image here to ensure it's in scope
+                # Import PIL Image and BytesIO here to ensure they're in scope
                 from PIL import Image as PILImage
+                from io import BytesIO
                 # Download selected images
                 for num in selected_numbers:
                     idx = num - 1  # Convert to 0-based index
