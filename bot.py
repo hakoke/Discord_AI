@@ -2292,6 +2292,8 @@ Now decide: "{message.content}" -> """
             selected_numbers = extract_image_numbers(raw_ai_response)
             if selected_numbers:
                 print(f"🖼️  [{username}] AI selected images: {selected_numbers}")
+                # Import PIL Image here to ensure it's in scope
+                from PIL import Image as PILImage
                 # Download selected images
                 for num in selected_numbers:
                     idx = num - 1  # Convert to 0-based index
@@ -2302,10 +2304,10 @@ Now decide: "{message.content}" -> """
                             if img_bytes:
                                 # Try to open as PIL Image to validate
                                 try:
-                                    img = Image.open(BytesIO(img_bytes))
+                                    img = PILImage.open(BytesIO(img_bytes))
                                     # Convert to RGB if needed (for JPEG compatibility)
                                     if img.mode in ('RGBA', 'LA', 'P'):
-                                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                                        rgb_img = PILImage.new('RGB', img.size, (255, 255, 255))
                                         if img.mode == 'P':
                                             img = img.convert('RGBA')
                                         rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
@@ -2379,8 +2381,8 @@ Now decide: "{message.content}" -> """
                 import traceback
                 print(f"❌ [IMAGE REMAKE] Traceback:\n{traceback.format_exc()}")
                 ai_response += "\n\n(Tried to remake your image but something went wrong)"
-        elif wants_image:
-            # Generate new image
+        elif wants_image and not image_search_results:
+            # Generate new image (only if we're not using image search results)
             try:
                 # Extract the prompt from the message
                 image_prompt = message.content
