@@ -533,6 +533,7 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
         # Edit the image
         print(f"📡 [IMAGE EDIT] Calling Imagen edit API...")
         print(f"   - Prompt: {prompt[:100]}...")
+        print(f"   - Prompt length: {len(prompt)} chars")
         print(f"   - Edit mode: inpainting-insert")
         
         try:
@@ -571,6 +572,9 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
         # Fallback: generate a new image with the prompt
         print(f"🔄 [IMAGE EDIT] Attempting fallback to image generation...")
         try:
+            fallback_prompt = f"Based on the provided image: {prompt}"
+            print(f"🔄 [IMAGE EDIT] Fallback prompt: {fallback_prompt[:200]}...")
+            print(f"🔄 [IMAGE EDIT] Fallback prompt length: {len(fallback_prompt)} chars")
             vertexai.init(project=os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1'), 
                          location=os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1'))
             print(f"✅ [IMAGE EDIT] Fallback: Vertex AI re-initialized")
@@ -581,12 +585,14 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
             print(f"✅ [IMAGE EDIT] Fallback: Model loaded")
             
             images_response = model.generate_images(
-                prompt=f"Based on the provided image: {prompt}",
+                prompt=fallback_prompt,
                 number_of_images=1,
                 safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
                 person_generation="allow_all",
             )
             print(f"✅ [IMAGE EDIT] Fallback: Image generated")
+            if hasattr(images_response, 'images'):
+                print(f"✅ [IMAGE EDIT] Fallback: Images count {len(images_response.images)}")
             return images_response.images[0]._pil_image if images_response.images else None
         except Exception as fallback_error:
             print(f"❌ [IMAGE EDIT] Fallback also failed: {fallback_error}")
@@ -1402,6 +1408,8 @@ Now decide: "{message.content}" -> """
         generated_images = None
         
         if wants_image_edit:
+            print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
+            print(f"🛠️  [{username}] Attachments available for edit: {len(image_parts)} image(s)")
             # AI decides if this is a style transformation (use generation) or actual editing (use edit API)
             async def decide_edit_vs_generate():
                 """AI decides if request needs style transformation (generate) or actual editing (edit API)"""
@@ -1458,6 +1466,7 @@ Now decide: "{message.content}" -> """
                     return False  # Default to edit API if decision fails
             
             is_style_transformation = await decide_edit_vs_generate()
+            print(f"🛠️  [{username}] Edit decision: {'GENERATE' if is_style_transformation else 'EDIT'}")
             
             if is_style_transformation:
                 # For style transformations, use generation instead of editing
@@ -1474,12 +1483,23 @@ Now decide: "{message.content}" -> """
                         vision_model.generate_content,
                         [f"Describe this image in detail. What is shown in this image?", pil_image]
                     )
-                    image_description = analysis.text if hasattr(analysis, 'text') else ""
+                    analysis_text = ""
+                    if analysis is not None:
+                        if hasattr(analysis, 'text') and analysis.text:
+                            analysis_text = analysis.text.strip()
+                        else:
+                            analysis_text = str(analysis)
+                    print(f"🎨 [IMAGE EDIT] Vision analysis length: {len(analysis_text)} chars")
+                    print(f"🎨 [IMAGE EDIT] Vision analysis preview: {analysis_text[:200]}...")
+                    image_description = analysis_text
                     enhanced_prompt = f"{image_description}. {message.content}"
                     print(f"🎨 [IMAGE EDIT] Style transformation prompt: {enhanced_prompt[:200]}...")
                     generated_images = await generate_image(enhanced_prompt, num_images=1)
                     if generated_images:
+                        print(f"🎨 [IMAGE EDIT] Style transformation generated {len(generated_images)} image(s)")
                         ai_response += "\n\n*Generated transformed image based on your request*"
+                    else:
+                        print(f"⚠️  [IMAGE EDIT] Style transformation generation returned no images")
                 except Exception as gen_error:
                     print(f"❌ [IMAGE EDIT] Style transformation generation failed: {gen_error}")
                     ai_response += "\n\n(Tried to transform your image but something went wrong)"
@@ -1487,13 +1507,17 @@ Now decide: "{message.content}" -> """
                 # For actual editing (adding/removing parts), use edit API
                 try:
                     edit_prompt = message.content
-                    # Use the first image they provided
                     original_img_bytes = image_parts[0]['data']
+                    print(f"🖊️  [IMAGE EDIT] Proceeding with edit API")
+                    print(f"🖊️  [IMAGE EDIT] Edit prompt length: {len(edit_prompt)} chars")
+                    print(f"🖊️  [IMAGE EDIT] Base image size: {len(original_img_bytes)} bytes")
                     edited_img = await edit_image_with_prompt(original_img_bytes, edit_prompt)
                     if edited_img:
+                        print(f"🖊️  [IMAGE EDIT] Edit API returned an image")
                         generated_images = [edited_img]
                         ai_response += "\n\n*Generated edited image based on your request*"
                     else:
+                        print(f"⚠️  [IMAGE EDIT] Edit API returned no image, switching to fallback generation")
                         # Fallback: If editing fails, generate a new image with enhanced prompt
                         print(f"🔄 [IMAGE EDIT] Edit returned no image, trying generation fallback...")
                         try:
@@ -1508,12 +1532,23 @@ Now decide: "{message.content}" -> """
                                 vision_model.generate_content,
                                 [f"Describe this image in detail. What is it?", pil_image]
                             )
-                            image_description = analysis.text if hasattr(analysis, 'text') else ""
+                            analysis_text = ""
+                            if analysis is not None:
+                                if hasattr(analysis, 'text') and analysis.text:
+                                    analysis_text = analysis.text.strip()
+                                else:
+                                    analysis_text = str(analysis)
+                            print(f"🔄 [IMAGE EDIT] Fallback vision analysis length: {len(analysis_text)} chars")
+                            print(f"🔄 [IMAGE EDIT] Fallback vision analysis preview: {analysis_text[:200]}...")
+                            image_description = analysis_text
                             enhanced_prompt = f"{image_description}. Transform this into: {edit_prompt}"
                             print(f"🔄 [IMAGE EDIT] Fallback prompt: {enhanced_prompt[:200]}...")
                             generated_images = await generate_image(enhanced_prompt, num_images=1)
                             if generated_images:
+                                print(f"🔄 [IMAGE EDIT] Fallback generation produced {len(generated_images)} image(s)")
                                 ai_response += "\n\n*Generated new image based on your transformation request*"
+                            else:
+                                print(f"❌ [IMAGE EDIT] Fallback generation produced no images")
                         except Exception as fallback_error:
                             print(f"❌ [IMAGE EDIT] Fallback generation also failed: {fallback_error}")
                             ai_response += "\n\n(Tried to edit your image but the editing API didn't return results. This might require a different approach.)"
