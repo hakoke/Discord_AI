@@ -1179,25 +1179,99 @@ def _pdf_prepare_text(text: str, context: str = "") -> str:
     return _pdf_break_long_words(_pdf_safe_text(text), context)
 
 def _safe_multi_cell(pdf: FPDF, text: str, line_height: float, *, context: str = "", **kwargs) -> None:
+    if not text or not text.strip():
+        if context:
+            print(f"⏭️  [PDF] Skipping empty text for context='{context}'")
+        return  # Skip empty text
+    
+    original_text = text
+    original_len = len(text)
+    
     prepared = _pdf_prepare_text(text, context)
+    prepared_len = len(prepared) if prepared else 0
+    
+    if not prepared or not prepared.strip():
+        print(f"⚠️  [PDF] Sanitization removed all text for context='{context}', using fallback")
+        # If sanitization removed everything, use a safe fallback
+        prepared = text.encode('ascii', errors='ignore').decode('ascii')
+        if not prepared.strip():
+            prepared = "[Text could not be rendered]"
+            print(f"⚠️  [PDF] Fallback also empty, using placeholder for context='{context}'")
+    
     if context:
-        print(f"📝 [PDF] Writing context='{context}' original_len={len(str(text))} sanitized_len={len(prepared)}")
+        print(f"📝 [PDF] Writing context='{context}' original_len={original_len} sanitized_len={len(prepared)} (removed {original_len - len(prepared)} chars)")
     preview = _pdf_log_preview(prepared, 120)
     if context:
         print(f"📝 [PDF] Content preview ({context}): '{preview}'")
+    
+    # Track encoding attempts
+    encoding_used = None
     try:
+        # Ensure text is properly encoded for FPDF (Latin-1)
+        try:
+            prepared_bytes = prepared.encode('latin-1', errors='replace')
+            prepared = prepared_bytes.decode('latin-1')
+            encoding_used = "latin-1"
+            if context:
+                print(f"✅ [PDF] Encoding successful: latin-1 for context='{context}'")
+        except Exception as enc_error:
+            # If encoding fails, use ASCII fallback
+            print(f"⚠️  [PDF] Latin-1 encoding failed for context='{context}': {enc_error}, using ASCII fallback")
+            prepared = prepared.encode('ascii', errors='ignore').decode('ascii')
+            encoding_used = "ascii"
+            print(f"✅ [PDF] Encoding successful: ascii fallback for context='{context}'")
+        
+        # Get current PDF state for debugging
+        current_x = pdf.get_x()
+        current_y = pdf.get_y()
+        page_width = pdf.w - pdf.l_margin - pdf.r_margin
+        if context:
+            print(f"📐 [PDF] PDF state before write - X={current_x:.2f}, Y={current_y:.2f}, available_width={page_width:.2f}, encoding={encoding_used}")
+        
         pdf.multi_cell(0, line_height, prepared, **kwargs)
+        
+        new_x = pdf.get_x()
+        new_y = pdf.get_y()
+        if context:
+            print(f"✅ [PDF] Write successful for context='{context}' - new position: X={new_x:.2f}, Y={new_y:.2f}")
     except RuntimeError as error:
+        error_msg = str(error)
+        print(f"❌ [PDF] RuntimeError for context='{context}': {error_msg}")
+        print(f"📐 [PDF] PDF state at error - X={pdf.get_x():.2f}, Y={pdf.get_y():.2f}, page_width={pdf.w - pdf.l_margin - pdf.r_margin:.2f}")
+        print(f"📝 [PDF] Text that failed: len={len(prepared)}, encoding={encoding_used}, preview='{_pdf_log_preview(prepared, 60)}'")
+        
         if context:
             print(f"❗ [PDF] Error writing context='{context}': {error}. Retrying with forced breaks.")
-        if "Not enough horizontal space" not in str(error):
+        if "Not enough horizontal space" not in error_msg:
+            print(f"❌ [PDF] Error is not 'Not enough horizontal space', re-raising")
             raise
+        
         # Force additional breaks and retry once
         forced_context = f"{context} [forced]" if context else "forced"
-        forced = _pdf_break_long_words(prepared.replace('-', '- '), forced_context)
-        if context:
-            print(f"🛠️  [PDF] Retrying context='{context}' with forced_len={len(forced)} Preview: '{_pdf_log_preview(forced, 120)}'")
-        pdf.multi_cell(0, line_height, forced, **kwargs)
+        # Break on spaces and add more breaks
+        forced = ' '.join(prepared.split())  # Normalize whitespace
+        forced = forced.replace('-', '- ')  # Break on hyphens
+        forced = _pdf_break_long_words(forced, forced_context)
+        forced_len = len(forced)
+        print(f"🛠️  [PDF] Retrying context='{context}' with forced_len={forced_len} (was {len(prepared)}), Preview: '{_pdf_log_preview(forced, 120)}'")
+        
+        forced_encoding = None
+        try:
+            forced_bytes = forced.encode('latin-1', errors='replace')
+            forced = forced_bytes.decode('latin-1')
+            forced_encoding = "latin-1"
+        except Exception as enc_error:
+            print(f"⚠️  [PDF] Forced text Latin-1 encoding failed: {enc_error}, using ASCII")
+            forced = forced.encode('ascii', errors='ignore').decode('ascii')
+            forced_encoding = "ascii"
+        
+        print(f"🔄 [PDF] Retry attempt - encoding={forced_encoding}, len={len(forced)}, X={pdf.get_x():.2f}, Y={pdf.get_y():.2f}")
+        try:
+            pdf.multi_cell(0, line_height, forced, **kwargs)
+            print(f"✅ [PDF] Retry successful for context='{context}'")
+        except Exception as retry_error:
+            print(f"❌ [PDF] Retry also failed for context='{context}': {retry_error}")
+            raise
 
 def build_document_prompt_section(document_assets: List[Dict[str, Any]]) -> str:
     if not document_assets:
@@ -1292,12 +1366,21 @@ def build_docx_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byt
 def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> bytes:
     if not FPDF:
         raise RuntimeError("fpdf2 library is not available")
+    
+    print(f"📄 [PDF] Starting PDF generation")
+    print(f"📄 [PDF] Descriptor keys: {list(descriptor.keys())}")
+    print(f"📄 [PDF] Number of sections: {len(sections)}")
+    
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(15, 15, 15)  # Left, top, right margins
+    print(f"📄 [PDF] PDF initialized - margins: L=15, T=15, R=15, page width={pdf.w}, page height={pdf.h}")
     pdf.add_page()
+    print(f"📄 [PDF] First page added")
 
     title = descriptor.get("title")
     if title:
+        print(f"📄 [PDF] Processing title: '{_pdf_log_preview(title, 50)}'")
         pdf.set_font("Helvetica", "B", 18)
         _safe_multi_cell(
             pdf,
@@ -1307,10 +1390,18 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
             align='C'
         )
         pdf.ln(4)
+        print(f"📄 [PDF] Title written successfully")
+    else:
+        print(f"📄 [PDF] No title provided")
 
-    for section in sections:
+    for idx, section in enumerate(sections):
+        print(f"📄 [PDF] Processing section {idx + 1}/{len(sections)}")
+        section_keys = list(section.keys())
+        print(f"📄 [PDF] Section keys: {section_keys}")
+        
         heading = section.get("heading")
         if heading:
+            print(f"📄 [PDF] Section {idx + 1} heading: '{_pdf_log_preview(heading, 50)}'")
             pdf.set_font("Helvetica", "B", 14)
             _safe_multi_cell(
                 pdf,
@@ -1319,9 +1410,13 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
                 context=f"heading:{_pdf_log_preview(heading)}"
             )
             pdf.ln(2)
+            print(f"📄 [PDF] Section {idx + 1} heading written successfully")
 
         body = section.get("body", "")
         if body:
+            body_original_len = len(body)
+            print(f"📄 [PDF] Section {idx + 1} body: {body_original_len} chars")
+            
             # Strip markdown code blocks (```language ... ```) but keep the code content
             # Remove opening ```python or ``` or ```json etc.
             body = re.sub(r'```[\w]*\n?', '', body)
@@ -1329,9 +1424,13 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
             body = re.sub(r'```\s*$', '', body, flags=re.MULTILINE)
             # Clean up any remaining backticks
             body = body.replace('```', '')
+            body_after_strip = len(body)
+            print(f"📄 [PDF] Section {idx + 1} body after markdown strip: {body_after_strip} chars (removed {body_original_len - body_after_strip})")
             
             pdf.set_font("Helvetica", "", 11)
-            for paragraph in body.split("\n"):
+            paragraphs = body.split("\n")
+            print(f"📄 [PDF] Section {idx + 1} body split into {len(paragraphs)} paragraphs")
+            for para_idx, paragraph in enumerate(paragraphs):
                 paragraph = paragraph.strip()
                 if paragraph:
                     # Use monospace font for code-like content (detect multiple languages)
@@ -1350,6 +1449,10 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
                     ]
                     is_code_line = any(paragraph.strip().startswith(prefix) for prefix in code_patterns) or \
                                    any(prefix in paragraph.strip()[:20] for prefix in ['()', '{}', '[]', '->', '::', '=>'])
+                    font_used = "Courier (code)" if is_code_line else "Helvetica (text)"
+                    if para_idx < 3 or para_idx >= len(paragraphs) - 3:  # Log first 3 and last 3 paragraphs
+                        print(f"📄 [PDF] Section {idx + 1} paragraph {para_idx + 1}/{len(paragraphs)}: {len(paragraph)} chars, font={font_used}, preview='{_pdf_log_preview(paragraph, 40)}'")
+                    
                     if is_code_line:
                         pdf.set_font("Courier", "", 9)  # Monospace for code
                     else:
@@ -1359,16 +1462,20 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
                         pdf,
                         paragraph,
                         6,
-                        context=f"body:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(paragraph)}"
+                        context=f"body:section{idx+1}:para{para_idx+1}:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(paragraph)}"
                     )
                 else:
                     pdf.ln(4)
             pdf.ln(2)
+            print(f"📄 [PDF] Section {idx + 1} body written successfully ({len(paragraphs)} paragraphs)")
+        else:
+            print(f"📄 [PDF] Section {idx + 1} has no body content")
 
         bullets = section.get("bullet_points") or []
         if bullets:
+            print(f"📄 [PDF] Section {idx + 1} has {len(bullets)} bullet points")
             pdf.set_font("Helvetica", "", 11)
-            for bullet in bullets:
+            for bullet_idx, bullet in enumerate(bullets):
                 bullet_text = str(bullet).strip()
                 if not bullet_text:
                     continue
@@ -1377,17 +1484,29 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
                     pdf,
                     f"- {bullet_text}",
                     6,
-                    context=f"bullet:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(bullet_text)}"
+                    context=f"bullet:section{idx+1}:{bullet_idx+1}:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(bullet_text)}"
                 )
             pdf.ln(2)
+            print(f"📄 [PDF] Section {idx + 1} bullet points written successfully")
+        else:
+            print(f"📄 [PDF] Section {idx + 1} has no bullet points")
 
+    print(f"📄 [PDF] All sections processed, generating PDF bytes...")
     output = pdf.output(dest='S')
+    output_type = type(output).__name__
+    print(f"📄 [PDF] PDF output type: {output_type}, size: {len(output) if hasattr(output, '__len__') else 'unknown'}")
+    
     if isinstance(output, (bytes, bytearray)):
-        return bytes(output)
+        result = bytes(output)
+        print(f"📄 [PDF] PDF generation successful! Final size: {len(result)} bytes")
+        return result
     if isinstance(output, str):
-        return output.encode('latin-1')
+        result = output.encode('latin-1')
+        print(f"📄 [PDF] PDF generation successful! Final size: {len(result)} bytes (converted from string)")
+        return result
 
-    raise TypeError(f"Unexpected PDF output type: {type(output).__name__}")
+    print(f"❌ [PDF] Unexpected PDF output type: {output_type}")
+    raise TypeError(f"Unexpected PDF output type: {output_type}")
 
 def _determine_document_filename(descriptor: dict, extension: str) -> str:
     filename = descriptor.get("filename") or descriptor.get("title") or "ai_document"
