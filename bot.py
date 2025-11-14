@@ -22,7 +22,7 @@ genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 # Will be initialized if credentials are available
 IMAGEN_AVAILABLE = False
 try:
-    from google.cloud import aiplatform
+    import vertexai
     from vertexai.preview.vision_models import ImageGenerationModel
     import tempfile
     
@@ -47,7 +47,7 @@ try:
         credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
     
     if credentials_path:
-        aiplatform.init(project=project_id, location=location)
+        vertexai.init(project=project_id, location=location)
         IMAGEN_AVAILABLE = True
         print(f"✅ Imagen 3 initialized with project: {project_id}")
     else:
