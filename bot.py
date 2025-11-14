@@ -2904,7 +2904,7 @@ Return ONLY the search query, nothing else:"""
             user_query_lower = (message.content or "").lower()
             search_query_lower = (image_search_query or "").lower()
             
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\nCRITICAL INSTRUCTIONS FOR IMAGE SELECTION:\n\n1. You MUST select images that are RELEVANT to what the user asked for. Look at the image titles and URLs to determine relevance.\n2. The user's request was: \"{message.content}\"\n3. The search query used was: \"{image_search_query}\"\n4. Select images whose titles/URLs match the search query and user's intent. For example:\n   - If user asked for 'MUST egypt', select images about MUST university in Egypt, NOT general Egypt images\n   - If user asked for 'university of wollongong dubai', select images of that specific university, NOT other universities\n   - If user asked for 'mushrif mall', select images of Mushrif Mall, NOT other malls\n5. If the user asked for a specific number of images (e.g., '3 images', '2 photos'), try to match that number (up to 4 max).\n6. If no images are relevant or you can't find good matches, you can select 0 images, but you MUST tell the user clearly: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. You can choose 1-4 images (maximum 4 images).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n\nIf you cannot find any relevant images from the search results, you MUST tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'"
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\nCRITICAL INSTRUCTIONS FOR IMAGE SELECTION:\n\n1. You MUST select images that are RELEVANT to what the user asked for. Look at the image titles and URLs to determine relevance.\n2. The user's request was: \"{message.content}\"\n3. The search query used was: \"{image_search_query}\"\n4. Select images whose titles/URLs match the search query and user's intent. For example:\n   - If user asked for 'MUST egypt', select images about MUST university in Egypt, NOT general Egypt images\n   - If user asked for 'university of wollongong dubai', select images of that specific university, NOT other universities\n   - If user asked for 'mushrif mall', select images of Mushrif Mall, NOT other malls\n5. CRITICAL: If the user asks for multiple items with 'an image of each' or 'with images' (e.g., 'top 3 malls with an image of each', 'top 5 countries with images'), you MUST select ONE image for EACH item they mentioned. For example:\n   - 'top 3 malls with an image of each' = select 3 images (one for each mall)\n   - 'top 5 countries with images' = select 5 images (one for each country, up to 4 max)\n   - 'list 4 places with pictures' = select 4 images (one for each place)\n6. If the user asked for a specific number of images (e.g., '3 images', '2 photos'), try to match that number (up to 4 max).\n7. If no images are relevant or you can't find good matches, you can select 0 images, but you MUST tell the user clearly: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. You can choose 1-4 images (maximum 4 images).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n\nIf you cannot find any relevant images from the search results, you MUST tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'"
         elif image_search_query:
             # Image search was attempted but returned no results
             consciousness_prompt += f"\n\nIMPORTANT: The user requested images for '{image_search_query}', but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
@@ -3220,9 +3220,10 @@ Now decide: "{message.content}" -> """
                     idx = num - 1  # Convert to 0-based index
                     if 0 <= idx < len(image_search_results):
                         img_data = image_search_results[idx]
+                        print(f"🔄 [{username}] Attempting to download image {num} (index {idx}): {img_data.get('title', 'Unknown')[:50]}")
                         try:
                             img_bytes = await download_image(img_data['url'])
-                            if img_bytes:
+                            if img_bytes and len(img_bytes) > 0:
                                 # Try to open as PIL Image to validate
                                 try:
                                     img = PILImage.open(BytesIO(img_bytes))
@@ -3237,11 +3238,22 @@ Now decide: "{message.content}" -> """
                                         img = img.convert('RGB')
                                     
                                     searched_images.append(img)
-                                    print(f"✅ [{username}] Downloaded image {num}: {img_data['title'][:50]}")
+                                    print(f"✅ [{username}] Successfully downloaded and processed image {num}: {img_data.get('title', 'Unknown')[:50]}")
                                 except Exception as img_error:
-                                    print(f"⚠️  [{username}] Failed to process image {num}: {img_error}")
+                                    print(f"⚠️  [{username}] Failed to process image {num} after download: {img_error}")
+                                    import traceback
+                                    print(f"⚠️  [{username}] Traceback: {traceback.format_exc()}")
+                            else:
+                                print(f"⚠️  [{username}] Image {num} download returned empty/None bytes from URL: {img_data.get('url', 'Unknown')[:100]}")
                         except Exception as download_error:
-                            print(f"⚠️  [{username}] Failed to download image {num}: {download_error}")
+                            print(f"⚠️  [{username}] Failed to download image {num} from URL {img_data.get('url', 'Unknown')[:100]}: {download_error}")
+                            import traceback
+                            print(f"⚠️  [{username}] Download error traceback: {traceback.format_exc()}")
+                    else:
+                        print(f"⚠️  [{username}] Image number {num} is out of range (max: {len(image_search_results)})")
+                
+                if len(searched_images) < len(selected_numbers):
+                    print(f"⚠️  [{username}] WARNING: Only {len(searched_images)}/{len(selected_numbers)} images were successfully downloaded and processed")
                 
                 # Remove the [IMAGE_NUMBERS: ...] marker from response if present
                 ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
