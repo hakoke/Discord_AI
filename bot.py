@@ -1293,7 +1293,7 @@ def generate_document_file(descriptor: dict) -> Dict[str, Any]:
         "descriptor": descriptor,
     }
 
-DOCUMENT_JSON_PATTERN = re.compile(r"```(?:json)?\s*({[\s\S]*?})\s*```", re.IGNORECASE)
+DOCUMENT_JSON_PATTERN = re.compile(r"```(?:\s*json)?\s*({[\s\S]*?})\s*```", re.IGNORECASE)
 
 def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, Any]]]:
     if not response_text:
@@ -1327,6 +1327,27 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
                 print(f"⚠️  [DOCUMENT OUTPUT] Failed to build document: {doc_error}")
 
         cleaned_text = cleaned_text.replace(match.group(0), "").strip()
+
+    if not generated_documents:
+        fallback_match = re.search(r"(\{\s*\"documents\"[\s\S]*\})", response_text, re.IGNORECASE)
+        if fallback_match:
+            try:
+                payload = json.loads(fallback_match.group(1))
+                document_entries = []
+                if isinstance(payload, dict):
+                    if isinstance(payload.get("documents"), list):
+                        document_entries.extend(payload["documents"])
+                    if isinstance(payload.get("document_outputs"), list):
+                        document_entries.extend(payload["document_outputs"])
+                for descriptor in document_entries:
+                    try:
+                        document_file = generate_document_file(descriptor)
+                        generated_documents.append(document_file)
+                    except Exception as doc_error:
+                        print(f"⚠️  [DOCUMENT OUTPUT] Failed in fallback parse: {doc_error}")
+                cleaned_text = cleaned_text.replace(fallback_match.group(1), "").strip()
+            except json.JSONDecodeError as fallback_error:
+                print(f"⚠️  [DOCUMENT OUTPUT] Fallback JSON parse error: {fallback_error}")
 
     return cleaned_text.strip(), generated_documents
 
