@@ -1298,8 +1298,11 @@ Return ONLY a JSON object like:
 
 Rules:
 - analyze_documents: true when the user wants feedback, summary, or commentary on provided documents (including when they say "look at this").
-- edit_documents: true when they want you to revise or rewrite existing documents (including attached files or documents referenced in the conversation).
+- edit_documents: true when they want you to revise or rewrite existing DOCUMENTS (PDF, Word, text files) - NOT images.
 - generate_new_document: true when they ask for a new deliverable (report, proposal, plan, etc.) from scratch.
+- IMPORTANT: If the user is asking to edit/modify IMAGES (photos, pictures), set all document flags to FALSE.
+- Examples of DOCUMENT edit: "edit this PDF", "revise this document", "update this report"
+- Examples of IMAGE edit (NOT documents): "make this person a woman", "edit this photo", "change this image"
 - Multiple fields can be true simultaneously (e.g., summarize AND rewrite).
 - Default to false unless the message (plus context below) suggests otherwise.
 
@@ -2498,21 +2501,30 @@ CURRENT CONVERSATION CONTEXT:
             else:
                 document_assets = []
             
-            document_actions = await ai_decide_document_actions(message, document_assets)
-            document_request = any(document_actions.values())
-            print(f"🗂️  [{username}] Document actions decided: {document_actions}")
-            if not document_request and document_assets:
-                document_actions["analyze_documents"] = True
-                document_request = True
-        
-        # Determine user intentions and preferred reply style
+        # Determine user intentions FIRST (before document check)
         intention = await ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
         print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}")
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
         
-        if document_request:
+        # Only check for document actions if there are actual documents AND no image edit request
+        # (to avoid confusing image edits with document edits)
+        if document_assets and not wants_image_edit:
+            document_actions = await ai_decide_document_actions(message, document_assets)
+            document_request = any(document_actions.values())
+            print(f"🗂️  [{username}] Document actions decided: {document_actions}")
+            if not document_request and document_assets:
+                document_actions["analyze_documents"] = True
+                document_request = True
+        else:
+            document_actions = {"analyze_documents": False, "edit_documents": False, "generate_new_document": False}
+            document_request = False
+            if document_assets and wants_image_edit:
+                print(f"🗂️  [{username}] Skipping document check - image edit request takes priority")
+        
+        # Only disable image editing if there's an actual document request (not just document assets)
+        if document_request and document_assets:
             print(f"📄 [{username}] Document request detected, disabling image generation/edit")
             wants_image = False
             wants_image_edit = False
