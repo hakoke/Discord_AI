@@ -8,8 +8,78 @@ import os
 import asyncio
 from datetime import datetime, timedelta, date
 import json
+import aiohttp
+from functools import lru_cache
+import time
 
 app = Flask(__name__)
+
+# Discord API cache (guild_id -> {name, icon, cached_at})
+discord_guild_cache = {}
+CACHE_DURATION = 3600  # 1 hour cache
+
+async def get_discord_guild_info(guild_id: str):
+    """Fetch Discord server (guild) information from Discord API"""
+    discord_token = os.getenv('DISCORD_TOKEN')
+    if not discord_token:
+        return None
+    
+    # Check cache first
+    if guild_id in discord_guild_cache:
+        cached = discord_guild_cache[guild_id]
+        if time.time() - cached['cached_at'] < CACHE_DURATION:
+            return cached['data']
+    
+    try:
+        url = f"https://discord.com/api/v10/guilds/{guild_id}"
+        headers = {
+            "Authorization": f"Bot {discord_token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    guild_info = {
+                        'name': data.get('name', 'Unknown Server'),
+                        'icon': data.get('icon'),
+                        'id': str(data.get('id', guild_id)),
+                        'member_count': data.get('approximate_member_count'),
+                        'description': data.get('description')
+                    }
+                    
+                    # Cache the result
+                    discord_guild_cache[guild_id] = {
+                        'data': guild_info,
+                        'cached_at': time.time()
+                    }
+                    
+                    return guild_info
+                elif response.status == 404:
+                    # Guild not found or bot not in server
+                    return {'name': 'Server Not Found', 'id': guild_id}
+                else:
+                    return None
+    except Exception as e:
+        print(f"Error fetching Discord guild info: {e}")
+        return None
+
+def get_discord_guild_info_sync(guild_id: str):
+    """Synchronous wrapper for get_discord_guild_info"""
+    # This will be defined later, but we'll call it directly in routes
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        return loop.run_until_complete(get_discord_guild_info(guild_id))
+    finally:
+        pass
 
 # Add custom Jinja2 filters
 @app.template_filter('tojson')
@@ -269,6 +339,77 @@ HTML_TEMPLATE = """
             padding: 40px;
             color: #8b949e;
         }
+        
+        /* Ban controls */
+        .ban-btn {
+            background: #da3633;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .ban-btn:hover { background: #f85149; }
+        .unban-btn {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .unban-btn:hover { background: #2ea043; }
+        .ban-dropdown {
+            position: relative;
+            display: inline-block;
+        }
+        .ban-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 5px;
+            min-width: 200px;
+            z-index: 1000;
+        }
+        .ban-menu.show { display: block; }
+        .ban-option {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 4px 0;
+            transition: background 0.2s;
+        }
+        .ban-option:hover { background: #21262d; }
+        .ban-option.permanent { color: #f85149; }
+        .ban-reason-input {
+            width: 100%;
+            padding: 8px;
+            margin-top: 10px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            color: #c9d1d9;
+            font-size: 13px;
+        }
+        .ban-status-banner {
+            background: #da3633;
+            border: 1px solid #f85149;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 20px 0;
+            color: white;
+        }
+        .ban-status-banner.permanent { background: #8b2635; }
+        .ban-status-banner.temporary { background: #7c2d12; }
     </style>
 </head>
 <body>
@@ -330,8 +471,12 @@ HTML_TEMPLATE = """
                 <a href="/server/{{ server.guild_id }}" class="server-card">
                     <div class="server-card-header">
                         <div>
-                            <strong style="color: #79c0ff; font-size: 18px;">Server {{ loop.index }}</strong>
-                            <div class="server-id">{{ server.guild_id }}</div>
+                            {% if server.guild_info and server.guild_info.name %}
+                                <strong style="color: #79c0ff; font-size: 18px;">{{ server.guild_info.name }}</strong>
+                            {% else %}
+                                <strong style="color: #79c0ff; font-size: 18px;">Server {{ loop.index }}</strong>
+                            {% endif %}
+                            <div class="server-id">ID: {{ server.guild_id }}</div>
                         </div>
                         <div style="text-align: right;">
                             <div style="font-size: 24px; color: #58a6ff; font-weight: bold;">{{ server.interaction_count }}</div>
@@ -594,6 +739,150 @@ HTML_TEMPLATE = """
             Last updated: {{ now.strftime('%Y-%m-%d %H:%M:%S UTC') }}
         </p>
     </div>
+    
+    <script>
+        // Server ban management (only on server detail page)
+        {% if view == 'server' %}
+        const guildId = '{{ server_id }}';
+        
+        async function loadBanStatus() {
+            try {
+                const response = await fetch(`/api/server/${guildId}/ban-status`);
+                const data = await response.json();
+                
+                const banControls = document.getElementById('ban-controls');
+                const banStatus = document.getElementById('ban-status');
+                
+                if (data.banned && data.ban_info) {
+                    const ban = data.ban_info;
+                    const isPermanent = ban.ban_type === 'permanent';
+                    const expiresAt = ban.expires_at ? new Date(ban.expires_at) : null;
+                    const isExpired = expiresAt && expiresAt < new Date();
+                    
+                    if (isExpired) {
+                        // Ban expired, reload
+                        location.reload();
+                        return;
+                    }
+                    
+                    // Show ban status
+                    let statusHtml = `<div class="ban-status-banner ${ban.ban_type}">`;
+                    statusHtml += `<strong>⚠️ Server is ${isPermanent ? 'PERMANENTLY BANNED' : 'TEMPORARILY BANNED'}</strong><br>`;
+                    if (!isPermanent && expiresAt) {
+                        statusHtml += `Expires: ${expiresAt.toLocaleString()}<br>`;
+                    }
+                    if (ban.reason) {
+                        statusHtml += `Reason: ${ban.reason}<br>`;
+                    }
+                    statusHtml += `Banned at: ${new Date(ban.banned_at).toLocaleString()}`;
+                    statusHtml += `</div>`;
+                    banStatus.innerHTML = statusHtml;
+                    
+                    // Show unban button
+                    banControls.innerHTML = `
+                        <button class="unban-btn" onclick="unbanServer()">✅ Unban Server</button>
+                    `;
+                } else {
+                    // Show ban button
+                    banControls.innerHTML = `
+                        <div class="ban-dropdown">
+                            <button class="ban-btn" onclick="toggleBanMenu()">🚫 Remove AI from Server</button>
+                            <div id="ban-menu" class="ban-menu">
+                                <div class="ban-option" onclick="banServer('temporary', 7)">Temporary (7 days)</div>
+                                <div class="ban-option" onclick="banServer('temporary', 30)">Temporary (30 days)</div>
+                                <div class="ban-option" onclick="banServerCustom()">Temporary (Custom days)</div>
+                                <div class="ban-option permanent" onclick="banServer('permanent')">Permanent (Forever)</div>
+                                <input type="text" id="ban-reason" class="ban-reason-input" placeholder="Optional reason (leave empty for no reason)">
+                            </div>
+                        </div>
+                    `;
+                    banStatus.innerHTML = '';
+                }
+            } catch (error) {
+                console.error('Error loading ban status:', error);
+            }
+        }
+        
+        function toggleBanMenu() {
+            const menu = document.getElementById('ban-menu');
+            menu.classList.toggle('show');
+        }
+        
+        function banServer(type, days = null) {
+            const reason = document.getElementById('ban-reason').value.trim() || null;
+            const daysInput = days || parseInt(prompt('Enter number of days:') || '7');
+            
+            if (isNaN(daysInput) && type === 'temporary') {
+                alert('Invalid number of days');
+                return;
+            }
+            
+            fetch(`/api/server/${guildId}/ban`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    type: type,
+                    days: type === 'temporary' ? daysInput : null,
+                    reason: reason
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Server banned successfully');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error.message);
+            });
+        }
+        
+        function banServerCustom() {
+            const days = parseInt(prompt('Enter number of days for temporary ban:') || '7');
+            if (!isNaN(days) && days > 0) {
+                banServer('temporary', days);
+            }
+        }
+        
+        function unbanServer() {
+            if (!confirm('Are you sure you want to unban this server?')) {
+                return;
+            }
+            
+            fetch(`/api/server/${guildId}/unban`, {
+                method: 'POST'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Server unbanned successfully');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error.message);
+            });
+        }
+        
+        // Close menu when clicking outside
+        document.addEventListener('click', (e) => {
+            const menu = document.getElementById('ban-menu');
+            if (menu && !menu.contains(e.target) && !e.target.closest('.ban-dropdown')) {
+                menu.classList.remove('show');
+            }
+        });
+        
+        // Load ban status on page load
+        if (guildId) {
+            loadBanStatus();
+        }
+        {% endif %}
+    </script>
 </body>
 </html>
 """
@@ -667,6 +956,14 @@ async def get_db_data():
             return obj
         
         servers_list = [dict(s) for s in servers]
+        
+        # Fetch Discord server info for each server
+        for server in servers_list:
+            guild_id = server.get('guild_id')
+            if guild_id:
+                guild_info = await get_discord_guild_info(guild_id)
+                server['guild_info'] = guild_info
+        
         usage_data_list = [dict(u) for u in usage_data]
         top_users_list = [dict(u) for u in top_users]
         
@@ -838,11 +1135,16 @@ def server_detail(guild_id):
     try:
         data = run_async(get_server_data(guild_id))
         
+        # Fetch Discord server name
+        guild_info = get_discord_guild_info_sync(guild_id)
+        server_name = guild_info.get('name') if guild_info else None
+        
         if not data:
             return render_template_string(
                 HTML_TEMPLATE,
                 view='server',
                 server_id=guild_id,
+                server_name=server_name,
                 server_stats=None,
                 server_users=[],
                 recent_interactions=[],
@@ -854,6 +1156,7 @@ def server_detail(guild_id):
             HTML_TEMPLATE,
             view='server',
             server_id=guild_id,
+            server_name=server_name,
             server_stats=data['server_stats'],
             server_users=data['server_users'],
             recent_interactions=data['recent_interactions'],
@@ -871,6 +1174,110 @@ def api_stats():
     try:
         data = run_async(get_db_data())
         return jsonify(data['stats'])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/server/<guild_id>/ban', methods=['POST'])
+def ban_server(guild_id):
+    """Ban a server (temporary or permanent)"""
+    try:
+        data = request.get_json()
+        ban_type = data.get('type', 'temporary')  # 'temporary' or 'permanent'
+        days = data.get('days', 7) if ban_type == 'temporary' else None
+        reason = data.get('reason', '').strip() or None
+        banned_by = data.get('banned_by', 'Dashboard Admin')
+        
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            return jsonify({'error': 'DATABASE_URL not set'}), 500
+        
+        async def ban():
+            conn = await asyncpg.connect(database_url)
+            try:
+                from datetime import timedelta
+                expires_at = None
+                if ban_type == 'temporary' and days:
+                    expires_at = datetime.now() + timedelta(days=days)
+                
+                await conn.execute('''
+                    INSERT INTO server_bans (guild_id, ban_type, expires_at, banned_by, reason)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (guild_id) 
+                    DO UPDATE SET 
+                        ban_type = $2,
+                        expires_at = $3,
+                        banned_by = $4,
+                        reason = $5,
+                        banned_at = NOW()
+                ''', guild_id, ban_type, expires_at, banned_by, reason)
+            finally:
+                await conn.close()
+        
+        run_async(ban())
+        return jsonify({'success': True, 'message': f'Server banned ({ban_type})'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/server/<guild_id>/unban', methods=['POST'])
+def unban_server(guild_id):
+    """Unban a server"""
+    try:
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            return jsonify({'error': 'DATABASE_URL not set'}), 500
+        
+        async def unban():
+            conn = await asyncpg.connect(database_url)
+            try:
+                await conn.execute('DELETE FROM server_bans WHERE guild_id = $1', guild_id)
+            finally:
+                await conn.close()
+        
+        run_async(unban())
+        return jsonify({'success': True, 'message': 'Server unbanned'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/server/<guild_id>/ban-status', methods=['GET'])
+def get_ban_status(guild_id):
+    """Get ban status for a server"""
+    try:
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            return jsonify({'error': 'DATABASE_URL not set'}), 500
+        
+        async def get_ban():
+            conn = await asyncpg.connect(database_url)
+            try:
+                row = await conn.fetchrow('''
+                    SELECT * FROM server_bans 
+                    WHERE guild_id = $1
+                ''', guild_id)
+                
+                if not row:
+                    return None
+                
+                ban_info = dict(row)
+                
+                # Check if temporary ban has expired
+                if ban_info['ban_type'] == 'temporary' and ban_info['expires_at']:
+                    if ban_info['expires_at'] < datetime.now():
+                        # Ban expired, remove it
+                        await conn.execute('DELETE FROM server_bans WHERE guild_id = $1', guild_id)
+                        return None
+                
+                return ban_info
+            finally:
+                await conn.close()
+        
+        ban_info = run_async(get_ban())
+        if ban_info:
+            # Convert datetime to ISO string for JSON
+            if ban_info.get('banned_at'):
+                ban_info['banned_at'] = ban_info['banned_at'].isoformat()
+            if ban_info.get('expires_at'):
+                ban_info['expires_at'] = ban_info['expires_at'].isoformat()
+        return jsonify({'banned': ban_info is not None, 'ban_info': ban_info})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

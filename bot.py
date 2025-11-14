@@ -2538,6 +2538,37 @@ CURRENT CONVERSATION CONTEXT:
         
         consciousness_prompt += f"\n\n{username}: {message.content}"
         
+        # Add server structure info if available (optional, no latency - only if already cached)
+        if message.guild:
+            try:
+                server_structure = await db.get_server_structure(str(message.guild.id))
+                if server_structure:
+                    channels_info = ""
+                    if server_structure.get('channels'):
+                        channels_info = "\n".join([
+                            f"- #{ch['name']} (ID: {ch['id']}, Type: {ch['type']})"
+                            for ch in server_structure['channels'][:20]  # Limit to 20 to avoid bloat
+                        ])
+                    
+                    categories_info = ""
+                    if server_structure.get('categories'):
+                        categories_info = "\n".join([
+                            f"- {cat['name']} (ID: {cat['id']})"
+                            for cat in server_structure['categories'][:10]  # Limit to 10
+                        ])
+                    
+                    if channels_info or categories_info:
+                        structure_text = "\n\nSERVER STRUCTURE (for reference if needed):\n"
+                        if categories_info:
+                            structure_text += f"Categories:\n{categories_info}\n"
+                        if channels_info:
+                            structure_text += f"Channels:\n{channels_info}\n"
+                        structure_text += "\n(You can reference channels by name or ID if the user asks about them, but don't mention this unless relevant.)"
+                        consciousness_prompt += structure_text
+            except Exception as e:
+                # Silently fail - this is optional info
+                pass
+        
         # Process images if present (from current message OR replied message)
         image_parts = []
         
@@ -3239,6 +3270,7 @@ Now decide: "{message.content}" -> """
                     ai_response += "\n\n(Image generation failed - please try again)"
         
         # Store interaction in memory
+        channel_id = str(message.channel.id) if message.channel else None
         await memory.store_interaction(
             user_id=user_id,
             username=username,
@@ -3248,7 +3280,8 @@ Now decide: "{message.content}" -> """
             context=json.dumps(context_messages),
             has_images=len(image_parts) > 0,
             has_documents=bool(document_assets),
-            search_query=search_query if search_results else None
+            search_query=search_query if search_results else None,
+            channel_id=channel_id
         )
         
         # Analyze and update user memory (run in background to not block Discord)
@@ -3313,6 +3346,79 @@ async def on_ready():
     await db.initialize()
     print('Memory systems online')
     
+    # Store server structure for all existing servers (background, no latency)
+    for guild in bot.guilds:
+        asyncio.create_task(store_guild_structure(guild))
+    
+    # Check for banned servers on startup and leave them
+    for guild in bot.guilds:
+        guild_id = str(guild.id)
+        ban_info = await db.check_server_ban(guild_id)
+        if ban_info:
+            try:
+                # Calculate days remaining or "infinite"
+                days_remaining = None
+                if ban_info['ban_type'] == 'temporary' and ban_info.get('expires_at'):
+                    expires_at = ban_info['expires_at']
+                    if isinstance(expires_at, str):
+                        # Parse ISO format datetime string
+                        try:
+                            expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                        except:
+                            # Fallback: try parsing common formats
+                            from datetime import datetime as dt
+                            try:
+                                expires_at = dt.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                            except:
+                                expires_at = None
+                    if expires_at:
+                        days_remaining = (expires_at - datetime.now()).days
+                        if days_remaining < 0:
+                            days_remaining = 0
+                
+                # Construct leave message
+                leave_message = "⚠️ This server has been removed from the AI service."
+                
+                # Add duration
+                if ban_info['ban_type'] == 'permanent':
+                    leave_message += "\n\n**Duration:** Infinite (permanent)"
+                elif days_remaining is not None:
+                    leave_message += f"\n\n**Duration:** {days_remaining} day(s) remaining"
+                else:
+                    leave_message += "\n\n**Duration:** Temporary"
+                
+                # Add reason if provided
+                if ban_info.get('reason'):
+                    leave_message += f"\n\n**Reason:** {ban_info['reason']}"
+                
+                # Find the most used channel, fallback to system channel or first text channel
+                channel = None
+                most_used_channel_id = await db.get_most_used_channel(guild_id)
+                
+                if most_used_channel_id:
+                    try:
+                        channel = guild.get_channel(int(most_used_channel_id))
+                    except:
+                        pass
+                
+                # Fallback options
+                if not channel:
+                    if guild.system_channel:
+                        channel = guild.system_channel
+                    elif guild.text_channels:
+                        channel = guild.text_channels[0]
+                
+                if channel:
+                    try:
+                        await channel.send(leave_message)
+                    except:
+                        pass  # Can't send message, just leave
+                
+                await guild.leave()
+                print(f'Left banned server: {guild.name} ({guild.id})')
+            except Exception as e:
+                print(f'Error leaving banned server {guild.id}: {e}')
+    
     # Start periodic cleanup task
     bot.loop.create_task(periodic_cleanup())
 
@@ -3333,6 +3439,121 @@ async def periodic_cleanup():
         except Exception as e:
             print(f'Cleanup error: {e}')
 
+async def store_guild_structure(guild):
+    """Store server structure (channels, categories) - runs async, no latency"""
+    try:
+        guild_id = str(guild.id)
+        
+        # Collect channels
+        channels = []
+        for channel in guild.channels:
+            if isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel)):
+                channel_data = {
+                    'id': str(channel.id),
+                    'name': channel.name,
+                    'type': channel.type.name if hasattr(channel.type, 'name') else str(channel.type)
+                }
+                if isinstance(channel, discord.TextChannel):
+                    channel_data['category_id'] = str(channel.category.id) if channel.category else None
+                channels.append(channel_data)
+        
+        # Collect categories
+        categories = []
+        for category in guild.categories:
+            categories.append({
+                'id': str(category.id),
+                'name': category.name
+            })
+        
+        # Store in database (non-blocking)
+        await db.store_server_structure(guild_id, channels, categories)
+        print(f'📋 Stored server structure for {guild.name}: {len(channels)} channels, {len(categories)} categories')
+    except Exception as e:
+        print(f'Error storing guild structure: {e}')
+
+@bot.event
+async def on_guild_join(guild):
+    """Handle bot joining a server - check if server is banned and store structure"""
+    guild_id = str(guild.id)
+    
+    # Store server structure in background (no latency)
+    asyncio.create_task(store_guild_structure(guild))
+    
+    ban_info = await db.check_server_ban(guild_id)
+    
+    if ban_info:
+        # Server is banned, leave immediately
+        try:
+            # Calculate days remaining or "infinite"
+            days_remaining = None
+            if ban_info['ban_type'] == 'temporary' and ban_info.get('expires_at'):
+                expires_at = ban_info['expires_at']
+                if isinstance(expires_at, str):
+                    # Parse ISO format datetime string
+                    try:
+                        expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                    except:
+                        # Fallback: try parsing common formats
+                        from datetime import datetime as dt
+                        try:
+                            expires_at = dt.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                        except:
+                            expires_at = None
+                if expires_at:
+                    days_remaining = (expires_at - datetime.now()).days
+                    if days_remaining < 0:
+                        days_remaining = 0
+            
+            # Construct leave message
+            leave_message = "⚠️ This server has been removed from the AI service."
+            
+            # Add duration
+            if ban_info['ban_type'] == 'permanent':
+                leave_message += "\n\n**Duration:** Infinite (permanent)"
+            elif days_remaining is not None:
+                leave_message += f"\n\n**Duration:** {days_remaining} day(s) remaining"
+            else:
+                leave_message += "\n\n**Duration:** Temporary"
+            
+            # Add reason if provided
+            if ban_info.get('reason'):
+                leave_message += f"\n\n**Reason:** {ban_info['reason']}"
+            
+            # Find the most used channel, fallback to system channel or first text channel
+            channel = None
+            most_used_channel_id = await db.get_most_used_channel(guild_id)
+            
+            if most_used_channel_id:
+                try:
+                    channel = guild.get_channel(int(most_used_channel_id))
+                except:
+                    pass
+            
+            # Fallback options
+            if not channel:
+                if guild.system_channel:
+                    channel = guild.system_channel
+                elif guild.text_channels:
+                    channel = guild.text_channels[0]
+            
+            if channel:
+                try:
+                    await channel.send(leave_message)
+                    # Give a moment for message to send
+                    await asyncio.sleep(1)
+                except:
+                    pass  # Can't send message, just leave
+            
+            await guild.leave()
+            print(f'Left banned server on join: {guild.name} ({guild_id})')
+        except Exception as e:
+            print(f'Error leaving banned server {guild_id} on join: {e}')
+            # Try to leave anyway even if message failed
+            try:
+                await guild.leave()
+            except:
+                pass
+
 @bot.event
 async def on_message(message: discord.Message):
     """Handle incoming messages"""
@@ -3343,6 +3564,62 @@ async def on_message(message: discord.Message):
     # Ignore bots
     if message.author.bot:
         return
+    
+    # Check if server is banned (if in a guild)
+    if message.guild:
+        guild_id = str(message.guild.id)
+        ban_info = await db.check_server_ban(guild_id)
+        if ban_info:
+            # Server is banned, leave immediately
+            try:
+                # Calculate days remaining or "infinite"
+                days_remaining = None
+                if ban_info['ban_type'] == 'temporary' and ban_info.get('expires_at'):
+                    expires_at = ban_info['expires_at']
+                    if isinstance(expires_at, str):
+                        # Parse ISO format datetime string
+                        try:
+                            expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                        except:
+                            # Fallback: try parsing common formats
+                            from datetime import datetime as dt
+                            try:
+                                expires_at = dt.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                            except:
+                                expires_at = None
+                    if expires_at:
+                        days_remaining = (expires_at - datetime.now()).days
+                        if days_remaining < 0:
+                            days_remaining = 0
+                
+                # Construct leave message
+                leave_message = "⚠️ This server has been removed from the AI service."
+                
+                # Add duration
+                if ban_info['ban_type'] == 'permanent':
+                    leave_message += "\n\n**Duration:** Infinite (permanent)"
+                elif days_remaining is not None:
+                    leave_message += f"\n\n**Duration:** {days_remaining} day(s) remaining"
+                else:
+                    leave_message += "\n\n**Duration:** Temporary"
+                
+                # Add reason if provided
+                if ban_info.get('reason'):
+                    leave_message += f"\n\n**Reason:** {ban_info['reason']}"
+                
+                # Try to send message in current channel (most likely where they're using the bot)
+                try:
+                    await message.channel.send(leave_message)
+                    await asyncio.sleep(1)
+                except:
+                    pass
+                
+                await message.guild.leave()
+                print(f'Left banned server on message: {message.guild.name} ({guild_id})')
+                return
+            except Exception as e:
+                print(f'Error leaving banned server {guild_id} on message: {e}')
+                return
     
     # Check if should respond
     should_respond = False

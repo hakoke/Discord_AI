@@ -74,25 +74,48 @@ class Database:
                 )
             ''')
             
+            # Server bans table - for managing server access
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS server_bans (
+                    guild_id TEXT PRIMARY KEY,
+                    banned_at TIMESTAMP DEFAULT NOW(),
+                    ban_type TEXT NOT NULL CHECK (ban_type IN ('temporary', 'permanent')),
+                    expires_at TIMESTAMP,
+                    banned_by TEXT,
+                    reason TEXT
+                )
+            ''')
+            
+            # Server structure table - stores channels, categories, etc.
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS server_structure (
+                    guild_id TEXT PRIMARY KEY,
+                    channels JSONB,
+                    categories JSONB,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
             # Create indexes for performance
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_interactions_user_id ON interactions(user_id)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_consciousness_timestamp ON consciousness_stream(timestamp)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_bans_expires ON server_bans(expires_at)')
             
             print("Database initialized successfully")
     
     async def store_interaction(self, user_id: str, username: str, guild_id: str, 
                                 user_message: str, bot_response: str, context: str = None,
                                 has_images: bool = False, has_documents: bool = False,
-                                search_query: str = None):
+                                search_query: str = None, channel_id: str = None):
         """Store a conversation interaction"""
         async with self.pool.acquire() as conn:
             interaction_id = await conn.fetchval('''
                 INSERT INTO interactions 
-                (user_id, username, guild_id, user_message, bot_response, context, has_images, has_documents, search_query)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (user_id, username, guild_id, channel_id, user_message, bot_response, context, has_images, has_documents, search_query)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING id
-            ''', user_id, username, guild_id, user_message, bot_response, context, has_images, has_documents, search_query)
+            ''', user_id, username, guild_id, channel_id, user_message, bot_response, context, has_images, has_documents, search_query)
             
             return interaction_id
     
@@ -394,6 +417,123 @@ class Database:
                 ''', limit)
             
             return [dict(row) for row in rows]
+    
+    async def ban_server(self, guild_id: str, ban_type: str, days: int = None, banned_by: str = None, reason: str = None):
+        """Ban a server (temporary or permanent)"""
+        async with self.pool.acquire() as conn:
+            expires_at = None
+            if ban_type == 'temporary' and days:
+                from datetime import timedelta
+                expires_at = datetime.now() + timedelta(days=days)
+            
+            await conn.execute('''
+                INSERT INTO server_bans (guild_id, ban_type, expires_at, banned_by, reason)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (guild_id) 
+                DO UPDATE SET 
+                    ban_type = $2,
+                    expires_at = $3,
+                    banned_by = $4,
+                    reason = $5,
+                    banned_at = NOW()
+            ''', guild_id, ban_type, expires_at, banned_by, reason)
+    
+    async def unban_server(self, guild_id: str):
+        """Remove server ban"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('DELETE FROM server_bans WHERE guild_id = $1', guild_id)
+    
+    async def check_server_ban(self, guild_id: str):
+        """Check if server is banned, return ban info or None"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM server_bans 
+                WHERE guild_id = $1
+            ''', guild_id)
+            
+            if not row:
+                return None
+            
+            ban_info = dict(row)
+            
+            # Check if temporary ban has expired
+            if ban_info['ban_type'] == 'temporary' and ban_info['expires_at']:
+                if ban_info['expires_at'] < datetime.now():
+                    # Ban expired, remove it
+                    await conn.execute('DELETE FROM server_bans WHERE guild_id = $1', guild_id)
+                    return None
+            
+            return ban_info
+    
+    async def get_server_ban(self, guild_id: str):
+        """Get server ban info (for dashboard)"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM server_bans 
+                WHERE guild_id = $1
+            ''', guild_id)
+            
+            if not row:
+                return None
+            
+            ban_info = dict(row)
+            
+            # Check if temporary ban has expired
+            if ban_info['ban_type'] == 'temporary' and ban_info['expires_at']:
+                if ban_info['expires_at'] < datetime.now():
+                    # Ban expired, remove it
+                    await conn.execute('DELETE FROM server_bans WHERE guild_id = $1', guild_id)
+                    return None
+            
+            return ban_info
+    
+    async def store_server_structure(self, guild_id: str, channels: list, categories: list):
+        """Store server channel and category structure"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO server_structure (guild_id, channels, categories, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (guild_id) 
+                DO UPDATE SET 
+                    channels = $2,
+                    categories = $3,
+                    updated_at = NOW()
+            ''', guild_id, json.dumps(channels), json.dumps(categories))
+    
+    async def get_server_structure(self, guild_id: str):
+        """Get server structure (channels, categories)"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM server_structure 
+                WHERE guild_id = $1
+            ''', guild_id)
+            
+            if not row:
+                return None
+            
+            structure = dict(row)
+            if structure.get('channels'):
+                structure['channels'] = json.loads(structure['channels']) if isinstance(structure['channels'], str) else structure['channels']
+            if structure.get('categories'):
+                structure['categories'] = json.loads(structure['categories']) if isinstance(structure['categories'], str) else structure['categories']
+            
+            return structure
+    
+    async def get_most_used_channel(self, guild_id: str):
+        """Get the most used channel ID for a server based on interactions"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT channel_id, COUNT(*) as interaction_count
+                FROM interactions
+                WHERE guild_id = $1 AND channel_id IS NOT NULL
+                GROUP BY channel_id
+                ORDER BY interaction_count DESC
+                LIMIT 1
+            ''', guild_id)
+            
+            if row:
+                return row['channel_id']
+            return None
     
     async def close(self):
         """Close database connection"""
