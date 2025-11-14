@@ -556,8 +556,8 @@ def should_respond_to_name(content: str) -> bool:
 def _clamp_value(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
-def detect_requested_image_count(message: str, default: int = 1) -> int:
-    """Extract requested image count from message text."""
+def _heuristic_requested_image_count(message: str, default: int = 1) -> int:
+    """Heuristic to extract requested image count from message text."""
     lowered = message.lower()
     number_words = {
         'one': 1,
@@ -582,6 +582,47 @@ def detect_requested_image_count(message: str, default: int = 1) -> int:
             return _clamp_value(count, 1, MAX_GENERATED_IMAGES)
     
     return _clamp_value(default, 1, MAX_GENERATED_IMAGES)
+
+def ai_decide_image_count(message: discord.Message) -> int:
+    """Use AI to pick how many images to generate."""
+    heuristics_guess = _heuristic_requested_image_count(message.content, default=1)
+    message_text = (message.content or "").strip()
+    metadata = {
+        "message": message_text,
+        "author_display_name": message.author.display_name,
+        "channel_id": str(message.channel.id),
+        "attachments_count": len(message.attachments),
+        "heuristic_guess": heuristics_guess,
+        "max_images": MAX_GENERATED_IMAGES,
+    }
+    prompt = f"""A user asked for image generation. Decide how many images to produce.
+
+Rules:
+- Pick an integer between 1 and {MAX_GENERATED_IMAGES}.
+- Use more than one image when the user explicitly asks for multiple variations, angles, options, or uses words like "two", "couple", "few", "some", "multiple".
+- Use at least 2 if they request comparisons, alternatives, or a gallery.
+- Stick to 1 if they don't hint at needing multiple results.
+- Consider the heuristic suggestion but override it when your judgment differs.
+
+Return ONLY a JSON object like:
+{{"image_count": 3}}
+
+User context:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}"""
+
+    try:
+        decision_model = get_fast_model()
+        decision_response = decision_model.generate_content(prompt)
+        raw_text = (decision_response.text or "").strip()
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            parsed = json.loads(match.group(0))
+            image_count = int(parsed.get("image_count", heuristics_guess))
+            return _clamp_value(image_count, 1, MAX_GENERATED_IMAGES)
+    except Exception as e:
+        print(f"Image count decision error: {e}")
+    
+    return heuristics_guess
 
 def is_small_talk_message(content: str, has_question: bool, wants_image: bool, wants_image_edit: bool, has_attachments: bool) -> bool:
     """Heuristic to detect light conversation where short replies are preferred."""
@@ -1249,7 +1290,7 @@ Now decide: "{message.content}" -> """
                     image_prompt = image_prompt.replace(trigger, '').strip()
                 
                 if len(image_prompt) > 10:  # Make sure there's an actual prompt
-                    requested_count = detect_requested_image_count(message.content)
+                    requested_count = ai_decide_image_count(message)
                     generated_images = await generate_image(image_prompt, num_images=requested_count)
                     if generated_images:
                         if len(generated_images) > 1:
