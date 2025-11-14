@@ -129,6 +129,7 @@ def _env_int(name: str, default: int) -> int:
 
 ENABLE_GEMINI_FILE_UPLOADS = _env_flag('ENABLE_GEMINI_FILE_UPLOADS', False)
 GEMINI_INLINE_IMAGE_LIMIT = _env_int('GEMINI_INLINE_IMAGE_LIMIT', 3 * 1024 * 1024)
+MAX_GENERATED_IMAGES = _env_int('MAX_GENERATED_IMAGES', 4)
 
 # Bot configuration
 BOT_NAME = os.getenv('BOT_NAME', 'servermate').lower()
@@ -552,6 +553,65 @@ def should_respond_to_name(content: str) -> bool:
     
     return False
 
+def _clamp_value(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+def detect_requested_image_count(message: str, default: int = 1) -> int:
+    """Extract requested image count from message text."""
+    lowered = message.lower()
+    number_words = {
+        'one': 1,
+        'two': 2,
+        'three': 3,
+        'four': 4,
+        'couple': 2,
+        'double': 2,
+        'pair': 2,
+        'few': 3,
+    }
+    
+    match = re.search(r'(\d+)\s*(?:image|images|picture|pictures|photo|photos|render|renders|pic|pics)\b', lowered)
+    if match:
+        count = int(match.group(1))
+        return _clamp_value(count, 1, MAX_GENERATED_IMAGES)
+    
+    for word, count in number_words.items():
+        if re.search(rf'\b{word}\b.*\b(?:image|images|picture|pictures|photo|photos|render|renders|pic|pics)\b', lowered):
+            return _clamp_value(count, 1, MAX_GENERATED_IMAGES)
+        if re.search(r'\b(?:image|images|picture|pictures|photo|photos|render|renders|pic|pics)\b.*\b' + re.escape(word) + r'\b', lowered):
+            return _clamp_value(count, 1, MAX_GENERATED_IMAGES)
+    
+    return _clamp_value(default, 1, MAX_GENERATED_IMAGES)
+
+def is_small_talk_message(content: str, has_question: bool, wants_image: bool, wants_image_edit: bool, has_attachments: bool) -> bool:
+    """Heuristic to detect light conversation where short replies are preferred."""
+    text = content.strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    
+    if has_question or '?' in text:
+        return False
+    if wants_image or wants_image_edit or has_attachments:
+        return False
+    if len(lowered) > 200:
+        return False
+    
+    small_talk_keywords = [
+        'hey', 'hi', 'hello', 'yo', 'sup', 'nice', 'thanks', 'thank you',
+        'lol', 'haha', 'good job', 'looks good', 'appreciate it', 'awesome',
+        'great work', 'that was cool', 'fire', 'lit', 'dope', 'sick', 'love it',
+        'good stuff', 'nice work', 'good looking', 'amazing', 'perfect'
+    ]
+    if any(phrase in lowered for phrase in small_talk_keywords):
+        return True
+    
+    # If it's a single short sentence without actionable verbs, treat as small talk
+    if len(lowered.split()) <= 12 and not re.search(r'\b(can|should|how|what|why|when|where|explain|help|fix|generate|make)\b', lowered):
+        return True
+    
+    return False
+
 def _mime_type_to_extension(mime_type: str) -> str:
     mime_type = (mime_type or '').lower()
     mapping = {
@@ -970,6 +1030,11 @@ Do not repeat or quote the user's words unless it helps clarify your answer.
 Keep responses purposeful and avoid mentioning internal system status.
 If you need to search the internet for current information, mention it.{thinking_note}"""
         
+        if small_talk:
+            response_prompt += "\n\nThe user is engaging in light conversation or giving quick feedback. Reply warmly and concisely (no more than two short sentences) while keeping the door open for further help."
+        else:
+            response_prompt += "\n\nIf the user is asking for help or information, feel free to provide as much detail as necessary to be genuinely helpful."
+        
         # Add images to prompt if present
         if image_parts:
             response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them."
@@ -1093,6 +1158,18 @@ Now decide: "{message.content}" -> """
             any(['edit' in message_lower, 'change' in message_lower, 'modify' in message_lower, 'transform' in message_lower])
         )
         
+        question_words = ['how', 'what', 'why', 'when', 'where', 'can ', 'can you', 'could', 'would', 'should', 'help', 'explain', 'fix', 'solve', 'build', 'generate', 'make', 'guide']
+        message_contains_question = ('?' in message.content) or any(word in message_lower for word in question_words)
+        small_talk = is_small_talk_message(
+            message.content,
+            has_question=message_contains_question,
+            wants_image=wants_image,
+            wants_image_edit=wants_image_edit,
+            has_attachments=bool(image_parts)
+        )
+        if small_talk:
+            print(f"💬 [{username}] Small talk detected - keeping response concise")
+        
         if wants_image_edit:
             # Edit the user's image
             try:
@@ -1117,9 +1194,13 @@ Now decide: "{message.content}" -> """
                     image_prompt = image_prompt.replace(trigger, '').strip()
                 
                 if len(image_prompt) > 10:  # Make sure there's an actual prompt
-                    generated_images = await generate_image(image_prompt, num_images=1)
+                    requested_count = detect_requested_image_count(message.content)
+                    generated_images = await generate_image(image_prompt, num_images=requested_count)
                     if generated_images:
-                        ai_response += "\n\n*Generated image based on your request*"
+                        if len(generated_images) > 1:
+                            ai_response += f"\n\n*Generated {len(generated_images)} images based on your request*"
+                        else:
+                            ai_response += "\n\n*Generated image based on your request*"
                     else:
                         ai_response += "\n\n(Tried to generate an image but something went wrong)"
             except Exception as e:
