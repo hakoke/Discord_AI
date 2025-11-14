@@ -1948,22 +1948,28 @@ CURRENT CONVERSATION CONTEXT:
             except Exception as e:
                 print(f"Error fetching replied message images: {e}")
         
-        document_assets = await collect_document_assets(message)
-        if document_assets:
-            doc_names = ", ".join(asset["filename"] for asset in document_assets)
-            print(f"📄 [{username}] Loaded {len(document_assets)} document(s): {doc_names}")
-            doc_prompt_section = build_document_prompt_section(document_assets)
-            if doc_prompt_section:
-                consciousness_prompt += doc_prompt_section
-        else:
+        # For summaries, skip document processing from current message (we just mention them)
+        if wants_summary:
             document_assets = []
-        
-        document_actions = ai_decide_document_actions(message, document_assets)
-        document_request = any(document_actions.values())
-        print(f"🗂️  [{username}] Document actions decided: {document_actions}")
-        if not document_request and document_assets:
-            document_actions["analyze_documents"] = True
-            document_request = True
+            document_actions = {"analyze_documents": False, "edit_documents": False, "generate_new_document": False}
+            document_request = False
+        else:
+            document_assets = await collect_document_assets(message)
+            if document_assets:
+                doc_names = ", ".join(asset["filename"] for asset in document_assets)
+                print(f"📄 [{username}] Loaded {len(document_assets)} document(s): {doc_names}")
+                doc_prompt_section = build_document_prompt_section(document_assets)
+                if doc_prompt_section:
+                    consciousness_prompt += doc_prompt_section
+            else:
+                document_assets = []
+            
+            document_actions = ai_decide_document_actions(message, document_assets)
+            document_request = any(document_actions.values())
+            print(f"🗂️  [{username}] Document actions decided: {document_actions}")
+            if not document_request and document_assets:
+                document_actions["analyze_documents"] = True
+                document_request = True
         
         # Determine user intentions and preferred reply style
         intention = ai_decide_intentions(message, image_parts)
@@ -2176,7 +2182,12 @@ Now decide: "{message.content}" -> """
                 return False
         
         decision_start = time.time()
-        needs_smart_model = decide_model()
+        # For summaries, always use fast model (summaries don't need deep reasoning)
+        if wants_summary:
+            needs_smart_model = False
+            decision_time = 0  # Skip decision for summaries
+        else:
+            needs_smart_model = decide_model()
         decision_time = time.time() - decision_start
         
         # Choose model based on AI decision (create fresh instance for thread safety)
