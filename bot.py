@@ -2681,6 +2681,11 @@ CURRENT CONVERSATION CONTEXT:
             if not SERPER_API_KEY:
                 return False
             
+            # Skip search for image editing requests - user already provided the image
+            if wants_image_edit:
+                print(f"⏭️  [{username}] Skipping internet search - image edit request detected")
+                return False
+            
             # Check if there are images attached - if so, include that context
             has_images = len(image_parts) > 0
             image_context = f"\n\nIMPORTANT: The user has attached {len(image_parts)} image(s) with this message. If you need to identify something in the image (a person, place, object, etc.) and you're not certain, you should search for it." if has_images else ""
@@ -2746,6 +2751,11 @@ Now decide: "{message.content}" -> """
         async def decide_if_image_search_needed():
             """AI decides if this question needs Google image search"""
             if not SERPER_API_KEY:
+                return False
+            
+            # Skip image search for image editing requests - user already provided the image
+            if wants_image_edit:
+                print(f"⏭️  [{username}] Skipping image search - image edit request detected")
                 return False
             
             image_search_decision_prompt = f"""User message: "{message.content}"
