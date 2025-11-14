@@ -1433,6 +1433,9 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
             for para_idx, paragraph in enumerate(paragraphs):
                 paragraph = paragraph.strip()
                 if paragraph:
+                    # Reset X position to left margin before each paragraph (multi_cell sets X to right margin after writing)
+                    pdf.set_x(pdf.l_margin)
+                    
                     # Use monospace font for code-like content (detect multiple languages)
                     # Check for common code patterns across Python, Java, C++, JavaScript, etc.
                     code_patterns = [
