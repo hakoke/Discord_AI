@@ -223,7 +223,7 @@ def get_fast_model():
     # Use current model (either preferred or fallback)
     current_model = rate_limit_status['current_fast_model']
     
-    return genai.GenerativeModel(
+    model = genai.GenerativeModel(
         current_model,
         generation_config={
             "temperature": 1.0,
@@ -238,10 +238,12 @@ def get_fast_model():
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
+    setattr(model, '_rate_limit_key', current_model)
+    return model
 
 def get_smart_model():
     """Get smart model instance (thread-safe)"""
-    return genai.GenerativeModel(
+    model = genai.GenerativeModel(
         SMART_MODEL,
         generation_config={
             "temperature": 1.0,
@@ -256,6 +258,8 @@ def get_smart_model():
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
+    setattr(model, '_rate_limit_key', SMART_MODEL)
+    return model
 
 def get_vision_model():
     """Get vision model instance (thread-safe with rate limit handling)"""
@@ -265,7 +269,7 @@ def get_vision_model():
     # If vision model is rate limited, use fallback
     current_vision_model = RATE_LIMIT_FALLBACK if rate_limit_status['fast_model_limited'] else VISION_MODEL
     
-    return genai.GenerativeModel(
+    model = genai.GenerativeModel(
         current_vision_model,
         generation_config={
             "temperature": 1.0,
@@ -280,6 +284,8 @@ def get_vision_model():
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
+    setattr(model, '_rate_limit_key', current_vision_model)
+    return model
 
 
 def handle_rate_limit_error(error):
@@ -572,11 +578,34 @@ class RateLimitedQueue:
 
 # Initialize the global rate-limited queue
 # Adjust these values based on your Google Cloud quota limits
-API_QUEUE = RateLimitedQueue(
-    max_concurrent=3,           # Max 3 concurrent API calls
-    requests_per_minute=25,      # Target 25 requests per minute (conservative)
-    base_delay=0.6              # Base delay of 0.6 seconds between requests
-)
+MODEL_RATE_LIMITS: Dict[str, Dict[str, Any]] = {
+    'gemini-2.0-flash': {
+        'max_concurrent': 6,
+        'requests_per_minute': 300,
+        'base_delay': 0.15,
+    },
+    'gemini-2.5-pro': {
+        'max_concurrent': 3,
+        'requests_per_minute': 120,
+        'base_delay': 0.35,
+    },
+}
+
+API_QUEUES: Dict[str, RateLimitedQueue] = {
+    model_name: RateLimitedQueue(
+        max_concurrent=limits['max_concurrent'],
+        requests_per_minute=limits['requests_per_minute'],
+        base_delay=limits['base_delay'],
+    )
+    for model_name, limits in MODEL_RATE_LIMITS.items()
+}
+
+# Fallback queue for any model not explicitly configured
+DEFAULT_API_QUEUE = API_QUEUES['gemini-2.0-flash']
+
+
+def _get_api_queue(model_name: Optional[str]) -> RateLimitedQueue:
+    return API_QUEUES.get(model_name or '', DEFAULT_API_QUEUE)
 
 async def queued_generate_content(model, prompt_or_content, **kwargs):
     """
@@ -593,7 +622,10 @@ async def queued_generate_content(model, prompt_or_content, **kwargs):
     def sync_generate():
         return model.generate_content(prompt_or_content, **kwargs)
     
-    return await API_QUEUE.execute(sync_generate)
+    queue_key = getattr(model, '_rate_limit_key', None)
+    api_queue = _get_api_queue(queue_key)
+    
+    return await api_queue.execute(sync_generate)
 
 # Keep these for backwards compatibility and quick access
 model_fast = get_fast_model()
@@ -639,6 +671,7 @@ if ENABLE_CACHE:
     def cached_generate(model_name: str, prompt: str) -> str:
         """Cached generation for repeated queries"""
         model = genai.GenerativeModel(model_name)
+        setattr(model, '_rate_limit_key', model_name)
         return model.generate_content(prompt).text
 else:
     cached_generate = None
@@ -742,9 +775,9 @@ async def generate_image(prompt: str, num_images: int = 1) -> list:
         return None
     
     try:
-        print(f"🚀 [IMAGE GEN] Queuing image generation request through API_QUEUE...")
-        # Queue the image generation through the rate-limited queue
-        result = await API_QUEUE.execute(_generate_image_sync, prompt, num_images)
+        print(f"🚀 [IMAGE GEN] Queuing image generation request through Flash queue...")
+        api_queue = _get_api_queue('gemini-2.0-flash')
+        result = await api_queue.execute(_generate_image_sync, prompt, num_images)
         print(f"🏁 [IMAGE GEN] ✅ Image generation completed, result type: {type(result)}")
         if result:
             print(f"🏁 [IMAGE GEN] ✅ Result is not None/empty, length: {len(result) if isinstance(result, list) else 'N/A'}")
@@ -921,8 +954,8 @@ async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Im
     
     try:
         print(f"🚀 [IMAGE EDIT] Queuing image edit request...")
-        # Queue the image editing through the rate-limited queue
-        result = await API_QUEUE.execute(_edit_image_sync, original_image_bytes, prompt)
+        api_queue = _get_api_queue('gemini-2.0-flash')
+        result = await api_queue.execute(_edit_image_sync, original_image_bytes, prompt)
         print(f"🏁 [IMAGE EDIT] Image editing completed")
         return result
     except Exception as e:
