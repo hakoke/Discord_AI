@@ -752,12 +752,24 @@ async def generate_image(prompt: str, num_images: int = 1) -> list:
             print(f"🏁 [IMAGE GEN] ⚠️  Result is None or empty")
         return result
     except Exception as e:
+        error_str = str(e).lower()
+        # Content policy errors should propagate to caller for proper user messaging
+        is_content_policy = any(keyword in error_str for keyword in [
+            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+            'content safety filters', 'blocked by content safety', 'image_bytes or gcs_uri must be provided'
+        ])
+        
+        if is_content_policy:
+            print(f"🚫 [IMAGE GEN] Content policy violation, propagating to caller: {e}")
+            # Re-raise content policy errors so they can be handled in generate_response
+            raise
+        
         print(f"❌ [IMAGE GEN] ❌ Error in generate_image(): {e}")
         print(f"❌ [IMAGE GEN] ❌ Error type: {type(e).__name__}")
         import traceback
         print(f"❌ [IMAGE GEN] ❌ Full traceback:\n{traceback.format_exc()}")
-        # Re-raise so caller can handle it
-        raise
+        # For other errors, return None (caller will handle gracefully)
+        return None
 
 def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
     """Synchronous image generation using Imagen 3"""
@@ -817,6 +829,17 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
                 person_generation="allow_all",
             )
             print(f"✅ [IMAGE GEN] API call successful, received response")
+        except ValueError as ve:
+            # ValueError with "image_bytes or gcs_uri" means the API returned empty/invalid images (blocked by safety)
+            error_str = str(ve).lower()
+            if 'image_bytes' in error_str or 'gcs_uri' in error_str:
+                print(f"🚫 [IMAGE GEN] Content safety filter blocked the image generation (ValueError: {ve})")
+                raise Exception(
+                    "The image generation was blocked by content safety filters. "
+                    "Please try a different image request that doesn't involve inappropriate, harmful, or prohibited content."
+                )
+            # Re-raise other ValueErrors
+            raise
         except Exception as api_error:
             error_str = str(api_error).lower()
             # Check if it's a content policy/safety error
@@ -871,6 +894,18 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         print(f"🎉 [IMAGE GEN] ✅ Returning images list with {len(images)} item(s)")
         return images
     except Exception as e:
+        error_str = str(e).lower()
+        # Check if it's a content policy error - these should propagate so user gets proper message
+        is_content_policy = any(keyword in error_str for keyword in [
+            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+            'content safety filters', 'blocked by content safety', 'image_bytes or gcs_uri must be provided'
+        ])
+        
+        if is_content_policy:
+            print(f"🚫 [IMAGE GEN] Content policy violation detected, propagating error to user")
+            # Re-raise content policy errors so they can be handled properly upstream
+            raise
+        
         print(f"❌ [IMAGE GEN] ❌ Error occurred in _generate_image_sync: {type(e).__name__}")
         print(f"❌ [IMAGE GEN] ❌ Error message: {str(e)}")
         import traceback
@@ -1038,6 +1073,41 @@ def should_respond_to_name(content: str) -> bool:
 
 def _clamp_value(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
+
+def compress_image_for_discord(img: Image.Image, max_width: int = 1024, max_height: int = 1024, quality: int = 85) -> BytesIO:
+    """
+    Compress and resize an image for Discord upload.
+    Discord has a 25MB limit per message, so we compress images to keep them small.
+    
+    Args:
+        img: PIL Image to compress
+        max_width: Maximum width in pixels
+        max_height: Maximum height in pixels
+        quality: JPEG quality (1-100, higher = better quality but larger file)
+    
+    Returns:
+        BytesIO object containing the compressed image
+    """
+    # Convert to RGB if needed (JPEG doesn't support transparency)
+    if img.mode in ('RGBA', 'LA', 'P'):
+        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+        if img.mode == 'P':
+            img = img.convert('RGBA')
+        if img.mode in ('RGBA', 'LA'):
+            rgb_img.paste(img, mask=img.split()[-1])
+        img = rgb_img
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    # Resize if too large
+    if img.width > max_width or img.height > max_height:
+        img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+    
+    # Save as JPEG with compression
+    img_bytes = BytesIO()
+    img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
+    img_bytes.seek(0)
+    return img_bytes
 
 def _heuristic_requested_image_count(message: str, default: int = 1) -> int:
     """Heuristic to extract requested image count from message text."""
@@ -3059,19 +3129,34 @@ Now decide: "{message.content}" -> """
                     print(f"🎨 [IMAGE REMAKE] Generation prompt length: {len(enhanced_prompt)} chars")
                     print(f"🎨 [IMAGE REMAKE] Generation prompt preview: {enhanced_prompt[:200]}...")
                     print(f"🎨 [IMAGE REMAKE] Calling generate_image() with prompt length: {len(enhanced_prompt)}")
-                    generated_images = await generate_image(enhanced_prompt, num_images=1)
-                    print(f"🎨 [IMAGE REMAKE] generate_image() returned: {type(generated_images)}, value: {generated_images}")
-                    if generated_images:
-                        print(f"🎨 [IMAGE REMAKE] ✅ Successfully generated {len(generated_images)} image(s) with Imagen 4")
-                        print(f"🎨 [IMAGE REMAKE] Image types: {[type(img) for img in generated_images]}")
-                        ai_response += "\n\n*Generated a remastered version based on your image*"
-                    else:
-                        print(f"❌ [IMAGE REMAKE] ❌ Imagen 4 generation returned no images (None or empty list)")
-                        print(f"❌ [IMAGE REMAKE] This could be due to:")
-                        print(f"❌ [IMAGE REMAKE]   - Content safety filters blocking the request")
-                        print(f"❌ [IMAGE REMAKE]   - API error in generate_image()")
-                        print(f"❌ [IMAGE REMAKE]   - Empty response from Imagen API")
-                        ai_response += "\n\n(Tried to remake the image but Imagen 4 didn't return results.)"
+                    try:
+                        generated_images = await generate_image(enhanced_prompt, num_images=1)
+                        print(f"🎨 [IMAGE REMAKE] generate_image() returned: {type(generated_images)}, value: {generated_images}")
+                        if generated_images:
+                            print(f"🎨 [IMAGE REMAKE] ✅ Successfully generated {len(generated_images)} image(s) with Imagen 4")
+                            print(f"🎨 [IMAGE REMAKE] Image types: {[type(img) for img in generated_images]}")
+                            ai_response += "\n\n*Generated a remastered version based on your image*"
+                        else:
+                            print(f"❌ [IMAGE REMAKE] ❌ Imagen 4 generation returned no images (None or empty list)")
+                            print(f"❌ [IMAGE REMAKE] This could be due to:")
+                            print(f"❌ [IMAGE REMAKE]   - Content safety filters blocking the request")
+                            print(f"❌ [IMAGE REMAKE]   - API error in generate_image()")
+                            print(f"❌ [IMAGE REMAKE]   - Empty response from Imagen API")
+                            ai_response += "\n\n(Tried to remake the image but Imagen 4 didn't return results.)"
+                    except Exception as img_gen_error:
+                        error_str = str(img_gen_error).lower()
+                        # Check if it's a content policy violation
+                        if any(keyword in error_str for keyword in [
+                            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+                            'content safety filters', 'blocked by content safety', 'image_bytes or gcs_uri must be provided'
+                        ]):
+                            print(f"🚫 [IMAGE REMAKE] Content policy violation: {img_gen_error}")
+                            ai_response += "\n\n(I can't generate that image transformation as it violates content safety policies. Please try a different request or rephrase it to avoid inappropriate, harmful, or prohibited content.)"
+                        else:
+                            print(f"❌ [IMAGE REMAKE] Error generating image: {img_gen_error}")
+                            import traceback
+                            print(f"❌ [IMAGE REMAKE] Traceback:\n{traceback.format_exc()}")
+                            ai_response += "\n\n(Tried to remake your image but something went wrong.)"
             except Exception as e:
                 print(f"❌ [IMAGE REMAKE] Error remaking image: {e}")
                 import traceback
@@ -3287,14 +3372,21 @@ async def on_message(message: discord.Message):
                     searched_images = []
                 
                 # Prepare files to attach (searched images + generated images - these go with the text response)
+                # Try without compression first (original quality)
                 files_to_attach = []
                 if searched_images:
                     for idx, img in enumerate(searched_images):
-                        img_bytes = BytesIO()
-                        img.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        file = discord.File(fp=img_bytes, filename=f'search_{idx+1}.png')
-                        files_to_attach.append(file)
+                        try:
+                            # Save as PNG (original quality, no compression)
+                            print(f"📎 [{message.author.display_name}] Preparing searched image {idx+1}/{len(searched_images)} (original quality)...")
+                            img_bytes = BytesIO()
+                            img.save(img_bytes, format='PNG', optimize=True)
+                            img_bytes.seek(0)
+                            file = discord.File(fp=img_bytes, filename=f'search_{idx+1}.png')
+                            files_to_attach.append(file)
+                            print(f"📎 [{message.author.display_name}] ✅ Searched image {idx+1} added")
+                        except Exception as img_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to prepare searched image {idx+1}: {img_error}")
                 
                 # Add generated images to files_to_attach (attach to same message)
                 print(f"📎 [{message.author.display_name}] Checking generated_images: {generated_images}")
@@ -3303,18 +3395,32 @@ async def on_message(message: discord.Message):
                     print(f"📎 [{message.author.display_name}] ✅ Adding {len(generated_images)} generated image(s) to attachments")
                     for idx, img in enumerate(generated_images):
                         try:
-                            # Convert PIL Image to bytes
-                            print(f"📎 [{message.author.display_name}] Converting image {idx+1}/{len(generated_images)} to Discord file...")
+                            # Save as PNG (original quality, no compression)
+                            print(f"📎 [{message.author.display_name}] Preparing generated image {idx+1}/{len(generated_images)} (original quality)...")
                             img_bytes = BytesIO()
-                            img.save(img_bytes, format='PNG')
+                            img.save(img_bytes, format='PNG', optimize=True)
                             img_bytes.seek(0)
                             file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
                             files_to_attach.append(file)
-                            print(f"📎 [{message.author.display_name}] ✅ Image {idx+1} added to files_to_attach")
+                            print(f"📎 [{message.author.display_name}] ✅ Generated image {idx+1} added")
                         except Exception as img_error:
-                            print(f"📎 [{message.author.display_name}] ❌ Failed to convert image {idx+1}: {img_error}")
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to prepare generated image {idx+1}: {img_error}")
                 else:
                     print(f"📎 [{message.author.display_name}] ⚠️  No generated_images to attach (value: {generated_images})")
+                
+                # Helper function to compress images if needed
+                def compress_files_if_needed(images_list, image_type: str):
+                    """Compress images and return new file list"""
+                    compressed_files = []
+                    for idx, img in enumerate(images_list):
+                        try:
+                            print(f"📎 [{message.author.display_name}] Compressing {image_type} image {idx+1}...")
+                            img_bytes = compress_image_for_discord(img)
+                            file = discord.File(fp=img_bytes, filename=f'{image_type}_{idx+1}.jpg')
+                            compressed_files.append(file)
+                        except Exception as img_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to compress {image_type} image {idx+1}: {img_error}")
+                    return compressed_files
                 
                 # Send text response with all images attached (if any)
                 if response:
@@ -3324,11 +3430,64 @@ async def on_message(message: discord.Message):
                         # Attach images to the first chunk only
                         for i, chunk in enumerate(chunks):
                             if i == 0 and files_to_attach:
-                                await message.channel.send(chunk, files=files_to_attach, reference=message)
+                                try:
+                                    await message.channel.send(chunk, files=files_to_attach, reference=message)
+                                except discord.errors.HTTPException as e:
+                                    if e.status == 413:  # Payload Too Large
+                                        print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
+                                        # Compress all images and retry
+                                        compressed_files = []
+                                        if searched_images:
+                                            compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
+                                        if generated_images:
+                                            compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                        
+                                        try:
+                                            await message.channel.send(chunk, files=compressed_files, reference=message)
+                                        except discord.errors.HTTPException as e2:
+                                            if e2.status == 413:  # Still too large even after compression
+                                                print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
+                                                # Send text first
+                                                await message.channel.send(chunk, reference=message)
+                                                # Send images in smaller batches (max 2 per message)
+                                                for batch_start in range(0, len(compressed_files), 2):
+                                                    batch = compressed_files[batch_start:batch_start + 2]
+                                                    await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                            else:
+                                                raise
+                                    else:
+                                        raise
                             else:
                                 await message.channel.send(chunk, reference=message)
                     else:
-                        await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
+                        try:
+                            await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
+                        except discord.errors.HTTPException as e:
+                            if e.status == 413:  # Payload Too Large
+                                print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
+                                # Compress all images and retry
+                                compressed_files = []
+                                if searched_images:
+                                    compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
+                                if generated_images:
+                                    compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                
+                                try:
+                                    await message.channel.send(response, files=compressed_files, reference=message)
+                                except discord.errors.HTTPException as e2:
+                                    if e2.status == 413:  # Still too large even after compression
+                                        print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
+                                        # Send text first
+                                        await message.channel.send(response, reference=message)
+                                        # Send images in smaller batches (max 2 per message)
+                                        if compressed_files:
+                                            for batch_start in range(0, len(compressed_files), 2):
+                                                batch = compressed_files[batch_start:batch_start + 2]
+                                                await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                    else:
+                                        raise
+                            else:
+                                raise
                 
                 if generated_documents:
                     for doc in generated_documents:
@@ -3414,12 +3573,31 @@ async def generate_image_command(ctx, *, prompt: str):
             
             if images:
                 for idx, img in enumerate(images):
+                    # Try without compression first (original quality)
                     img_bytes = BytesIO()
-                    img.save(img_bytes, format='PNG')
+                    img.save(img_bytes, format='PNG', optimize=True)
                     img_bytes.seek(0)
-                    
                     file = discord.File(fp=img_bytes, filename=f'imagine_{idx+1}.png')
-                    await ctx.send(f"Generated image for: *{prompt}*", file=file)
+                    try:
+                        await ctx.send(f"Generated image for: *{prompt}*", file=file)
+                    except discord.errors.HTTPException as e:
+                        if e.status == 413:  # Payload Too Large
+                            print(f"⚠️  Image too large, compressing...")
+                            # Compress and retry
+                            img_bytes = compress_image_for_discord(img)
+                            file = discord.File(fp=img_bytes, filename=f'imagine_{idx+1}.jpg')
+                            try:
+                                await ctx.send(f"Generated image for: *{prompt}*", file=file)
+                            except discord.errors.HTTPException as e2:
+                                if e2.status == 413:  # Still too large
+                                    # Try with even more aggressive compression
+                                    img_bytes = compress_image_for_discord(img, max_width=800, max_height=800, quality=75)
+                                    file = discord.File(fp=img_bytes, filename=f'imagine_{idx+1}.jpg')
+                                    await ctx.send(f"Generated image for: *{prompt}*", file=file)
+                                else:
+                                    raise
+                        else:
+                            raise
             else:
                 await ctx.send("Failed to generate image. Try again!")
         except Exception as e:
