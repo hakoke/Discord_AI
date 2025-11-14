@@ -1112,29 +1112,49 @@ def _pdf_safe_text(text: str) -> str:
 PDF_MAX_WORD_LENGTH = 60
 LONG_WORD_PATTERN = re.compile(r'\S{' + str(PDF_MAX_WORD_LENGTH + 1) + r',}')
 
-def _pdf_break_long_words(text: str) -> str:
+def _pdf_log_preview(text: str, max_length: int = 80) -> str:
+    if text is None:
+        return ""
+    collapsed = ' '.join(str(text).split())
+    if len(collapsed) > max_length:
+        return collapsed[:max_length] + "..."
+    return collapsed
+
+def _pdf_break_long_words(text: str, context: str = "") -> str:
     if not text:
         return text
 
     def _breaker(match: re.Match) -> str:
         word = match.group(0)
+        if context:
+            print(f"⚠️  [PDF] Breaking long word (len={len(word)}) in context='{context}'. Preview: '{_pdf_log_preview(word)}'")
         chunks = [word[i:i + PDF_MAX_WORD_LENGTH] for i in range(0, len(word), PDF_MAX_WORD_LENGTH)]
         return ' '.join(chunks)
 
     return LONG_WORD_PATTERN.sub(_breaker, text)
 
-def _pdf_prepare_text(text: str) -> str:
-    return _pdf_break_long_words(_pdf_safe_text(text))
+def _pdf_prepare_text(text: str, context: str = "") -> str:
+    return _pdf_break_long_words(_pdf_safe_text(text), context)
 
-def _safe_multi_cell(pdf: FPDF, text: str, line_height: float, **kwargs) -> None:
-    prepared = _pdf_prepare_text(text)
+def _safe_multi_cell(pdf: FPDF, text: str, line_height: float, *, context: str = "", **kwargs) -> None:
+    prepared = _pdf_prepare_text(text, context)
+    if context:
+        print(f"📝 [PDF] Writing context='{context}' original_len={len(str(text))} sanitized_len={len(prepared)}")
+    preview = _pdf_log_preview(prepared, 120)
+    if context:
+        print(f"📝 [PDF] Content preview ({context}): '{preview}'")
     try:
         pdf.multi_cell(0, line_height, prepared, **kwargs)
     except RuntimeError as error:
+        if context:
+            print(f"❗ [PDF] Error writing context='{context}': {error}. Retrying with forced breaks.")
         if "Not enough horizontal space" not in str(error):
             raise
         # Force additional breaks and retry once
-        forced = _pdf_break_long_words(prepared.replace('-', '- '))
+        forced_context = f"{context} [forced]" if context else "forced"
+        forced = _pdf_break_long_words(prepared.replace('-', '- '), forced_context)
+        if context:
+            print(f"🛠️  [PDF] Retrying context='{context}' with forced_len={len(forced)} Preview: '{_pdf_log_preview(forced, 120)}'")
         pdf.multi_cell(0, line_height, forced, **kwargs)
 
 def build_document_prompt_section(document_assets: List[Dict[str, Any]]) -> str:
@@ -1237,14 +1257,25 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
     title = descriptor.get("title")
     if title:
         pdf.set_font("Helvetica", "B", 18)
-        _safe_multi_cell(pdf, title, 10, align='C')
+        _safe_multi_cell(
+            pdf,
+            title,
+            10,
+            context=f"title:{_pdf_log_preview(title)}",
+            align='C'
+        )
         pdf.ln(4)
 
     for section in sections:
         heading = section.get("heading")
         if heading:
             pdf.set_font("Helvetica", "B", 14)
-            _safe_multi_cell(pdf, heading, 8)
+            _safe_multi_cell(
+                pdf,
+                heading,
+                8,
+                context=f"heading:{_pdf_log_preview(heading)}"
+            )
             pdf.ln(2)
 
         body = section.get("body", "")
@@ -1253,7 +1284,12 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
             for paragraph in body.split("\n"):
                 paragraph = paragraph.strip()
                 if paragraph:
-                    _safe_multi_cell(pdf, paragraph, 6)
+                    _safe_multi_cell(
+                        pdf,
+                        paragraph,
+                        6,
+                        context=f"body:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(paragraph)}"
+                    )
                 else:
                     pdf.ln(4)
             pdf.ln(2)
@@ -1266,7 +1302,12 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
                 if not bullet_text:
                     continue
                 pdf.set_x(pdf.l_margin)
-                _safe_multi_cell(pdf, f"- {bullet_text}", 6)
+                _safe_multi_cell(
+                    pdf,
+                    f"- {bullet_text}",
+                    6,
+                    context=f"bullet:{_pdf_log_preview(heading or 'no heading')}:{_pdf_log_preview(bullet_text)}"
+                )
             pdf.ln(2)
 
     output = pdf.output(dest='S')
