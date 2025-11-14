@@ -69,6 +69,8 @@ class MemorySystem:
             history.append(f"You: {interaction['bot_response']}")
             if interaction['has_images']:
                 history.append("(User shared images)")
+            if interaction.get('has_documents'):
+                history.append("(User shared documents)")
             history.append("")  # Blank line
         
         return "\n".join(history)
@@ -102,7 +104,10 @@ RECENT CONVERSATION HISTORY:
 {json.dumps([{
     'user': r['user_message'],
     'bot': r['bot_response'],
-    'time': r['timestamp'].isoformat()
+    'time': r['timestamp'].isoformat(),
+    'has_images': r.get('has_images', False),
+    'has_documents': r.get('has_documents', False),
+    'search_query': r.get('search_query')
 } for r in recent_interactions], indent=2, default=str)}
 
 YOU HAVE COMPLETE FREEDOM TO STRUCTURE YOUR MEMORY HOWEVER YOU WANT.
@@ -306,11 +311,12 @@ NOW: What did you learn from {username}? Be honest and specific."""
     
     async def store_interaction(self, user_id: str, username: str, guild_id: str,
                                user_message: str, bot_response: str, context: str = None,
-                               has_images: bool = False, search_query: str = None):
+                               has_images: bool = False, has_documents: bool = False,
+                               search_query: str = None):
         """Store interaction in database"""
         return await self.db.store_interaction(
             user_id, username, guild_id, user_message, bot_response,
-            context, has_images, search_query
+            context, has_images, has_documents, search_query
         )
     
     async def clear_user_memory(self, user_id: str):

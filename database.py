@@ -24,9 +24,14 @@ class Database:
                     bot_response TEXT NOT NULL,
                     context JSONB,
                     has_images BOOLEAN DEFAULT FALSE,
+                    has_documents BOOLEAN DEFAULT FALSE,
                     search_query TEXT,
                     timestamp TIMESTAMP DEFAULT NOW()
                 )
+            ''')
+            await conn.execute('''
+                ALTER TABLE interactions 
+                ADD COLUMN IF NOT EXISTS has_documents BOOLEAN DEFAULT FALSE
             ''')
             
             # User memory table - stores consciousness/personality per user
@@ -78,15 +83,16 @@ class Database:
     
     async def store_interaction(self, user_id: str, username: str, guild_id: str, 
                                 user_message: str, bot_response: str, context: str = None,
-                                has_images: bool = False, search_query: str = None):
+                                has_images: bool = False, has_documents: bool = False,
+                                search_query: str = None):
         """Store a conversation interaction"""
         async with self.pool.acquire() as conn:
             interaction_id = await conn.fetchval('''
                 INSERT INTO interactions 
-                (user_id, username, guild_id, user_message, bot_response, context, has_images, search_query)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (user_id, username, guild_id, user_message, bot_response, context, has_images, has_documents, search_query)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
-            ''', user_id, username, guild_id, user_message, bot_response, context, has_images, search_query)
+            ''', user_id, username, guild_id, user_message, bot_response, context, has_images, has_documents, search_query)
             
             return interaction_id
     
@@ -94,7 +100,7 @@ class Database:
         """Get recent interactions for a user"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch('''
-                SELECT user_message, bot_response, timestamp, has_images, search_query
+                SELECT user_message, bot_response, timestamp, has_images, has_documents, search_query
                 FROM interactions
                 WHERE user_id = $1
                 ORDER BY timestamp DESC

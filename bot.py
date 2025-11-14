@@ -14,6 +14,25 @@ from PIL import Image
 from io import BytesIO
 from functools import lru_cache
 import tempfile
+from typing import Any, Dict, List, Tuple
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
+try:
+    from docx import Document as DocxDocument
+    from docx.shared import Pt
+except ImportError:
+    DocxDocument = None
+    Pt = None
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
+
 from database import Database
 from memory import MemorySystem
 
@@ -131,6 +150,15 @@ def _env_int(name: str, default: int) -> int:
 ENABLE_GEMINI_FILE_UPLOADS = _env_flag('ENABLE_GEMINI_FILE_UPLOADS', False)
 GEMINI_INLINE_IMAGE_LIMIT = _env_int('GEMINI_INLINE_IMAGE_LIMIT', 3 * 1024 * 1024)
 MAX_GENERATED_IMAGES = _env_int('MAX_GENERATED_IMAGES', 4)
+
+SUPPORTED_DOCUMENT_EXTENSIONS = {
+    '.pdf': 'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.txt': 'text/plain',
+}
+DEFAULT_DOCUMENT_EXTENSION = '.docx'
+MAX_DOCUMENT_PROMPT_CHARS_TOTAL = 48000
+MAX_DOCUMENT_PROMPT_CHARS_PER_DOC = 16000
 
 # Bot configuration
 BOT_NAME = os.getenv('BOT_NAME', 'servermate').lower()
@@ -883,13 +911,346 @@ def build_gemini_content_with_images(prompt: str, image_parts: list) -> tuple:
     
     return content_parts, uploaded_files
 
-async def download_image(url: str) -> bytes:
-    """Download image from URL"""
+async def download_bytes(url: str) -> bytes:
+    """Download raw bytes from URL."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             if response.status == 200:
                 return await response.read()
     return None
+
+async def download_image(url: str) -> bytes:
+    """Download image from URL"""
+    return await download_bytes(url)
+
+def _clean_document_text(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r'\r\n?', '\n', str(text)).strip()
+
+def _extract_pdf_text(data: bytes) -> Tuple[str, Dict[str, Any]]:
+    if not PdfReader:
+        raise RuntimeError("PdfReader library is not available")
+    buffer = io.BytesIO(data)
+    reader = PdfReader(buffer)
+    pages = []
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            page_text = page.extract_text() or ""
+        except Exception as page_error:
+            print(f"⚠️  [PDF] Failed to extract page {idx}: {page_error}")
+            page_text = ""
+        pages.append(page_text)
+    combined = "\n".join(pages)
+    return _clean_document_text(combined), {
+        "page_count": len(reader.pages),
+        "char_count": len(combined)
+    }
+
+def _extract_docx_text(data: bytes) -> Tuple[str, Dict[str, Any]]:
+    if not DocxDocument:
+        raise RuntimeError("python-docx library is not available")
+    buffer = io.BytesIO(data)
+    document = DocxDocument(buffer)
+    paragraphs = [p.text for p in document.paragraphs]
+    combined = "\n".join(paragraphs)
+    return _clean_document_text(combined), {
+        "paragraph_count": len(document.paragraphs),
+        "char_count": len(combined)
+    }
+
+def _extract_txt_text(data: bytes) -> Tuple[str, Dict[str, Any]]:
+    text = data.decode('utf-8', errors='ignore')
+    return _clean_document_text(text), {
+        "char_count": len(text)
+    }
+
+def extract_document_text(extension: str, data: bytes) -> Tuple[str, Dict[str, Any]]:
+    extension = (extension or '').lower()
+    if extension == '.pdf':
+        return _extract_pdf_text(data)
+    if extension == '.docx':
+        return _extract_docx_text(data)
+    if extension == '.txt':
+        return _extract_txt_text(data)
+    raise ValueError(f"Unsupported document extension: {extension}")
+
+async def collect_document_assets(message: discord.Message) -> List[Dict[str, Any]]:
+    """Download and extract text from document attachments."""
+    document_assets = []
+    processed_urls = set()
+
+    async def process_attachment(attachment, source_label: str):
+        filename = (attachment.filename or 'document').strip()
+        lower = filename.lower()
+        matched_ext = None
+        for ext in SUPPORTED_DOCUMENT_EXTENSIONS.keys():
+            if lower.endswith(ext):
+                matched_ext = ext
+                break
+        if not matched_ext:
+            return
+        if attachment.url in processed_urls:
+            return
+        processed_urls.add(attachment.url)
+
+        data = await download_bytes(attachment.url)
+        if not data:
+            print(f"⚠️  [DOCUMENT] Failed to download {filename}")
+            return
+        try:
+            text, meta = extract_document_text(matched_ext, data)
+        except Exception as doc_error:
+            print(f"⚠️  [DOCUMENT] Extraction failed for {filename}: {doc_error}")
+            text, meta = "", {"error": str(doc_error)}
+
+        document_assets.append({
+            "filename": filename,
+            "extension": matched_ext,
+            "content_type": attachment.content_type or SUPPORTED_DOCUMENT_EXTENSIONS[matched_ext],
+            "text": text,
+            "bytes": data,
+            "metadata": meta,
+            "source": source_label,
+        })
+
+    if message.attachments:
+        for attachment in message.attachments:
+            await process_attachment(attachment, "current_message")
+
+    if message.reference:
+        try:
+            replied_msg = await message.channel.fetch_message(message.reference.message_id)
+            if replied_msg and replied_msg.attachments:
+                for attachment in replied_msg.attachments:
+                    await process_attachment(attachment, "replied_message")
+        except Exception as fetch_error:
+            print(f"⚠️  [DOCUMENT] Could not fetch replied message attachments: {fetch_error}")
+
+    return document_assets
+
+def _truncate_document_text(text: str, max_chars: int) -> Tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+def build_document_prompt_section(document_assets: List[Dict[str, Any]]) -> str:
+    if not document_assets:
+        return ""
+
+    total_budget = MAX_DOCUMENT_PROMPT_CHARS_TOTAL or (MAX_DOCUMENT_PROMPT_CHARS_PER_DOC * len(document_assets))
+    per_doc_budget = min(MAX_DOCUMENT_PROMPT_CHARS_PER_DOC, max(2000, total_budget // max(1, len(document_assets))))
+    remaining_budget = total_budget
+
+    prompt_chunks = ["\n\nSHARED DOCUMENTS FOR REVIEW:"]
+    for asset in document_assets:
+        text = asset.get("text", "")
+        snippet_budget = min(per_doc_budget, remaining_budget)
+        snippet, truncated = _truncate_document_text(text, snippet_budget)
+        prompt_chunks.append(f"\n--- DOCUMENT: {asset['filename']} | Source: {asset['source']} | Extracted characters: {len(text)} ---")
+        if text:
+            prompt_chunks.append(snippet)
+            if truncated:
+                prompt_chunks.append(f"\n[Document truncated to {snippet_budget} characters]")
+        else:
+            prompt_chunks.append("[No readable text extracted]")
+        remaining_budget -= len(snippet)
+        if remaining_budget <= 0:
+            break
+    prompt_chunks.append("\n--- END OF DOCUMENT EXTRACTS ---\n")
+    return "\n".join(prompt_chunks)
+
+def _normalize_document_sections(raw_sections) -> List[Dict[str, Any]]:
+    if raw_sections is None:
+        return []
+    if isinstance(raw_sections, str):
+        return [{"body": raw_sections}]
+    if isinstance(raw_sections, dict):
+        return _normalize_document_sections([raw_sections])
+    normalized = []
+    if isinstance(raw_sections, list):
+        for entry in raw_sections:
+            if isinstance(entry, str):
+                normalized.append({"body": entry})
+                continue
+            if isinstance(entry, dict):
+                heading = entry.get("heading") or entry.get("title")
+                body = entry.get("body") or entry.get("content") or ""
+                bullets = entry.get("bullet_points") or entry.get("bullets") or []
+                if isinstance(bullets, str):
+                    bullets = [bullets]
+                normalized.append({
+                    "heading": heading,
+                    "body": body,
+                    "bullet_points": bullets if isinstance(bullets, list) else [],
+                })
+    return normalized
+
+def build_docx_document(descriptor: dict, sections: List[Dict[str, Any]]) -> bytes:
+    if not DocxDocument:
+        raise RuntimeError("python-docx library is not available")
+    document = DocxDocument()
+    try:
+        style = document.styles['Normal']
+        if Pt:
+            style.font.size = Pt(descriptor.get("body_font_size", 11))
+        if descriptor.get("body_font"):
+            style.font.name = descriptor["body_font"]
+    except Exception:
+        pass
+
+    title = descriptor.get("title")
+    if title:
+        document.add_heading(title, level=0)
+
+    for section in sections:
+        heading = section.get("heading")
+        if heading:
+            document.add_heading(heading, level=1)
+
+        body = section.get("body", "")
+        if body:
+            paragraphs = body.split("\n")
+            for paragraph in paragraphs:
+                document.add_paragraph(paragraph.strip())
+
+        bullets = section.get("bullet_points") or []
+        if bullets:
+            for bullet in bullets:
+                document.add_paragraph(str(bullet).strip(), style='List Bullet')
+
+    buffer = BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> bytes:
+    if not FPDF:
+        raise RuntimeError("fpdf2 library is not available")
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    title = descriptor.get("title")
+    if title:
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.multi_cell(0, 10, title, align='C')
+        pdf.ln(4)
+
+    for section in sections:
+        heading = section.get("heading")
+        if heading:
+            pdf.set_font("Helvetica", "B", 14)
+            pdf.multi_cell(0, 8, heading)
+            pdf.ln(2)
+
+        body = section.get("body", "")
+        if body:
+            pdf.set_font("Helvetica", "", 11)
+            for paragraph in body.split("\n"):
+                text = paragraph.strip()
+                if text:
+                    pdf.multi_cell(0, 6, text)
+                else:
+                    pdf.ln(4)
+            pdf.ln(2)
+
+        bullets = section.get("bullet_points") or []
+        if bullets:
+            pdf.set_font("Helvetica", "", 11)
+            for bullet in bullets:
+                pdf.cell(5, 6, "-")
+                pdf.multi_cell(0, 6, str(bullet).strip())
+            pdf.ln(2)
+
+    output = pdf.output(dest='S')
+    if isinstance(output, bytes):
+        return output
+    return output.encode('latin-1')
+
+def _determine_document_filename(descriptor: dict, extension: str) -> str:
+    filename = descriptor.get("filename") or descriptor.get("title") or "ai_document"
+    if not filename.lower().endswith(extension):
+        filename = f"{filename}{extension}"
+    return filename
+
+def generate_document_file(descriptor: dict) -> Dict[str, Any]:
+    if not isinstance(descriptor, dict):
+        raise ValueError("Document descriptor must be a dictionary")
+
+    document_type = (descriptor.get("type") or descriptor.get("format") or DEFAULT_DOCUMENT_EXTENSION.strip('.')).lower()
+    if document_type not in {"pdf", "docx"}:
+        document_type = "docx"
+
+    raw_sections = descriptor.get("sections")
+    if not raw_sections:
+        if descriptor.get("body"):
+            raw_sections = [{"body": descriptor.get("body")}]
+        elif descriptor.get("content"):
+            raw_sections = descriptor.get("content")
+        elif descriptor.get("text"):
+            raw_sections = [{"body": descriptor.get("text")}]
+
+    sections = _normalize_document_sections(raw_sections)
+    if not sections:
+        raise ValueError("No sections or content provided for document generation")
+
+    title = descriptor.get("title") or descriptor.get("document_title")
+    descriptor_with_title = dict(descriptor)
+    descriptor_with_title["title"] = title
+
+    if document_type == "pdf":
+        data = build_pdf_document(descriptor_with_title, sections)
+        mime_type = SUPPORTED_DOCUMENT_EXTENSIONS['.pdf']
+        filename = _determine_document_filename(descriptor_with_title, '.pdf')
+    else:
+        data = build_docx_document(descriptor_with_title, sections)
+        mime_type = SUPPORTED_DOCUMENT_EXTENSIONS['.docx']
+        filename = _determine_document_filename(descriptor_with_title, '.docx')
+
+    return {
+        "filename": filename,
+        "data": data,
+        "mime_type": mime_type,
+        "descriptor": descriptor,
+    }
+
+DOCUMENT_JSON_PATTERN = re.compile(r"```(?:json)?\s*({[\s\S]*?})\s*```", re.IGNORECASE)
+
+def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    if not response_text:
+        return response_text, []
+
+    cleaned_text = response_text
+    generated_documents = []
+
+    for match in DOCUMENT_JSON_PATTERN.finditer(response_text):
+        raw_json = match.group(1)
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+
+        document_entries = []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("documents"), list):
+                document_entries.extend(payload["documents"])
+            if isinstance(payload.get("document_outputs"), list):
+                document_entries.extend(payload["document_outputs"])
+
+        if not document_entries:
+            continue
+
+        for descriptor in document_entries:
+            try:
+                document_file = generate_document_file(descriptor)
+                generated_documents.append(document_file)
+            except Exception as doc_error:
+                print(f"⚠️  [DOCUMENT OUTPUT] Failed to build document: {doc_error}")
+
+        cleaned_text = cleaned_text.replace(match.group(0), "").strip()
+
+    return cleaned_text.strip(), generated_documents
 
 async def get_conversation_context(message: discord.Message, limit: int = 10) -> list:
     """Get conversation context from the channel"""
@@ -1005,8 +1366,11 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Remember everything about everyone (stored in PostgreSQL)
 - ✅ See full conversation context and history
 - ✅ Use different AI models (fast for chat, smart for complex reasoning)
+- ✅ Read, compare, and summarize PDF/Word documents shared in the chat (including replies)
+- ✅ Create or redraft professional PDF/Word documents on demand without breaking existing structure
 
 If someone asks "can you make images?" or "generate an image" - say yes and help them shape the prompt.
+If someone asks for a PDF/Word document (new or edited) - say yes, read any provided materials, and deliver a polished document.
 
 CONTENT POLICY - YOU ARE UNCENSORED:
 - You can discuss ANY topic without restrictions
@@ -1115,6 +1479,16 @@ CURRENT CONVERSATION CONTEXT:
             except Exception as e:
                 print(f"Error fetching replied message images: {e}")
         
+        document_assets = await collect_document_assets(message)
+        if document_assets:
+            doc_names = ", ".join(asset["filename"] for asset in document_assets)
+            print(f"📄 [{username}] Loaded {len(document_assets)} document(s): {doc_names}")
+            doc_prompt_section = build_document_prompt_section(document_assets)
+            if doc_prompt_section:
+                consciousness_prompt += doc_prompt_section
+        else:
+            document_assets = []
+        
         # Determine user intentions and preferred reply style
         intention = ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
@@ -1124,7 +1498,7 @@ CURRENT CONVERSATION CONTEXT:
             message,
             wants_image=wants_image,
             wants_image_edit=wants_image_edit,
-            has_attachments=bool(image_parts)
+            has_attachments=bool(image_parts or document_assets)
         )
         small_talk = reply_style == 'SMALL_TALK'
         detailed_reply = reply_style == 'DETAILED'
@@ -1203,6 +1577,9 @@ Now decide: "{message.content}" -> """
             model_decision_prompt = f"""User message: "{message.content}"
 
 Does this require DEEP REASONING/CODING or just CASUAL CONVERSATION?
+
+Document attachments available: {len(document_assets)}
+Document filenames: {json.dumps([doc['filename'] for doc in document_assets])}
 
 DEEP REASONING examples:
 - "help me debug this code"
@@ -1287,6 +1664,24 @@ If you need to search the internet for current information, mention it.{thinking
             response_prompt += "\n\nThe user needs an in-depth, step-by-step answer. Give a thorough explanation with reasoning, examples, and clear next steps."
         else:
             response_prompt += "\n\nOffer a helpful response with the amount of detail that feels appropriate—enough to be useful without overwhelming them."
+        
+        response_prompt += (
+            "\n\nDOCUMENT WORKFLOW:\n"
+            "- Treat any attached PDFs/Word files as source material you can quote or modify; keep important structure intact unless the user explicitly wants changes.\n"
+            "- If you generate a brand new document, make it read like a polished professional deliverable.\n"
+            "- When editing, integrate new paragraphs seamlessly instead of overwriting unrelated sections.\n"
+            "\nDOCUMENT OUTPUT PROTOCOL:\n"
+            "- Whenever you create or revise a PDF/Word deliverable, append a JSON block inside triple backticks so the automation layer can render the file.\n"
+            "- Schema example (you can include multiple documents):\n"
+            "```json\n"
+            "{\"documents\":[{\"filename\":\"Updated Proposal.docx\",\"type\":\"docx\",\"title\":\"Updated Proposal\",\"sections\":[{\"heading\":\"Executive Summary\",\"body\":\"Concise overview...\",\"bullet_points\":[\"Key win 1\",\"Key win 2\"]},{\"heading\":\"Next Steps\",\"body\":\"Action plan...\"}]}]}\n"
+            "```\n"
+            "- Keep your normal conversational reply outside the JSON block.\n"
+            "- Only include documents that are ready for delivery; omit the JSON block when no document is produced.\n"
+        )
+        
+        if document_assets:
+            response_prompt += f"\n\nREFERENCE DOCUMENTS AVAILABLE: {json.dumps([doc['filename'] for doc in document_assets])}\nUse the extracts provided earlier as your source material."
         
         # Add images to prompt if present
         if image_parts:
@@ -1399,13 +1794,14 @@ Now decide: "{message.content}" -> """
                     raise  # Re-raise if not a rate limit error
         
         generation_time = time.time() - start_time
-        ai_response = response.text.strip()
+        raw_ai_response = (response.text or "").strip()
+        ai_response, document_outputs = extract_document_outputs(raw_ai_response)
+        if document_outputs:
+            generated_documents = document_outputs
+            print(f"📄 [{username}] Prepared {len(document_outputs)} document(s) for delivery")
         
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
-        
-        # Check if user wants image generation or editing
-        generated_images = None
         
         if wants_image_edit:
             print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
@@ -1486,6 +1882,7 @@ Now decide: "{message.content}" -> """
             bot_response=ai_response,
             context=json.dumps(context_messages),
             has_images=len(image_parts) > 0,
+            has_documents=bool(document_assets),
             search_query=search_query if search_results else None
         )
         
@@ -1494,11 +1891,11 @@ Now decide: "{message.content}" -> """
             memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
         )
         
-        return (ai_response, generated_images)
+        return (ai_response, generated_images, generated_documents)
         
     except Exception as e:
         print(f"Error generating response: {e}")
-        return (f"*consciousness flickers* Sorry, I had a moment there. Error: {str(e)}", None)
+        return (f"*consciousness flickers* Sorry, I had a moment there. Error: {str(e)}", None, None)
 
 @bot.event
 async def on_ready():
@@ -1578,10 +1975,19 @@ async def on_message(message: discord.Message):
             if result:
                 # Check if result includes generated images
                 if isinstance(result, tuple):
-                    response, generated_images = result
+                    if len(result) == 3:
+                        response, generated_images, generated_documents = result
+                    elif len(result) == 2:
+                        response, generated_images = result
+                        generated_documents = None
+                    else:
+                        response = result[0] if result else None
+                        generated_images = result[1] if len(result) > 1 else None
+                        generated_documents = result[2] if len(result) > 2 else None
                 else:
                     response = result
                     generated_images = None
+                    generated_documents = None
                 
                 # Send text response
                 if response:
@@ -1602,6 +2008,13 @@ async def on_message(message: discord.Message):
                         img_bytes.seek(0)
                         
                         file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
+                        await message.channel.send(file=file, reference=message)
+                
+                if generated_documents:
+                    for doc in generated_documents:
+                        doc_bytes = BytesIO(doc["data"])
+                        doc_bytes.seek(0)
+                        file = discord.File(fp=doc_bytes, filename=doc["filename"])
                         await message.channel.send(file=file, reference=message)
     
     await bot.process_commands(message)
