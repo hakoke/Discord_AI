@@ -42,14 +42,33 @@ try:
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file.name
         credentials_path = temp_file.name
         print(f"✅ Created credentials file from environment variable")
+        print(f"   - Temp file path: {temp_file.name}")
+        print(f"   - Credentials JSON length: {len(credentials_json)} chars")
+        
+        # Verify the file was written correctly
+        try:
+            with open(temp_file.name, 'r') as f:
+                verify_json = json.load(f)
+                print(f"   - JSON keys: {list(verify_json.keys())}")
+                print(f"   - Project ID in JSON: {verify_json.get('project_id', 'NOT FOUND')}")
+        except Exception as verify_error:
+            print(f"   ⚠️ Could not verify credentials file: {verify_error}")
+            
     elif not credentials_path and os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
         credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+        print(f"✅ Using local credentials file: {credentials_path}")
     
     if credentials_path:
+        print(f"🔧 Initializing Vertex AI at startup...")
+        print(f"   - Project: {project_id}")
+        print(f"   - Location: {location}")
+        print(f"   - Credentials: {credentials_path}")
+        
         vertexai.init(project=project_id, location=location)
         IMAGEN_AVAILABLE = True
-        print(f"✅ Imagen 3 initialized with project: {project_id}")
+        print(f"✅ Imagen 3 initialized successfully!")
+        print(f"   - IMAGEN_AVAILABLE = True")
     else:
         print("⚠️  Imagen 3 disabled: No service account credentials found")
 except Exception as e:
@@ -261,23 +280,60 @@ async def search_internet(query: str) -> str:
 async def generate_image(prompt: str, num_images: int = 1) -> list:
     """Generate images using Imagen 3.0 via Vertex AI"""
     if not IMAGEN_AVAILABLE:
+        print(f"⚠️  [IMAGE GEN] Imagen not available, skipping image generation")
         return None
     
     try:
+        print(f"🚀 [IMAGE GEN] Async wrapper called, running in executor...")
         # Run in executor since Vertex AI SDK is synchronous
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _generate_image_sync, prompt, num_images)
+        result = await loop.run_in_executor(None, _generate_image_sync, prompt, num_images)
+        print(f"🏁 [IMAGE GEN] Executor completed, returning result")
+        return result
     except Exception as e:
-        print(f"Image generation error: {e}")
+        print(f"❌ [IMAGE GEN] Async wrapper error: {e}")
+        import traceback
+        print(f"❌ [IMAGE GEN] Async traceback:\n{traceback.format_exc()}")
         return None
 
 def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
     """Synchronous image generation using Imagen 3"""
     try:
+        print(f"🎨 [IMAGE GEN] Starting image generation for prompt: '{prompt[:100]}...'")
+        
+        import vertexai
         from vertexai.preview.vision_models import ImageGenerationModel
+        print(f"✅ [IMAGE GEN] Vertex AI modules imported successfully")
         
+        # Re-initialize vertexai in this thread context
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+        location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+        credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        
+        print(f"🔑 [IMAGE GEN] Initializing Vertex AI...")
+        print(f"   - Project: {project_id}")
+        print(f"   - Location: {location}")
+        print(f"   - Credentials path: {credentials_path}")
+        
+        # Verify credentials file exists
+        if credentials_path:
+            import pathlib
+            cred_file = pathlib.Path(credentials_path)
+            print(f"   - File exists: {cred_file.exists()}")
+            if cred_file.exists():
+                print(f"   - File size: {cred_file.stat().st_size} bytes")
+                print(f"   - File readable: {os.access(credentials_path, os.R_OK)}")
+        else:
+            print(f"   ⚠️  WARNING: No credentials path set!")
+        
+        vertexai.init(project=project_id, location=location)
+        print(f"✅ [IMAGE GEN] Vertex AI initialized successfully")
+        
+        print(f"🔄 [IMAGE GEN] Loading Imagen 3 model: imagen-3.0-generate")
         model = ImageGenerationModel.from_pretrained("imagen-3.0-generate")
+        print(f"✅ [IMAGE GEN] Model loaded successfully")
         
+        print(f"📡 [IMAGE GEN] Calling Imagen API (generating {num_images} image(s))...")
         images_response = model.generate_images(
             prompt=prompt,
             number_of_images=num_images,
@@ -285,59 +341,124 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
             safety_filter_level="block_some",
             person_generation="allow_adult",
         )
+        print(f"✅ [IMAGE GEN] API call successful, received response")
         
+        print(f"🖼️  [IMAGE GEN] Converting {len(images_response.images)} image(s) to PIL format...")
         images = []
-        for image in images_response.images:
+        for idx, image in enumerate(images_response.images):
             # Convert from Vertex AI image to PIL Image
             images.append(image._pil_image)
+            print(f"   ✓ Image {idx + 1}/{len(images_response.images)} converted")
         
+        print(f"🎉 [IMAGE GEN] Successfully generated {len(images)} image(s)!")
         return images
     except Exception as e:
-        print(f"Sync image generation error: {e}")
+        print(f"❌ [IMAGE GEN] Error occurred: {type(e).__name__}")
+        print(f"❌ [IMAGE GEN] Error message: {str(e)}")
+        import traceback
+        print(f"❌ [IMAGE GEN] Full traceback:\n{traceback.format_exc()}")
         return None
 
 async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Image:
     """Edit an image based on a text prompt using Imagen"""
     if not IMAGEN_AVAILABLE:
+        print(f"⚠️  [IMAGE EDIT] Imagen not available, skipping image editing")
         return None
     
     try:
+        print(f"🚀 [IMAGE EDIT] Async wrapper called, running in executor...")
         # Run in executor since Vertex AI SDK is synchronous
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _edit_image_sync, original_image_bytes, prompt)
+        result = await loop.run_in_executor(None, _edit_image_sync, original_image_bytes, prompt)
+        print(f"🏁 [IMAGE EDIT] Executor completed, returning result")
+        return result
     except Exception as e:
-        print(f"Image edit error: {e}")
+        print(f"❌ [IMAGE EDIT] Async wrapper error: {e}")
+        import traceback
+        print(f"❌ [IMAGE EDIT] Async traceback:\n{traceback.format_exc()}")
         return None
 
 def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
     """Synchronous image editing using Imagen 3"""
     try:
-        from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
+        print(f"✏️  [IMAGE EDIT] Starting image editing with prompt: '{prompt[:100]}...'")
         
+        import vertexai
+        from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
+        print(f"✅ [IMAGE EDIT] Vertex AI modules imported successfully")
+        
+        # Re-initialize vertexai in this thread context
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+        location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+        credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        
+        print(f"🔑 [IMAGE EDIT] Initializing Vertex AI...")
+        print(f"   - Project: {project_id}")
+        print(f"   - Location: {location}")
+        print(f"   - Credentials path: {credentials_path}")
+        
+        # Verify credentials file exists
+        if credentials_path:
+            import pathlib
+            cred_file = pathlib.Path(credentials_path)
+            print(f"   - File exists: {cred_file.exists()}")
+            if cred_file.exists():
+                print(f"   - File size: {cred_file.stat().st_size} bytes")
+                print(f"   - File readable: {os.access(credentials_path, os.R_OK)}")
+        else:
+            print(f"   ⚠️  WARNING: No credentials path set!")
+        
+        vertexai.init(project=project_id, location=location)
+        print(f"✅ [IMAGE EDIT] Vertex AI initialized successfully")
+        
+        print(f"🔄 [IMAGE EDIT] Loading editing model: imagegeneration@002")
         model = ImageGenerationModel.from_pretrained("imagegeneration@002")
+        print(f"✅ [IMAGE EDIT] Model loaded successfully")
         
         # Convert bytes to Vertex AI Image
+        print(f"🖼️  [IMAGE EDIT] Converting base image ({len(original_image_bytes)} bytes)...")
         base_image = VertexImage(original_image_bytes)
+        print(f"✅ [IMAGE EDIT] Base image converted")
         
         # Edit the image
+        print(f"📡 [IMAGE EDIT] Calling Imagen edit API...")
         images_response = model.edit_image(
             base_image=base_image,
             prompt=prompt,
             edit_mode="inpainting-insert",  # Can also use "inpainting-remove" or "outpainting"
         )
+        print(f"✅ [IMAGE EDIT] API call successful")
         
-        return images_response.images[0]._pil_image if images_response.images else None
+        result = images_response.images[0]._pil_image if images_response.images else None
+        if result:
+            print(f"🎉 [IMAGE EDIT] Successfully edited image!")
+        else:
+            print(f"⚠️  [IMAGE EDIT] No images returned from API")
+        return result
     except Exception as e:
-        print(f"Sync image edit error: {e}")
+        print(f"❌ [IMAGE EDIT] Error occurred: {type(e).__name__}")
+        print(f"❌ [IMAGE EDIT] Error message: {str(e)}")
+        import traceback
+        print(f"❌ [IMAGE EDIT] Full traceback:\n{traceback.format_exc()}")
+        
         # Fallback: generate a new image with the prompt
+        print(f"🔄 [IMAGE EDIT] Attempting fallback to image generation...")
         try:
+            vertexai.init(project=os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1'), 
+                         location=os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1'))
+            print(f"✅ [IMAGE EDIT] Fallback: Vertex AI re-initialized")
+            
             model = ImageGenerationModel.from_pretrained("imagen-3.0-generate")
+            print(f"✅ [IMAGE EDIT] Fallback: Model loaded")
+            
             images_response = model.generate_images(
                 prompt=f"Based on the provided image: {prompt}",
                 number_of_images=1,
             )
+            print(f"✅ [IMAGE EDIT] Fallback: Image generated")
             return images_response.images[0]._pil_image if images_response.images else None
-        except:
+        except Exception as fallback_error:
+            print(f"❌ [IMAGE EDIT] Fallback also failed: {fallback_error}")
             return None
 
 def should_respond_to_name(content: str) -> bool:
