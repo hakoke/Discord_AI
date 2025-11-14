@@ -58,11 +58,16 @@ async def get_discord_guild_info(guild_id: str):
                     return guild_info
                 elif response.status == 404:
                     # Guild not found or bot not in server
+                    print(f"Discord API 404 for guild {guild_id}: Bot may not be in server")
                     return {'name': 'Server Not Found', 'id': guild_id}
                 else:
+                    error_text = await response.text()
+                    print(f"Discord API error for guild {guild_id}: Status {response.status}, Response: {error_text}")
                     return None
     except Exception as e:
-        print(f"Error fetching Discord guild info: {e}")
+        print(f"Error fetching Discord guild info for {guild_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_discord_guild_info_sync(guild_id: str):
@@ -784,17 +789,31 @@ HTML_TEMPLATE = """
                     
                     // Show ban status
                     if (banStatus) {
-                        let statusHtml = '<div class="ban-status-banner ' + ban.ban_type + '">';
-                        statusHtml += '<strong>⚠️ Server is ' + (isPermanent ? 'PERMANENTLY BANNED' : 'TEMPORARILY BANNED') + '</strong><br>';
+                        const banner = document.createElement('div');
+                        banner.className = 'ban-status-banner ' + ban.ban_type;
+                        
+                        const strong = document.createElement('strong');
+                        strong.textContent = '⚠️ Server is ' + (isPermanent ? 'PERMANENTLY BANNED' : 'TEMPORARILY BANNED');
+                        banner.appendChild(strong);
+                        banner.appendChild(document.createElement('br'));
+                        
                         if (!isPermanent && expiresAt) {
-                            statusHtml += 'Expires: ' + expiresAt.toLocaleString() + '<br>';
+                            const expiresText = document.createTextNode('Expires: ' + expiresAt.toLocaleString());
+                            banner.appendChild(expiresText);
+                            banner.appendChild(document.createElement('br'));
                         }
+                        
                         if (ban.reason) {
-                            statusHtml += 'Reason: ' + ban.reason.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '<br>';
+                            const reasonText = document.createTextNode('Reason: ' + ban.reason);
+                            banner.appendChild(reasonText);
+                            banner.appendChild(document.createElement('br'));
                         }
-                        statusHtml += 'Banned at: ' + new Date(ban.banned_at).toLocaleString();
-                        statusHtml += '</div>';
-                        banStatus.innerHTML = statusHtml;
+                        
+                        const bannedAtText = document.createTextNode('Banned at: ' + new Date(ban.banned_at).toLocaleString());
+                        banner.appendChild(bannedAtText);
+                        
+                        banStatus.innerHTML = '';
+                        banStatus.appendChild(banner);
                     }
                     
                     // Show unban button
@@ -873,7 +892,8 @@ HTML_TEMPLATE = """
         }
         
         function banServer(type, days = null) {
-            const reason = document.getElementById('ban-reason').value.trim() || null;
+            const reasonEl = document.getElementById('ban-reason');
+            const reason = (reasonEl && reasonEl.value) ? reasonEl.value.trim() || null : null;
             const daysInput = days || parseInt(prompt('Enter number of days:') || '7');
             
             if (isNaN(daysInput) && type === 'temporary') {
@@ -1027,13 +1047,27 @@ async def get_db_data():
             if guild_id:
                 try:
                     guild_info = await get_discord_guild_info(guild_id)
-                    server['guild_info'] = guild_info
+                    if guild_info and guild_info.get('name'):
+                        server['guild_info'] = guild_info
+                        print(f"✅ Fetched guild info for {guild_id}: {guild_info.get('name')}")
+                    else:
+                        server['guild_info'] = None
+                        print(f"⚠️ No guild info for {guild_id} (returned: {guild_info})")
                 except Exception as e:
                     print(f"Error fetching guild info for {guild_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     server['guild_info'] = None
+            else:
+                server['guild_info'] = None
         
         # Fetch all in parallel (faster, but still async)
-        await asyncio.gather(*[fetch_guild_info(server) for server in servers_list], return_exceptions=True)
+        results = await asyncio.gather(*[fetch_guild_info(server) for server in servers_list], return_exceptions=True)
+        
+        # Log any exceptions that occurred
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"Exception in fetch_guild_info for server {servers_list[i].get('guild_id')}: {result}")
         
         usage_data_list = [dict(u) for u in usage_data]
         top_users_list = [dict(u) for u in top_users]
@@ -1255,7 +1289,8 @@ def ban_server(guild_id):
         data = request.get_json()
         ban_type = data.get('type', 'temporary')  # 'temporary' or 'permanent'
         days = data.get('days', 7) if ban_type == 'temporary' else None
-        reason = data.get('reason', '').strip() or None
+        reason_raw = data.get('reason')
+        reason = reason_raw.strip() if reason_raw and isinstance(reason_raw, str) else None
         banned_by = data.get('banned_by', 'Dashboard Admin')
         
         database_url = os.getenv('DATABASE_URL')
