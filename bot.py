@@ -1310,9 +1310,17 @@ async def ai_decide_intentions(message: discord.Message, image_parts: list) -> d
     prompt = f"""You are deciding which image capabilities to activate for a Discord assistant.
 
 Capabilities:
-- GENERATE: create new images from text prompts.
-- EDIT: modify existing images based on instructions.
+- GENERATE: create NEW images from text prompts using AI image generation (Imagen).
+- EDIT: modify existing images that the user provided.
 - ANALYZE: describe or interpret images the user provided.
+
+CRITICAL DISTINCTION - GENERATE vs SEARCH:
+- GENERATE (set "generate" true): User wants to CREATE/MAKE/DRAW new images that don't exist yet
+  Examples: "create an image of a car", "generate a sunset", "make me a picture of a dragon", "draw me a cat"
+  
+- DO NOT SET "generate" true if the user wants to SEARCH for existing images from Google:
+  Examples: "search for images of X", "show me X", "get me images of X", "find pictures of X", "what does X look like"
+  These should use Google image search, NOT image generation.
 
 Return ONLY a JSON object like:
 {{
@@ -1322,11 +1330,12 @@ Return ONLY a JSON object like:
 }}
 
 Rules:
-- Set "generate" true only if the user clearly wants new images or variations (without providing images).
+- Set "generate" true ONLY if the user explicitly wants to CREATE/GENERATE/MAKE/DRAW new images (not search for existing ones).
 - Set "edit" true if the user provided images AND wants to modify/change/transform them.
 - Set "analysis" true only if the user wants commentary/description of provided images (without modification requests).
 - Examples of EDIT: "make this person a woman", "turn this into a cat", "change the background", "edit this image", "transform this"
-- Examples of GENERATE: "create an image of a car", "generate a sunset", "make me a picture" (when no image provided)
+- Examples of GENERATE (set true): "create an image of a car", "generate a sunset", "make me a picture", "draw me a dog"
+- Examples of SEARCH (set generate FALSE): "search for images of X", "show me X", "get me images of X", "find pictures of X", "what does X look like", "show us photos of X"
 - Examples of ANALYSIS: "what's in this image?", "describe this", "what do you see?"
 - Feel free to set multiple flags to true.
 - Defaults: generate=false, edit=false, analysis=false unless the message suggests otherwise.
@@ -2762,25 +2771,31 @@ Now decide: "{message.content}" -> """
 
 Does answering this question require VISUAL IMAGES from Google image search?
 
-NEEDS IMAGE SEARCH:
-- "Search for [topic] how does it look"
-- "Show me [place/thing]" (when asking to see existing images)
-- "What does [thing] look like?" (when asking about real things)
-- "Find images of [topic]"
-- "Search for pictures of [topic]"
+CRITICAL: You must distinguish between:
+1. SEARCHING for existing images from Google (set IMAGES)
+2. GENERATING/CREATING new images with AI (set NO - this uses image generation, not search)
+
+NEEDS IMAGE SEARCH (set IMAGES):
+- "Search for [topic]" or "search google about [topic]" or "search for images of [topic]"
+- "Show me [place/thing]" or "show us [place/thing]" (when asking to see existing real images)
+- "Get me images of [topic]" or "get images of [topic]"
+- "Find images of [topic]" or "find pictures of [topic]"
+- "What does [thing] look like?" (when asking about real things/places)
 - "How does [place/thing] look?" (when asking about real places/things)
-- Visual descriptions of places, objects, people, events (when asking to see real examples)
+- "Photos of [topic]" or "pictures of [topic]" (when asking for real photos)
+- Any request mentioning "google", "search", "show", "get images", "find images", "photos", "pictures" (when referring to existing images)
+- Visual descriptions of real places, objects, people, events (when asking to see real examples)
 
-DOESN'T NEED IMAGE SEARCH (these should GENERATE images instead):
-- "Make me an image of [thing]"
-- "Create a picture of [thing]"
-- "Generate an image of [thing]"
-- "Draw me [thing]"
-- "Make me a [thing]"
-- Any request to CREATE/GENERATE/MAKE images (not search for existing ones)
+DOESN'T NEED IMAGE SEARCH (set NO - these should GENERATE images instead):
+- "Make me an image of [thing]" or "make me a picture"
+- "Create a picture of [thing]" or "create an image"
+- "Generate an image of [thing]" or "generate a picture"
+- "Draw me [thing]" or "draw a [thing]"
+- Any request to CREATE/GENERATE/MAKE/DRAW new images (not search for existing ones)
+- Requests that don't mention searching, showing, getting, or finding existing images
 
-ALSO DOESN'T NEED IMAGE SEARCH:
-- Text-only questions
+ALSO DOESN'T NEED IMAGE SEARCH (set NO):
+- Text-only questions without visual component
 - Coding help
 - General knowledge without visual component
 - Math problems
@@ -2791,11 +2806,15 @@ Respond with ONLY: "IMAGES" or "NO"
 
 Examples:
 "search for georgia countryside how does it look" -> IMAGES
-"make me an image of countryside" -> NO (this is generation, not search)
+"search google about university of wollongong" -> IMAGES
 "show me pictures of the Eiffel Tower" -> IMAGES
-"create a picture of a dog" -> NO (this is generation, not search)
+"get me 3 images of MUST egypt from google" -> IMAGES
+"show us photos of mushrif mall" -> IMAGES
 "what does the Grand Canyon look like?" -> IMAGES
-"make me an image of georgia and a man" -> NO (this is generation, not search)
+"make me an image of countryside" -> NO (this is generation, not search)
+"create a picture of a dog" -> NO (this is generation, not search)
+"generate an image of a sunset" -> NO (this is generation, not search)
+"draw me a cat" -> NO (this is generation, not search)
 "tell me a joke" -> NO
 
 Now decide: "{message.content}" -> """
@@ -2810,12 +2829,59 @@ Now decide: "{message.content}" -> """
                 return False
         
         if await decide_if_image_search_needed():
-            print(f"🖼️  [{username}] Performing image search for: {message.content[:50]}...")
-            image_search_query = message.content
+            # Extract clean search query using AI
+            async def extract_image_search_query():
+                """AI extracts the actual search query from the user message"""
+                query_extraction_prompt = f"""User message: "{message.content}"
+
+Extract the actual search query for Google image search from this message. Remove:
+- Bot mentions (like <@123456789>)
+- Command words like "search for", "show me", "get me", "find", "images of", "pictures of", "photos of"
+- Phrases like "from google", "from the internet"
+- Any extra words that aren't part of what the user wants to search for
+
+Return ONLY the clean search query - just the topic/subject they want images of.
+
+Examples:
+"search google about university of wollongong in dubai, show me how it looks" -> "university of wollongong dubai"
+"get me 3 images of MUST egypt from google" -> "MUST egypt"
+"show us photos of mushrif mall" -> "mushrif mall"
+"what does the Grand Canyon look like?" -> "Grand Canyon"
+"<@123456> show me dalma mall abu dhabi" -> "dalma mall abu dhabi"
+
+Return ONLY the search query, nothing else:"""
+                
+                try:
+                    decision_model = get_fast_model()
+                    decision_response = await queued_generate_content(decision_model, query_extraction_prompt)
+                    clean_query = (decision_response.text or "").strip()
+                    # Remove quotes if AI added them
+                    clean_query = clean_query.strip('"\'')
+                    return clean_query if clean_query else message.content
+                except Exception as e:
+                    print(f"⚠️  [{username}] Error extracting search query: {e}")
+                    # Fallback: remove mentions and common prefixes
+                    fallback = re.sub(r'<@!?\d+>', '', message.content).strip()
+                    for prefix in ['search for', 'search google about', 'show me', 'get me', 'find', 'images of', 'pictures of', 'photos of', 'from google']:
+                        if fallback.lower().startswith(prefix):
+                            fallback = fallback[len(prefix):].strip()
+                    return fallback
+            
+            image_search_query = await extract_image_search_query()
+            print(f"🖼️  [{username}] Performing image search for: {image_search_query[:100]}...")
             image_search_start = time.time()
             image_search_results = await search_images(image_search_query, num=10)
             image_search_time = time.time() - image_search_start
             print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} images")
+            
+            # If image search was performed, disable image generation (user wants search, not generation)
+            if image_search_results:
+                print(f"🔍 [{username}] Image search found results - disabling image generation (user wants search, not generation)")
+                wants_image = False
+            else:
+                # Image search was attempted but found no results - still disable generation and let AI inform user
+                print(f"⚠️  [{username}] Image search found no results - disabling image generation, AI will inform user")
+                wants_image = False
         
         if await decide_if_search_needed():
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
@@ -2830,12 +2896,18 @@ Now decide: "{message.content}" -> """
                 print(f"⚠️  [{username}] Search returned no results or was not configured")
         
         # Add image search results to prompt if available
-        if image_search_results:
+        if image_search_results and len(image_search_results) > 0:
             image_list_text = "\n".join([
                 f"{idx+1}. {img['title']} - {img['url']}"
                 for idx, img in enumerate(image_search_results)
             ])
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images (maximum 4 images). \n\nCRITICAL: If the user asks for multiple items (e.g., 'top 3 countries', 'list 4 things', 'show me 2 examples'), you MUST select one image for EACH item they requested. For example, if they ask for 'top 3 countries with images', select 3 different images (one for each country). If they ask for 'list 5 places', select up to 4 images (the maximum allowed). Match the number of images to the number of items they're asking about (up to the 4 image limit).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n- You can answer questions about attached images dynamically: 'what's in the first image?', 'who is this?', 'what place is shown in the second image?', etc.\n\nIf you don't want to include any images, simply don't mention any image numbers."
+            user_query_lower = (message.content or "").lower()
+            search_query_lower = (image_search_query or "").lower()
+            
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\nCRITICAL INSTRUCTIONS FOR IMAGE SELECTION:\n\n1. You MUST select images that are RELEVANT to what the user asked for. Look at the image titles and URLs to determine relevance.\n2. The user's request was: \"{message.content}\"\n3. The search query used was: \"{image_search_query}\"\n4. Select images whose titles/URLs match the search query and user's intent. For example:\n   - If user asked for 'MUST egypt', select images about MUST university in Egypt, NOT general Egypt images\n   - If user asked for 'university of wollongong dubai', select images of that specific university, NOT other universities\n   - If user asked for 'mushrif mall', select images of Mushrif Mall, NOT other malls\n5. If the user asked for a specific number of images (e.g., '3 images', '2 photos'), try to match that number (up to 4 max).\n6. If no images are relevant or you can't find good matches, you can select 0 images, but you MUST tell the user clearly: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. You can choose 1-4 images (maximum 4 images).\n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nCRITICAL: When you reference the attached images in your response text, ALWAYS refer to them by their POSITION in the attached set (first, second, third, etc.), NOT by their original search result numbers. For example:\n- Say 'the first image shows...', 'the second image displays...', 'the third image captures...'\n- DO NOT say 'image 3 shows...' or 'image 8 displays...' (those are search result numbers, not positions)\n- The images will be attached in the order you select them, so the first image you select becomes 'the first attached image', the second becomes 'the second attached image', etc.\n\nIf you cannot find any relevant images from the search results, you MUST tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'"
+        elif image_search_query:
+            # Image search was attempted but returned no results
+            consciousness_prompt += f"\n\nIMPORTANT: The user requested images for '{image_search_query}', but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
         
         # Decide which model to use (thread-safe)
         async def decide_model():
