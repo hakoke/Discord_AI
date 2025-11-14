@@ -850,6 +850,60 @@ Return ONLY the JSON object."""
     
     return heuristics
 
+def ai_decide_document_actions(message: discord.Message, document_assets: List[Dict[str, Any]]) -> Dict[str, bool]:
+    """Use AI to decide how to handle document attachments/requests."""
+    heuristics = {
+        "analyze_documents": bool(document_assets),
+        "edit_documents": False,
+        "generate_new_document": False,
+    }
+    
+    metadata = {
+        "message": (message.content or "").strip(),
+        "document_count": len(document_assets),
+        "document_names": [doc["filename"] for doc in document_assets],
+        "is_reply": bool(message.reference),
+        "mentions_bot": bot.user.mentioned_in(message) if bot.user else False,
+    }
+    
+    prompt = f"""You decide how a Discord assistant should handle document requests.
+
+Return ONLY a JSON object like:
+{{
+  "analyze_documents": true,
+  "edit_documents": false,
+  "generate_new_document": false
+}}
+
+Rules:
+- analyze_documents: true when the user wants feedback, summary, or commentary on provided documents (including when they say "look at this").
+- edit_documents: true when they want you to revise or rewrite existing documents (including attached files or documents referenced in the conversation).
+- generate_new_document: true when they ask for a new deliverable (report, proposal, plan, etc.) from scratch.
+- Multiple fields can be true simultaneously (e.g., summarize AND rewrite).
+- Default to false unless the message (plus context below) suggests otherwise.
+
+Message and context:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+Return ONLY the JSON object."""
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = decision_model.generate_content(prompt)
+        raw_text = (decision_response.text or "").strip()
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            data = json.loads(match.group(0))
+            return {
+                "analyze_documents": bool(data.get("analyze_documents")),
+                "edit_documents": bool(data.get("edit_documents")),
+                "generate_new_document": bool(data.get("generate_new_document")),
+            }
+    except Exception as e:
+        print(f"Document action decision error: {e}")
+    
+    return heuristics
+
 def _mime_type_to_extension(mime_type: str) -> str:
     mime_type = (mime_type or '').lower()
     mapping = {
@@ -1159,8 +1213,11 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
         if bullets:
             pdf.set_font("Helvetica", "", 11)
             for bullet in bullets:
-                pdf.cell(5, 6, "-")
-                pdf.multi_cell(0, 6, str(bullet).strip())
+                bullet_text = str(bullet).strip()
+                if not bullet_text:
+                    continue
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 6, f"• {bullet_text}")
             pdf.ln(2)
 
     output = pdf.output(dest='S')
@@ -1489,10 +1546,21 @@ CURRENT CONVERSATION CONTEXT:
         else:
             document_assets = []
         
+        document_actions = ai_decide_document_actions(message, document_assets)
+        document_request = any(document_actions.values())
+        print(f"🗂️  [{username}] Document actions decided: {document_actions}")
+        if not document_request and document_assets:
+            document_actions["analyze_documents"] = True
+            document_request = True
+        
         # Determine user intentions and preferred reply style
         intention = ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
+        
+        if document_request:
+            wants_image = False
+            wants_image_edit = False
         
         reply_style = ai_decide_reply_style(
             message,
@@ -1665,23 +1733,34 @@ If you need to search the internet for current information, mention it.{thinking
         else:
             response_prompt += "\n\nOffer a helpful response with the amount of detail that feels appropriate—enough to be useful without overwhelming them."
         
-        response_prompt += (
-            "\n\nDOCUMENT WORKFLOW:\n"
-            "- Treat any attached PDFs/Word files as source material you can quote or modify; keep important structure intact unless the user explicitly wants changes.\n"
-            "- If you generate a brand new document, make it read like a polished professional deliverable.\n"
-            "- When editing, integrate new paragraphs seamlessly instead of overwriting unrelated sections.\n"
-            "\nDOCUMENT OUTPUT PROTOCOL:\n"
-            "- Whenever you create or revise a PDF/Word deliverable, append a JSON block inside triple backticks so the automation layer can render the file.\n"
-            "- Schema example (you can include multiple documents):\n"
-            "```json\n"
-            "{\"documents\":[{\"filename\":\"Updated Proposal.docx\",\"type\":\"docx\",\"title\":\"Updated Proposal\",\"sections\":[{\"heading\":\"Executive Summary\",\"body\":\"Concise overview...\",\"bullet_points\":[\"Key win 1\",\"Key win 2\"]},{\"heading\":\"Next Steps\",\"body\":\"Action plan...\"}]}]}\n"
-            "```\n"
-            "- Keep your normal conversational reply outside the JSON block.\n"
-            "- Only include documents that are ready for delivery; omit the JSON block when no document is produced.\n"
-        )
-        
-        if document_assets:
-            response_prompt += f"\n\nREFERENCE DOCUMENTS AVAILABLE: {json.dumps([doc['filename'] for doc in document_assets])}\nUse the extracts provided earlier as your source material."
+        if document_request:
+            doc_instruction_lines = ["\n\nDOCUMENT WORKFLOW:"]
+            if document_actions.get("analyze_documents"):
+                doc_instruction_lines.append("- The user wants you to analyze or summarize the provided documents. Reference key facts accurately.")
+            if document_actions.get("edit_documents"):
+                doc_instruction_lines.append("- The user expects revisions to existing documents. Preserve structure and integrate changes cleanly.")
+            if document_actions.get("generate_new_document"):
+                doc_instruction_lines.append("- The user wants a brand-new, polished document. Propose a professional structure and deliver the draft.")
+            
+            if any([
+                document_actions.get("edit_documents"),
+                document_actions.get("generate_new_document")
+            ]):
+                doc_instruction_lines.extend([
+                    "\nDOCUMENT OUTPUT PROTOCOL:",
+                    "- If you deliver a revised or new PDF/Word file, append a JSON block inside triple backticks so the automation layer can render it.",
+                    "- Schema example (multiple documents allowed):",
+                    "```json",
+                    "{\"documents\":[{\"filename\":\"Updated Proposal.docx\",\"type\":\"docx\",\"title\":\"Updated Proposal\",\"sections\":[{\"heading\":\"Executive Summary\",\"body\":\"Concise overview...\",\"bullet_points\":[\"Key win 1\",\"Key win 2\"]},{\"heading\":\"Next Steps\",\"body\":\"Action plan...\"}]}]}",
+                    "```",
+                    "- Keep your normal conversational reply outside the JSON block.",
+                    "- Omit the JSON block when no deliverable is produced."
+                ])
+            
+            response_prompt += "\n".join(doc_instruction_lines)
+            
+            if document_assets:
+                response_prompt += f"\n\nREFERENCE DOCUMENTS AVAILABLE: {json.dumps([doc['filename'] for doc in document_assets])}\nUse the extracts provided earlier as your source material."
         
         # Add images to prompt if present
         if image_parts:
