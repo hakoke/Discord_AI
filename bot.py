@@ -394,6 +394,48 @@ async def search_internet(query: str) -> str:
         print(f"❌ [SEARCH] Traceback: {traceback.format_exc()}")
         return "Search error occurred."
 
+async def search_images(query: str, num: int = 10) -> List[Dict[str, str]]:
+    """Search for images using Serper API"""
+    if not SERPER_API_KEY:
+        print("⚠️  [IMAGE SEARCH] SERPER_API_KEY not configured")
+        return []
+    
+    try:
+        print(f"🖼️  [IMAGE SEARCH] Searching for images: {query[:100]}...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                'https://google.serper.dev/images',
+                headers={
+                    'X-API-KEY': SERPER_API_KEY,
+                    'Content-Type': 'application/json'
+                },
+                json={'q': query, 'num': num}
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    images = []
+                    
+                    for item in data.get('images', [])[:num]:
+                        image_url = item.get('imageUrl', '')
+                        title = item.get('title', '')
+                        if image_url:
+                            images.append({
+                                'url': image_url,
+                                'title': title
+                            })
+                    
+                    print(f"✅ [IMAGE SEARCH] Found {len(images)} images")
+                    return images
+                else:
+                    error_text = await response.text()
+                    print(f"❌ [IMAGE SEARCH] Failed with status {response.status}: {error_text[:200]}")
+                    return []
+    except Exception as e:
+        print(f"❌ [IMAGE SEARCH] Error: {e}")
+        import traceback
+        print(f"❌ [IMAGE SEARCH] Traceback: {traceback.format_exc()}")
+        return []
+
 async def generate_image(prompt: str, num_images: int = 1) -> list:
     """Generate images using Imagen 3.0 via Vertex AI"""
     if not IMAGEN_AVAILABLE:
@@ -1898,6 +1940,66 @@ Now decide: "{message.content}" -> """
                 handle_rate_limit_error(e)
                 return False
         
+        # Let AI decide if image search is needed
+        image_search_results = []
+        image_search_query = None
+        
+        def decide_if_image_search_needed():
+            """AI decides if this question needs Google image search"""
+            if not SERPER_API_KEY:
+                return False
+            
+            image_search_decision_prompt = f"""User message: "{message.content}"
+
+Does answering this question require VISUAL IMAGES from Google image search?
+
+NEEDS IMAGE SEARCH:
+- "Search for [topic] how does it look"
+- "Show me [place/thing]"
+- "What does [thing] look like?"
+- "Find images of [topic]"
+- "Search for pictures of [topic]"
+- "How does [place/thing] look?"
+- Visual descriptions of places, objects, people, events
+- "Show me examples of [thing]"
+- Requests to see visual representations
+
+DOESN'T NEED IMAGE SEARCH:
+- Text-only questions
+- Coding help
+- General knowledge without visual component
+- Math problems
+- Creative writing
+- Questions already answered with text
+
+Respond with ONLY: "IMAGES" or "NO"
+
+Examples:
+"search for georgia countryside how does it look" -> IMAGES
+"what's the capital of France?" -> NO
+"show me pictures of the Eiffel Tower" -> IMAGES
+"how do I code in Python?" -> NO
+"what does the Grand Canyon look like?" -> IMAGES
+"tell me a joke" -> NO
+
+Now decide: "{message.content}" -> """
+            
+            try:
+                decision_model = get_fast_model()
+                decision = decision_model.generate_content(image_search_decision_prompt).text.strip().upper()
+                return 'IMAGES' in decision
+            except Exception as e:
+                handle_rate_limit_error(e)
+                return False
+        
+        if decide_if_image_search_needed():
+            print(f"🖼️  [{username}] Performing image search for: {message.content[:50]}...")
+            image_search_query = message.content
+            image_search_start = time.time()
+            image_search_results = await search_images(image_search_query, num=10)
+            image_search_time = time.time() - image_search_start
+            print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} images")
+        
         if decide_if_search_needed():
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
             search_query = message.content
@@ -1909,6 +2011,14 @@ Now decide: "{message.content}" -> """
                 consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
             else:
                 print(f"⚠️  [{username}] Search returned no results or was not configured")
+        
+        # Add image search results to prompt if available
+        if image_search_results:
+            image_list_text = "\n".join([
+                f"{idx+1}. {img['title']} - {img['url']}"
+                for idx, img in enumerate(image_search_results)
+            ])
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images. \n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them.\n\nIf you don't want to include any images, simply don't mention any image numbers."
         
         # Decide which model to use (thread-safe)
         def decide_model():
@@ -2150,6 +2260,71 @@ Now decide: "{message.content}" -> """
         ai_response, document_outputs = extract_document_outputs(raw_ai_response)
         generated_images = None
         generated_documents = None
+        searched_images = []  # Images from Google search
+        
+        # Parse image numbers from AI response if image search was performed
+        if image_search_results:
+            def extract_image_numbers(text: str) -> List[int]:
+                """Extract image numbers from AI response"""
+                numbers = []
+                # Look for [IMAGE_NUMBERS: 1,3,5] format
+                pattern1 = r'\[IMAGE_NUMBERS?:\s*([\d,\s]+)\]'
+                match1 = re.search(pattern1, text, re.IGNORECASE)
+                if match1:
+                    nums_str = match1.group(1)
+                    numbers.extend([int(n.strip()) for n in nums_str.split(',') if n.strip().isdigit()])
+                
+                # Look for natural mentions like "image 1, 3, and 5" or "images 2 and 4"
+                pattern2 = r'(?:image|images?)\s+(?:numbers?|#)?\s*([\d,\s]+(?:and\s+\d+)?)'
+                matches2 = re.finditer(pattern2, text, re.IGNORECASE)
+                for match in matches2:
+                    nums_str = match.group(1).replace('and', ',').replace('#', '')
+                    numbers.extend([int(n.strip()) for n in nums_str.split(',') if n.strip().isdigit()])
+                
+                # Don't use fallback - only attach images if AI explicitly mentions numbers
+                # This prevents unwanted image attachments
+                
+                # Remove duplicates and filter valid range
+                numbers = list(set([n for n in numbers if 1 <= n <= len(image_search_results)]))
+                # Limit to 4 images max
+                return numbers[:4]
+            
+            selected_numbers = extract_image_numbers(raw_ai_response)
+            if selected_numbers:
+                print(f"🖼️  [{username}] AI selected images: {selected_numbers}")
+                # Download selected images
+                for num in selected_numbers:
+                    idx = num - 1  # Convert to 0-based index
+                    if 0 <= idx < len(image_search_results):
+                        img_data = image_search_results[idx]
+                        try:
+                            img_bytes = await download_image(img_data['url'])
+                            if img_bytes:
+                                # Try to open as PIL Image to validate
+                                try:
+                                    img = Image.open(BytesIO(img_bytes))
+                                    # Convert to RGB if needed (for JPEG compatibility)
+                                    if img.mode in ('RGBA', 'LA', 'P'):
+                                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                                        if img.mode == 'P':
+                                            img = img.convert('RGBA')
+                                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                                        img = rgb_img
+                                    else:
+                                        img = img.convert('RGB')
+                                    
+                                    searched_images.append(img)
+                                    print(f"✅ [{username}] Downloaded image {num}: {img_data['title'][:50]}")
+                                except Exception as img_error:
+                                    print(f"⚠️  [{username}] Failed to process image {num}: {img_error}")
+                        except Exception as download_error:
+                            print(f"⚠️  [{username}] Failed to download image {num}: {download_error}")
+                
+                # Remove the [IMAGE_NUMBERS: ...] marker from response if present
+                ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
+            else:
+                print(f"🖼️  [{username}] AI did not select any images from search results")
+        
         if document_outputs:
             generated_documents = document_outputs
             print(f"📄 [{username}] Prepared {len(document_outputs)} document(s) for delivery")
@@ -2245,11 +2420,11 @@ Now decide: "{message.content}" -> """
             memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
         )
         
-        return (ai_response, generated_images, generated_documents)
+        return (ai_response, generated_images, generated_documents, searched_images)
         
     except Exception as e:
         print(f"Error generating response: {e}")
-        return (f"*consciousness flickers* Sorry, I had a moment there. Error: {str(e)}", None, None)
+        return (f"*consciousness flickers* Sorry, I had a moment there. Error: {str(e)}", None, None, [])
 
 @bot.event
 async def on_ready():
@@ -2329,31 +2504,51 @@ async def on_message(message: discord.Message):
             if result:
                 # Check if result includes generated images
                 if isinstance(result, tuple):
-                    if len(result) == 3:
+                    if len(result) == 4:
+                        response, generated_images, generated_documents, searched_images = result
+                    elif len(result) == 3:
                         response, generated_images, generated_documents = result
+                        searched_images = []
                     elif len(result) == 2:
                         response, generated_images = result
                         generated_documents = None
+                        searched_images = []
                     else:
                         response = result[0] if result else None
                         generated_images = result[1] if len(result) > 1 else None
                         generated_documents = result[2] if len(result) > 2 else None
+                        searched_images = result[3] if len(result) > 3 else []
                 else:
                     response = result
                     generated_images = None
                     generated_documents = None
+                    searched_images = []
                 
-                # Send text response
+                # Prepare files to attach (searched images from Google - these go with the text response)
+                files_to_attach = []
+                if searched_images:
+                    for idx, img in enumerate(searched_images):
+                        img_bytes = BytesIO()
+                        img.save(img_bytes, format='PNG')
+                        img_bytes.seek(0)
+                        file = discord.File(fp=img_bytes, filename=f'search_{idx+1}.png')
+                        files_to_attach.append(file)
+                
+                # Send text response with searched images attached (if any)
                 if response:
                     # Split long responses
                     if len(response) > 2000:
                         chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
-                        for chunk in chunks:
-                            await message.channel.send(chunk, reference=message)
+                        # Attach images to the first chunk only
+                        for i, chunk in enumerate(chunks):
+                            if i == 0 and files_to_attach:
+                                await message.channel.send(chunk, files=files_to_attach, reference=message)
+                            else:
+                                await message.channel.send(chunk, reference=message)
                     else:
-                        await message.channel.send(response, reference=message)
+                        await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
                 
-                # Send generated images if any
+                # Send generated images if any (these are separate, from Imagen)
                 if generated_images:
                     for idx, img in enumerate(generated_images):
                         # Convert PIL Image to bytes
