@@ -1796,6 +1796,8 @@ Now decide: "{message.content}" -> """
         generation_time = time.time() - start_time
         raw_ai_response = (response.text or "").strip()
         ai_response, document_outputs = extract_document_outputs(raw_ai_response)
+        generated_images = None
+        generated_documents = None
         if document_outputs:
             generated_documents = document_outputs
             print(f"📄 [{username}] Prepared {len(document_outputs)} document(s) for delivery")
