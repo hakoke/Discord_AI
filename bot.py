@@ -1311,9 +1311,12 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
             pdf.ln(2)
 
     output = pdf.output(dest='S')
-    if isinstance(output, bytes):
-        return output
-    return output.encode('latin-1')
+    if isinstance(output, (bytes, bytearray)):
+        return bytes(output)
+    if isinstance(output, str):
+        return output.encode('latin-1')
+
+    raise TypeError(f"Unexpected PDF output type: {type(output).__name__}")
 
 def _determine_document_filename(descriptor: dict, extension: str) -> str:
     filename = descriptor.get("filename") or descriptor.get("title") or "ai_document"
