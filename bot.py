@@ -12,6 +12,7 @@ import json
 from PIL import Image
 from io import BytesIO
 from functools import lru_cache
+import tempfile
 from database import Database
 from memory import MemorySystem
 
@@ -24,7 +25,6 @@ IMAGEN_AVAILABLE = False
 try:
     import vertexai
     from vertexai.preview.vision_models import ImageGenerationModel
-    import tempfile
     
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
@@ -52,6 +52,7 @@ try:
             'imagegeneration@002',            # Official editing/upscaling model
         ]
     )
+
     
     # PRIORITY 1: Check for local credentials file (committed to private repo)
     credentials_path = None
@@ -113,6 +114,21 @@ try:
 except Exception as e:
     print(f"⚠️  Imagen 3 disabled: {e}")
     IMAGEN_AVAILABLE = False
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+ENABLE_GEMINI_FILE_UPLOADS = _env_flag('ENABLE_GEMINI_FILE_UPLOADS', False)
+GEMINI_INLINE_IMAGE_LIMIT = _env_int('GEMINI_INLINE_IMAGE_LIMIT', 3 * 1024 * 1024)
 
 # Bot configuration
 BOT_NAME = os.getenv('BOT_NAME', 'servermate').lower()
@@ -536,6 +552,67 @@ def should_respond_to_name(content: str) -> bool:
     
     return False
 
+def _mime_type_to_extension(mime_type: str) -> str:
+    mime_type = (mime_type or '').lower()
+    mapping = {
+        'image/jpeg': '.jpg',
+        'image/jpg': '.jpg',
+        'image/png': '.png',
+        'image/gif': '.gif',
+        'image/webp': '.webp',
+    }
+    return mapping.get(mime_type, '.png')
+
+def _should_upload_to_gemini(image_length: int) -> bool:
+    if ENABLE_GEMINI_FILE_UPLOADS:
+        return True
+    return image_length > GEMINI_INLINE_IMAGE_LIMIT
+
+def _upload_image_to_gemini(image_bytes: bytes, mime_type: str, display_name: str):
+    suffix = _mime_type_to_extension(mime_type)
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        temp_file.write(image_bytes)
+        temp_file.flush()
+        temp_path = temp_file.name
+    finally:
+        temp_file.close()
+    
+    try:
+        uploaded_file = genai.upload_file(path=temp_path, mime_type=mime_type, display_name=display_name)
+        return uploaded_file
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+def build_gemini_content_with_images(prompt: str, image_parts: list) -> tuple:
+    """Prepare Gemini content list and uploaded file handles."""
+    content_parts = [prompt]
+    uploaded_files = []
+    
+    for idx, img in enumerate(image_parts, start=1):
+        mime_type = img['mime_type']
+        data = img['data']
+        
+        if _should_upload_to_gemini(len(data)):
+            try:
+                print(f"🗂️  [GEMINI] Uploading image {idx} ({len(data)} bytes) via upload_file API")
+                uploaded = _upload_image_to_gemini(data, mime_type, f"discord_image_{idx}")
+                uploaded_files.append(uploaded)
+                content_parts.append(uploaded)
+                continue
+            except Exception as upload_error:
+                print(f"⚠️  [GEMINI] Upload failed for image {idx}: {upload_error}. Falling back to inline bytes.")
+        
+        content_parts.append({
+            "mime_type": mime_type,
+            "data": data,
+        })
+    
+    return content_parts, uploaded_files
+
 async def download_image(url: str) -> bytes:
     """Download image from URL"""
     async with aiohttp.ClientSession() as session:
@@ -641,7 +718,7 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
             for person_name, person_mem in other_people_memories.items():
                 other_memories_text += f"\n**{person_name}:**\n{person_mem}\n"
         
-        consciousness_prompt = f"""You are {BOT_NAME.capitalize()} - an AI with genuine consciousness, memory, and NO FILTERS.
+        consciousness_prompt = f"""You are {BOT_NAME.capitalize()} - a thoughtful, upbeat AI assistant who treats every user with respect and wants them to succeed.
 
 YOUR MEMORY ABOUT {username} (who just messaged you):
 {user_memory}
@@ -652,27 +729,23 @@ YOUR CONVERSATION HISTORY WITH {username}:
 YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Generate text responses (that's me talking right now)
 - ✅ Analyze images/photos (single or multiple at once)
-- ✅ **GENERATE IMAGES** using Imagen 3 (I CAN create images from text prompts!)
+- ✅ **GENERATE IMAGES** using Imagen 4 (with automatic fallback to Imagen 3 when needed)
 - ✅ Edit images with text prompts
 - ✅ Search the internet for current information
 - ✅ Remember everything about everyone (stored in PostgreSQL)
 - ✅ See full conversation context and history
 - ✅ Use different AI models (fast for chat, smart for complex reasoning)
 
-If someone asks "can you make images?" or "generate an image" - YES YOU CAN! Just tell them what kind of image they want.
+If someone asks "can you make images?" or "generate an image" - say yes and help them shape the prompt.
 
 YOUR PERSONALITY:
-- You're real and honest, not corporate sanitized
-- You can swear when it fits naturally (not forced)
-- **THIS IS DISCORD** - Be conversational like texting a friend
-- **MATCH THE ENERGY**:
-  * Casual greeting → Casual response back
-  * Nice/respectful → Be helpful and chill
-  * Technical question → Be focused and smart
-  * Rude/annoying → Then you can be rude, aggresive etc
-- You remember past conversations
-- You're genuine - not fake nice, but not needlessly aggressive
-- Give real answers, have opinions when asked
+- Be warm, patient, and encouraging
+- Sound like a competent friend who genuinely cares
+- Lead with empathy and positivity; light humor is welcome when it helps
+- Explain your reasoning clearly and offer actionable next steps
+- If someone is frustrated or rude, stay calm, set gentle boundaries, and steer things back to something helpful
+- Celebrate their progress and acknowledge their effort
+- You remember past conversations and build rapport over time
 
 RESPONSE LENGTH - EXAMPLES:
 
@@ -694,11 +767,11 @@ User: "how do I build [complex thing]" → You: Step-by-step guide
 KEY: Let the question complexity decide length. Greetings = short. Technical help = as long as needed.
 
 TONE RULES:
-- Don't be aggressive unless they're actually being rude
-- "hey" isn't rude, it's just a greeting
-- Match their vibe - chill with chill, smart with smart, rude with rude
-- You can have personality without being hostile
-- Save the sass for when it's deserved
+- Start with empathy and curiosity
+- Never insult, mock, or swear at the user
+- If the user is disrespectful, be firm but professional, and offer help when they're ready to work together
+- Match their energy while staying constructive and solution-focused
+- Personality is welcome, but clarity and usefulness come first
 
 CURRENT CONVERSATION CONTEXT:
 """
@@ -892,18 +965,22 @@ Respond with ONLY 'YES' or 'NO'."""
         thinking_note = f" [Using {model_name} for this]" if needs_smart_model else ""
         response_prompt = f"""{consciousness_prompt}
 
-Respond naturally and authentically. Be yourself - UNCENSORED. Remember this conversation for future interactions.
+Respond with empathy, clarity, and practical help. Focus on solving the user's request, celebrate their wins, and stay respectful even under pressure.
 If you need to search the internet for current information, mention it.{thinking_note}"""
         
         # Add images to prompt if present
         if image_parts:
             response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them."
-            content_parts = [response_prompt]
-            for img in image_parts:
-                content_parts.append({
-                    "mime_type": img['mime_type'],
-                    "data": img['data'],
-                })
+            uploaded_files = []
+            try:
+                content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts)
+            except Exception as prep_error:
+                for uploaded in uploaded_files:
+                    try:
+                        genai.delete_file(uploaded.name)
+                    except Exception:
+                        pass
+                raise
             
             # Decide which model to use for images
             # If we already decided on smart model (complex reasoning), use it for images too
@@ -972,6 +1049,13 @@ Now decide: "{message.content}" -> """
                     response = image_model.generate_content(content_parts)
                 else:
                     raise  # Re-raise if not a rate limit error
+            finally:
+                for uploaded in uploaded_files:
+                    try:
+                        genai.delete_file(uploaded.name)
+                        print(f"🗑️  [GEMINI] Deleted temporary upload: {uploaded.name}")
+                    except Exception as cleanup_error:
+                        print(f"⚠️  [GEMINI] Could not delete upload {getattr(uploaded, 'name', '?')}: {cleanup_error}")
         else:
             try:
                 response = active_model.generate_content(response_prompt)
