@@ -344,27 +344,10 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         vertexai.init(project=project_id, location=location)
         print(f"✅ [IMAGE GEN] Vertex AI initialized successfully")
         
-        # Try different model names (Vertex AI model naming can vary)
-        model_names = [
-            "imagegeneration@006",  # Latest version
-            "imagegeneration@002",  # Stable version
-            "imagen-3.0-generate-001",  # Versioned name
-            "imagen-3.0-fast-generate-001",  # Fast version
-        ]
-        
-        model = None
-        for model_name in model_names:
-            try:
-                print(f"🔄 [IMAGE GEN] Attempting to load model: {model_name}")
-                model = ImageGenerationModel.from_pretrained(model_name)
-                print(f"✅ [IMAGE GEN] Successfully loaded model: {model_name}")
-                break
-            except Exception as model_error:
-                print(f"   ⚠️  Model '{model_name}' not available: {model_error}")
-                continue
-        
-        if not model:
-            raise Exception("No Imagen model available in this region. Tried: " + ", ".join(model_names))
+        model_name = "imagen-3.0-generate"
+        print(f"🔄 [IMAGE GEN] Loading Imagen 3 model: {model_name}")
+        model = ImageGenerationModel.from_pretrained(model_name)
+        print(f"✅ [IMAGE GEN] Model loaded successfully: {model_name}")
         
         print(f"📡 [IMAGE GEN] Calling Imagen API (generating {num_images} image(s))...")
         images_response = model.generate_images(
@@ -444,25 +427,10 @@ def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
         vertexai.init(project=project_id, location=location)
         print(f"✅ [IMAGE EDIT] Vertex AI initialized successfully")
         
-        # Try different model names for editing
-        model_names = [
-            "imagegeneration@006",  # Latest version
-            "imagegeneration@002",  # Stable version  
-        ]
-        
-        model = None
-        for model_name in model_names:
-            try:
-                print(f"🔄 [IMAGE EDIT] Attempting to load model: {model_name}")
-                model = ImageGenerationModel.from_pretrained(model_name)
-                print(f"✅ [IMAGE EDIT] Successfully loaded model: {model_name}")
-                break
-            except Exception as model_error:
-                print(f"   ⚠️  Model '{model_name}' not available: {model_error}")
-                continue
-        
-        if not model:
-            raise Exception("No Imagen editing model available in this region. Tried: " + ", ".join(model_names))
+        model_name = "imagegeneration@002"
+        print(f"🔄 [IMAGE EDIT] Loading Imagen editing model: {model_name}")
+        model = ImageGenerationModel.from_pretrained(model_name)
+        print(f"✅ [IMAGE EDIT] Model loaded successfully: {model_name}")
         
         # Convert bytes to Vertex AI Image
         print(f"🖼️  [IMAGE EDIT] Converting base image ({len(original_image_bytes)} bytes)...")
