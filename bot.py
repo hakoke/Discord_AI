@@ -10,6 +10,7 @@ from fuzzywuzzy import fuzz
 import re
 import io
 import json
+import unicodedata
 from PIL import Image
 from io import BytesIO
 from functools import lru_cache
@@ -1088,6 +1089,26 @@ def _truncate_document_text(text: str, max_chars: int) -> Tuple[str, bool]:
         return text, False
     return text[:max_chars], True
 
+PDF_ASCII_REPLACEMENTS = {
+    '–': '-',
+    '—': '-',
+    '−': '-',
+    '’': "'",
+    '‘': "'",
+    '“': '"',
+    '”': '"',
+    '•': '-',
+    '·': '-',
+    '…': '...',
+}
+
+def _pdf_safe_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = unicodedata.normalize('NFKD', str(text))
+    replaced = ''.join(PDF_ASCII_REPLACEMENTS.get(ch, ch) for ch in normalized)
+    return ''.join(ch for ch in replaced if ord(ch) < 128)
+
 def build_document_prompt_section(document_assets: List[Dict[str, Any]]) -> str:
     if not document_assets:
         return ""
@@ -1188,21 +1209,21 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
     title = descriptor.get("title")
     if title:
         pdf.set_font("Helvetica", "B", 18)
-        pdf.multi_cell(0, 10, title, align='C')
+        pdf.multi_cell(0, 10, _pdf_safe_text(title), align='C')
         pdf.ln(4)
 
     for section in sections:
         heading = section.get("heading")
         if heading:
             pdf.set_font("Helvetica", "B", 14)
-            pdf.multi_cell(0, 8, heading)
+            pdf.multi_cell(0, 8, _pdf_safe_text(heading))
             pdf.ln(2)
 
         body = section.get("body", "")
         if body:
             pdf.set_font("Helvetica", "", 11)
             for paragraph in body.split("\n"):
-                text = paragraph.strip()
+                text = _pdf_safe_text(paragraph.strip())
                 if text:
                     pdf.multi_cell(0, 6, text)
                 else:
@@ -1213,11 +1234,11 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
         if bullets:
             pdf.set_font("Helvetica", "", 11)
             for bullet in bullets:
-                bullet_text = str(bullet).strip()
+                bullet_text = _pdf_safe_text(str(bullet).strip())
                 if not bullet_text:
                     continue
                 pdf.set_x(pdf.l_margin)
-                pdf.multi_cell(0, 6, f"• {bullet_text}")
+                pdf.multi_cell(0, 6, f"- {bullet_text}")
             pdf.ln(2)
 
     output = pdf.output(dest='S')
