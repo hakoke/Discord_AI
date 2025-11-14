@@ -1410,78 +1410,22 @@ Now decide: "{message.content}" -> """
         if wants_image_edit:
             print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
             print(f"🛠️  [{username}] Attachments available for edit: {len(image_parts)} image(s)")
-            # AI decides if this is a style transformation (use generation) or actual editing (use edit API)
-            async def decide_edit_vs_generate():
-                """AI decides if request needs style transformation (generate) or actual editing (edit API)"""
-                decision_prompt = f"""User wants to modify an image they provided. Their request: "{message.content}"
-
-Is this a STYLE TRANSFORMATION or ACTUAL EDITING?
-
-STYLE TRANSFORMATION (use generation):
-- "make it look like a physical photo"
-- "transform it to look real"
-- "redefine it as..."
-- "change the style to..."
-- "make it appear as if..."
-- "turn it into a..."
-- Full visual style changes
-- Making it look like something else entirely
-- Changing the entire appearance/format
-
-ACTUAL EDITING (use edit API):
-- "add a person here"
-- "remove the background"
-- "change the color of..."
-- "add text here"
-- "remove this object"
-- "replace X with Y"
-- Adding/removing specific parts
-- Modifying specific elements
-- Inpainting/outpainting tasks
-
-Respond with ONLY: "GENERATE" or "EDIT"
-
-Examples:
-"make it look like a physical photo on a table" -> GENERATE
-"add a rainbow in the sky" -> EDIT
-"transform it to look realistic" -> GENERATE
-"remove the person from the image" -> EDIT
-"redefine it so it looks like a painting" -> GENERATE
-"change the background color" -> EDIT
-
-Now decide: "{message.content}" -> """
-                
-                try:
-                    decision_model = get_fast_model()
-                    loop = asyncio.get_event_loop()
-                    decision = await loop.run_in_executor(
-                        None,
-                        decision_model.generate_content,
-                        decision_prompt
-                    )
-                    decision_text = (decision.text or "").strip().upper()
-                    return 'GENERATE' in decision_text
-                except Exception as e:
-                    print(f"Edit vs generate decision error: {e}")
-                    return False  # Default to edit API if decision fails
-            
-            is_style_transformation = await decide_edit_vs_generate()
-            print(f"🛠️  [{username}] Edit decision: {'GENERATE' if is_style_transformation else 'EDIT'}")
-            
-            if is_style_transformation:
-                # For style transformations, use generation instead of editing
-                print(f"🎨 [IMAGE EDIT] Detected style transformation, using generation instead of editing...")
-                try:
-                    # Analyze the original image to understand what it is
-                    vision_model = get_vision_model()
-                    loop = asyncio.get_event_loop()
+            print(f"🛠️  [{username}] Force-remaking image via Imagen 4 remaster flow")
+            try:
+                if not image_parts:
+                    print(f"⚠️  [{username}] No image parts available for edit request")
+                    ai_response += "\n\n(I didn't receive an image to work with, so I couldn't remake it.)"
+                else:
                     from PIL import Image
                     from io import BytesIO
+                    vision_model = get_vision_model()
+                    loop = asyncio.get_event_loop()
                     pil_image = Image.open(BytesIO(image_parts[0]['data']))
+                    print(f"🎨 [IMAGE REMAKE] Analyzing original image with vision model: {vision_model}")
                     analysis = await loop.run_in_executor(
                         None,
                         vision_model.generate_content,
-                        [f"Describe this image in detail. What is shown in this image?", pil_image]
+                        ["Describe this image in detail. What is shown in this image?", pil_image]
                     )
                     analysis_text = ""
                     if analysis is not None:
@@ -1489,75 +1433,27 @@ Now decide: "{message.content}" -> """
                             analysis_text = analysis.text.strip()
                         else:
                             analysis_text = str(analysis)
-                    print(f"🎨 [IMAGE EDIT] Vision analysis length: {len(analysis_text)} chars")
-                    print(f"🎨 [IMAGE EDIT] Vision analysis preview: {analysis_text[:200]}...")
-                    image_description = analysis_text
-                    enhanced_prompt = f"{image_description}. {message.content}"
-                    print(f"🎨 [IMAGE EDIT] Style transformation prompt: {enhanced_prompt[:200]}...")
+                    if not analysis_text:
+                        analysis_text = "A screenshot provided by the user."
+                    print(f"🎨 [IMAGE REMAKE] Vision analysis length: {len(analysis_text)} chars")
+                    print(f"🎨 [IMAGE REMAKE] Vision analysis preview: {analysis_text[:200]}...")
+                    sanitized_request = re.sub(r'<@!?\d+>', '', message.content).strip()
+                    print(f"🎨 [IMAGE REMAKE] Sanitized user request: {sanitized_request}")
+                    enhanced_prompt = f"{analysis_text}. {sanitized_request}"
+                    print(f"🎨 [IMAGE REMAKE] Generation prompt length: {len(enhanced_prompt)} chars")
+                    print(f"🎨 [IMAGE REMAKE] Generation prompt preview: {enhanced_prompt[:200]}...")
                     generated_images = await generate_image(enhanced_prompt, num_images=1)
                     if generated_images:
-                        print(f"🎨 [IMAGE EDIT] Style transformation generated {len(generated_images)} image(s)")
-                        ai_response += "\n\n*Generated transformed image based on your request*"
+                        print(f"🎨 [IMAGE REMAKE] Generated {len(generated_images)} image(s) with Imagen 4")
+                        ai_response += "\n\n*Generated a remastered version based on your image*"
                     else:
-                        print(f"⚠️  [IMAGE EDIT] Style transformation generation returned no images")
-                except Exception as gen_error:
-                    print(f"❌ [IMAGE EDIT] Style transformation generation failed: {gen_error}")
-                    ai_response += "\n\n(Tried to transform your image but something went wrong)"
-            else:
-                # For actual editing (adding/removing parts), use edit API
-                try:
-                    edit_prompt = message.content
-                    original_img_bytes = image_parts[0]['data']
-                    print(f"🖊️  [IMAGE EDIT] Proceeding with edit API")
-                    print(f"🖊️  [IMAGE EDIT] Edit prompt length: {len(edit_prompt)} chars")
-                    print(f"🖊️  [IMAGE EDIT] Base image size: {len(original_img_bytes)} bytes")
-                    edited_img = await edit_image_with_prompt(original_img_bytes, edit_prompt)
-                    if edited_img:
-                        print(f"🖊️  [IMAGE EDIT] Edit API returned an image")
-                        generated_images = [edited_img]
-                        ai_response += "\n\n*Generated edited image based on your request*"
-                    else:
-                        print(f"⚠️  [IMAGE EDIT] Edit API returned no image, switching to fallback generation")
-                        # Fallback: If editing fails, generate a new image with enhanced prompt
-                        print(f"🔄 [IMAGE EDIT] Edit returned no image, trying generation fallback...")
-                        try:
-                            # Analyze the original image to understand what it is
-                            vision_model = get_vision_model()
-                            loop = asyncio.get_event_loop()
-                            from PIL import Image
-                            from io import BytesIO
-                            pil_image = Image.open(BytesIO(original_img_bytes))
-                            analysis = await loop.run_in_executor(
-                                None,
-                                vision_model.generate_content,
-                                [f"Describe this image in detail. What is it?", pil_image]
-                            )
-                            analysis_text = ""
-                            if analysis is not None:
-                                if hasattr(analysis, 'text') and analysis.text:
-                                    analysis_text = analysis.text.strip()
-                                else:
-                                    analysis_text = str(analysis)
-                            print(f"🔄 [IMAGE EDIT] Fallback vision analysis length: {len(analysis_text)} chars")
-                            print(f"🔄 [IMAGE EDIT] Fallback vision analysis preview: {analysis_text[:200]}...")
-                            image_description = analysis_text
-                            enhanced_prompt = f"{image_description}. Transform this into: {edit_prompt}"
-                            print(f"🔄 [IMAGE EDIT] Fallback prompt: {enhanced_prompt[:200]}...")
-                            generated_images = await generate_image(enhanced_prompt, num_images=1)
-                            if generated_images:
-                                print(f"🔄 [IMAGE EDIT] Fallback generation produced {len(generated_images)} image(s)")
-                                ai_response += "\n\n*Generated new image based on your transformation request*"
-                            else:
-                                print(f"❌ [IMAGE EDIT] Fallback generation produced no images")
-                        except Exception as fallback_error:
-                            print(f"❌ [IMAGE EDIT] Fallback generation also failed: {fallback_error}")
-                            ai_response += "\n\n(Tried to edit your image but the editing API didn't return results. This might require a different approach.)"
-                except Exception as e:
-                    print(f"Image edit error: {e}")
-                    import traceback
-                    print(f"Image edit traceback: {traceback.format_exc()}")
-                    ai_response += "\n\n(Tried to edit your image but something went wrong)"
-        
+                        print(f"❌ [IMAGE REMAKE] Imagen 4 generation returned no images")
+                        ai_response += "\n\n(Tried to remake the image but Imagen 4 didn't return results.)"
+            except Exception as e:
+                print(f"❌ [IMAGE REMAKE] Error remaking image: {e}")
+                import traceback
+                print(f"❌ [IMAGE REMAKE] Traceback:\n{traceback.format_exc()}")
+                ai_response += "\n\n(Tried to remake your image but something went wrong)"
         elif wants_image:
             # Generate new image
             try:
