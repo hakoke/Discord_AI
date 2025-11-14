@@ -1322,10 +1322,39 @@ def build_pdf_document(descriptor: dict, sections: List[Dict[str, Any]]) -> byte
 
         body = section.get("body", "")
         if body:
+            # Strip markdown code blocks (```language ... ```) but keep the code content
+            # Remove opening ```python or ``` or ```json etc.
+            body = re.sub(r'```[\w]*\n?', '', body)
+            # Remove closing ```
+            body = re.sub(r'```\s*$', '', body, flags=re.MULTILINE)
+            # Clean up any remaining backticks
+            body = body.replace('```', '')
+            
             pdf.set_font("Helvetica", "", 11)
             for paragraph in body.split("\n"):
                 paragraph = paragraph.strip()
                 if paragraph:
+                    # Use monospace font for code-like content (detect multiple languages)
+                    # Check for common code patterns across Python, Java, C++, JavaScript, etc.
+                    code_patterns = [
+                        # Python
+                        'import ', 'def ', 'class ', 'from ', 'return ', 'print(',
+                        # Java/C++
+                        'public ', 'private ', 'protected ', 'static ', 'void ', 'int ', 'String ', 'double ', 'float ', 'bool ',
+                        'package ', '#include', 'using namespace', 'namespace ', 'std::',
+                        # Common to many languages
+                        'if ', 'else ', 'for ', 'while ', 'switch ', 'case ', 'break', 'continue', 'return',
+                        'function ', 'const ', 'let ', 'var ', 'const ', 'async ',
+                        # Comments and indentation
+                        '# ', '//', '/*', '*/', '    ', '\t'
+                    ]
+                    is_code_line = any(paragraph.strip().startswith(prefix) for prefix in code_patterns) or \
+                                   any(prefix in paragraph.strip()[:20] for prefix in ['()', '{}', '[]', '->', '::', '=>'])
+                    if is_code_line:
+                        pdf.set_font("Courier", "", 9)  # Monospace for code
+                    else:
+                        pdf.set_font("Helvetica", "", 11)  # Regular for text
+                    
                     _safe_multi_cell(
                         pdf,
                         paragraph,
@@ -2257,6 +2286,11 @@ If you need to search the internet for current information, mention it.{thinking
                 doc_instruction_lines.append("- The user expects revisions to existing documents. Preserve structure and integrate changes cleanly.")
             if document_actions.get("generate_new_document"):
                 doc_instruction_lines.append("- The user wants a brand-new, polished document. Propose a professional structure and deliver the draft.")
+                doc_instruction_lines.append("- CRITICAL: If the user asks to create a PDF/document from code or content mentioned in the conversation, you MUST:")
+                doc_instruction_lines.append("  1. Look at the conversation context above to find the code/content")
+                doc_instruction_lines.append("  2. Extract that code/content from the conversation")
+                doc_instruction_lines.append("  3. Include it in the document JSON output (put the code in the 'body' field of a section)")
+                doc_instruction_lines.append("  4. DO NOT just say you'll do it - actually output the JSON with the extracted content")
             
             if any([
                 document_actions.get("edit_documents"),
