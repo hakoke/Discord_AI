@@ -245,14 +245,155 @@ class Database:
             memory_records = await conn.fetchval('SELECT COUNT(*) FROM user_memory')
             consciousness_entries = await conn.fetchval('SELECT COUNT(*) FROM consciousness_stream')
             learned_behaviors_count = await conn.fetchval('SELECT COUNT(*) FROM learned_behaviors')
+            unique_servers = await conn.fetchval('SELECT COUNT(DISTINCT guild_id) FROM interactions WHERE guild_id IS NOT NULL')
             
             return {
                 'total_interactions': total_interactions,
                 'unique_users': unique_users,
                 'memory_records': memory_records,
                 'consciousness_entries': consciousness_entries,
-                'learned_behaviors': learned_behaviors_count
+                'learned_behaviors': learned_behaviors_count,
+                'unique_servers': unique_servers
             }
+    
+    async def get_all_servers(self):
+        """Get all servers (guilds) with stats"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT 
+                    guild_id,
+                    COUNT(*) as interaction_count,
+                    COUNT(DISTINCT user_id) as unique_users,
+                    MAX(timestamp) as last_activity,
+                    MIN(timestamp) as first_activity
+                FROM interactions
+                WHERE guild_id IS NOT NULL
+                GROUP BY guild_id
+                ORDER BY interaction_count DESC
+            ''')
+            return [dict(row) for row in rows]
+    
+    async def get_server_stats(self, guild_id: str):
+        """Get statistics for a specific server"""
+        async with self.pool.acquire() as conn:
+            stats = await conn.fetchrow('''
+                SELECT 
+                    COUNT(*) as total_interactions,
+                    COUNT(DISTINCT user_id) as unique_users,
+                    COUNT(DISTINCT DATE(timestamp)) as active_days,
+                    MAX(timestamp) as last_activity,
+                    MIN(timestamp) as first_activity,
+                    SUM(CASE WHEN has_images THEN 1 ELSE 0 END) as image_interactions,
+                    SUM(CASE WHEN has_documents THEN 1 ELSE 0 END) as document_interactions,
+                    SUM(CASE WHEN search_query IS NOT NULL THEN 1 ELSE 0 END) as search_interactions
+                FROM interactions
+                WHERE guild_id = $1
+            ''', guild_id)
+            
+            return dict(stats) if stats else None
+    
+    async def get_server_users(self, guild_id: str):
+        """Get all users in a server with their memory"""
+        async with self.pool.acquire() as conn:
+            # Get users with interaction counts
+            user_stats = await conn.fetch('''
+                SELECT 
+                    i.user_id,
+                    i.username,
+                    COUNT(*) as interaction_count,
+                    MAX(i.timestamp) as last_interaction,
+                    MIN(i.timestamp) as first_interaction,
+                    SUM(CASE WHEN i.has_images THEN 1 ELSE 0 END) as image_count,
+                    SUM(CASE WHEN i.has_documents THEN 1 ELSE 0 END) as document_count
+                FROM interactions i
+                WHERE i.guild_id = $1
+                GROUP BY i.user_id, i.username
+                ORDER BY interaction_count DESC
+            ''', guild_id)
+            
+            # Get memory for each user
+            users_with_memory = []
+            for user in user_stats:
+                user_dict = dict(user)
+                memory = await conn.fetchrow('''
+                    SELECT * FROM user_memory WHERE user_id = $1
+                ''', user_dict['user_id'])
+                
+                if memory:
+                    user_dict['memory'] = dict(memory)
+                else:
+                    user_dict['memory'] = None
+                
+                users_with_memory.append(user_dict)
+            
+            return users_with_memory
+    
+    async def get_server_interactions(self, guild_id: str, limit: int = 50):
+        """Get recent interactions for a server"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM interactions
+                WHERE guild_id = $1
+                ORDER BY timestamp DESC
+                LIMIT $2
+            ''', guild_id, limit)
+            return [dict(row) for row in rows]
+    
+    async def get_usage_over_time(self, guild_id: str = None, days: int = 30):
+        """Get usage statistics over time for charts"""
+        async with self.pool.acquire() as conn:
+            if guild_id:
+                rows = await conn.fetch(f'''
+                    SELECT 
+                        DATE(timestamp) as date,
+                        COUNT(*) as count
+                    FROM interactions
+                    WHERE guild_id = $1
+                        AND timestamp >= NOW() - INTERVAL '{days} days'
+                    GROUP BY DATE(timestamp)
+                    ORDER BY date ASC
+                ''', guild_id)
+            else:
+                rows = await conn.fetch(f'''
+                    SELECT 
+                        DATE(timestamp) as date,
+                        COUNT(*) as count
+                    FROM interactions
+                    WHERE timestamp >= NOW() - INTERVAL '{days} days'
+                    GROUP BY DATE(timestamp)
+                    ORDER BY date ASC
+                ''')
+            
+            return [dict(row) for row in rows]
+    
+    async def get_top_users(self, guild_id: str = None, limit: int = 10):
+        """Get top users by interaction count"""
+        async with self.pool.acquire() as conn:
+            if guild_id:
+                rows = await conn.fetch('''
+                    SELECT 
+                        user_id,
+                        username,
+                        COUNT(*) as interaction_count
+                    FROM interactions
+                    WHERE guild_id = $1
+                    GROUP BY user_id, username
+                    ORDER BY interaction_count DESC
+                    LIMIT $2
+                ''', guild_id, limit)
+            else:
+                rows = await conn.fetch('''
+                    SELECT 
+                        user_id,
+                        username,
+                        COUNT(*) as interaction_count
+                    FROM interactions
+                    GROUP BY user_id, username
+                    ORDER BY interaction_count DESC
+                    LIMIT $1
+                ''', limit)
+            
+            return [dict(row) for row in rows]
     
     async def close(self):
         """Close database connection"""
