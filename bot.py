@@ -15,7 +15,7 @@ from PIL import Image
 from io import BytesIO
 from functools import lru_cache
 import tempfile
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from pypdf import PdfReader
@@ -1295,6 +1295,108 @@ def generate_document_file(descriptor: dict) -> Dict[str, Any]:
 
 DOCUMENT_JSON_PATTERN = re.compile(r"```(?:\s*json)?\s*({[\s\S]*?})\s*```", re.IGNORECASE)
 
+def _sanitize_json_control_chars(raw_json: str) -> str:
+    """Ensure control characters inside JSON strings are properly escaped."""
+    result = []
+    in_string = False
+    escape = False
+
+    for ch in raw_json:
+        if in_string:
+            if escape:
+                result.append(ch)
+                escape = False
+                continue
+
+            if ch == '\\':
+                result.append(ch)
+                escape = True
+            elif ch == '"':
+                result.append(ch)
+                in_string = False
+            elif ch == '\n':
+                result.append('\\n')
+            elif ch == '\r':
+                result.append('\\r')
+            elif ch == '\t':
+                result.append('\\t')
+            elif ord(ch) < 32:
+                result.append(f'\\u{ord(ch):04x}')
+            else:
+                result.append(ch)
+        else:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+                escape = False
+
+    return ''.join(result)
+
+def _collect_document_entries(payload: Any) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    if isinstance(payload, dict):
+        documents = payload.get("documents")
+        if isinstance(documents, list):
+            entries.extend(documents)
+        document_outputs = payload.get("document_outputs")
+        if isinstance(document_outputs, list):
+            entries.extend(document_outputs)
+    return entries
+
+def _parse_document_descriptors(raw_json: str) -> List[Dict[str, Any]]:
+    """
+    Try to extract document descriptors from a JSON string, attempting to repair
+    common formatting issues produced by the language model.
+    """
+    candidates: List[str] = []
+    trimmed = raw_json.strip()
+
+    def add_candidate(candidate: str):
+        candidate = candidate.strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    add_candidate(trimmed)
+
+    # Attempt to balance braces by trimming trailing text if necessary
+    if trimmed.count('{') > trimmed.count('}'):
+        closing_index = trimmed.rfind('}')
+        if closing_index != -1:
+            add_candidate(trimmed[:closing_index + 1])
+    elif trimmed.count('{') < trimmed.count('}'):
+        opening_index = trimmed.find('{')
+        if opening_index != -1:
+            add_candidate(trimmed[opening_index:])
+
+    sanitized = _sanitize_json_control_chars(trimmed)
+    add_candidate(sanitized)
+
+    if sanitized.count('{') > sanitized.count('}'):
+        closing_index = sanitized.rfind('}')
+        if closing_index != -1:
+            add_candidate(sanitized[:closing_index + 1])
+
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            last_error = error
+            continue
+
+        entries = _collect_document_entries(payload)
+        if entries:
+            return entries
+
+    if last_error is not None:
+        preview = trimmed[:250].replace('\n', '\\n')
+        print(f"⚠️  [DOCUMENT OUTPUT] Could not parse document payload ({len(trimmed)} chars). "
+              f"Last error: {last_error}. Preview: {preview}...")
+    else:
+        print(f"⚠️  [DOCUMENT OUTPUT] No document entries found in payload ({len(trimmed)} chars).")
+
+    return []
+
 def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, Any]]]:
     if not response_text:
         return response_text, []
@@ -1304,17 +1406,7 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
 
     for match in DOCUMENT_JSON_PATTERN.finditer(response_text):
         raw_json = match.group(1)
-        try:
-            payload = json.loads(raw_json)
-        except json.JSONDecodeError:
-            continue
-
-        document_entries = []
-        if isinstance(payload, dict):
-            if isinstance(payload.get("documents"), list):
-                document_entries.extend(payload["documents"])
-            if isinstance(payload.get("document_outputs"), list):
-                document_entries.extend(payload["document_outputs"])
+        document_entries = _parse_document_descriptors(raw_json)
 
         if not document_entries:
             continue
@@ -1331,14 +1423,8 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
     if not generated_documents:
         fallback_match = re.search(r"(\{\s*\"documents\"[\s\S]*\})", response_text, re.IGNORECASE)
         if fallback_match:
-            try:
-                payload = json.loads(fallback_match.group(1))
-                document_entries = []
-                if isinstance(payload, dict):
-                    if isinstance(payload.get("documents"), list):
-                        document_entries.extend(payload["documents"])
-                    if isinstance(payload.get("document_outputs"), list):
-                        document_entries.extend(payload["document_outputs"])
+            document_entries = _parse_document_descriptors(fallback_match.group(1))
+            if document_entries:
                 for descriptor in document_entries:
                     try:
                         document_file = generate_document_file(descriptor)
@@ -1346,8 +1432,6 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
                     except Exception as doc_error:
                         print(f"⚠️  [DOCUMENT OUTPUT] Failed in fallback parse: {doc_error}")
                 cleaned_text = cleaned_text.replace(fallback_match.group(1), "").strip()
-            except json.JSONDecodeError as fallback_error:
-                print(f"⚠️  [DOCUMENT OUTPUT] Fallback JSON parse error: {fallback_error}")
 
     return cleaned_text.strip(), generated_documents
 
