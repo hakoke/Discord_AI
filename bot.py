@@ -742,17 +742,21 @@ async def generate_image(prompt: str, num_images: int = 1) -> list:
         return None
     
     try:
-        print(f"🚀 [IMAGE GEN] Queuing image generation request...")
+        print(f"🚀 [IMAGE GEN] Queuing image generation request through API_QUEUE...")
         # Queue the image generation through the rate-limited queue
         result = await API_QUEUE.execute(_generate_image_sync, prompt, num_images)
-        print(f"🏁 [IMAGE GEN] Image generation completed")
+        print(f"🏁 [IMAGE GEN] ✅ Image generation completed, result type: {type(result)}")
+        if result:
+            print(f"🏁 [IMAGE GEN] ✅ Result is not None/empty, length: {len(result) if isinstance(result, list) else 'N/A'}")
+        else:
+            print(f"🏁 [IMAGE GEN] ⚠️  Result is None or empty")
         return result
     except Exception as e:
-        print(f"❌ [IMAGE GEN] Error: {e}")
+        print(f"❌ [IMAGE GEN] ❌ Error in generate_image(): {e}")
+        print(f"❌ [IMAGE GEN] ❌ Error type: {type(e).__name__}")
         import traceback
-        print(f"❌ [IMAGE GEN] Traceback:\n{traceback.format_exc()}")
-        # Don't re-raise - the error message should already be user-friendly
-        # Just re-raise as-is (it might already have a user-friendly message)
+        print(f"❌ [IMAGE GEN] ❌ Full traceback:\n{traceback.format_exc()}")
+        # Re-raise so caller can handle it
         raise
 
 def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
@@ -863,13 +867,15 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
                 "Please try a different image request."
             )
         
-        print(f"🎉 [IMAGE GEN] Successfully generated {len(images)} image(s)!")
+        print(f"🎉 [IMAGE GEN] ✅ Successfully generated {len(images)} image(s)!")
+        print(f"🎉 [IMAGE GEN] ✅ Returning images list with {len(images)} item(s)")
         return images
     except Exception as e:
-        print(f"❌ [IMAGE GEN] Error occurred: {type(e).__name__}")
-        print(f"❌ [IMAGE GEN] Error message: {str(e)}")
+        print(f"❌ [IMAGE GEN] ❌ Error occurred in _generate_image_sync: {type(e).__name__}")
+        print(f"❌ [IMAGE GEN] ❌ Error message: {str(e)}")
         import traceback
-        print(f"❌ [IMAGE GEN] Full traceback:\n{traceback.format_exc()}")
+        print(f"❌ [IMAGE GEN] ❌ Full traceback:\n{traceback.format_exc()}")
+        print(f"❌ [IMAGE GEN] ❌ Returning None due to error")
         return None
 
 async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Image:
@@ -1186,12 +1192,11 @@ Return ONLY the JSON object."""
     return heuristics_guess
 
 async def ai_decide_intentions(message: discord.Message, image_parts: list) -> dict:
-    """Use AI to determine if we should generate or edit images."""
-    heuristics = {
-        "generate": False,
-        "edit": bool(image_parts) and 'edit' in (message.content or '').lower(),
-        "analysis": bool(image_parts),
-    }
+    """Use AI to determine if we should generate or edit images. AI makes ALL decisions - no hard-coded keywords."""
+    print(f"🤖 [INTENTION] Starting AI decision for image intentions...")
+    print(f"🤖 [INTENTION] Message: '{message.content[:100]}...'")
+    print(f"🤖 [INTENTION] Image parts: {len(image_parts)}, Has attachments: {bool(message.attachments)}, Is reply: {bool(message.reference)}")
+    
     metadata = {
         "message": (message.content or "").strip(),
         "attachments_count": len(image_parts),
@@ -1214,9 +1219,12 @@ Return ONLY a JSON object like:
 }}
 
 Rules:
-- Set "generate" true only if the user clearly wants new images or variations.
-- Set "edit" true only if the user supplied images and wants changes applied to them.
-- Set "analysis" true only if the user wants commentary on provided images.
+- Set "generate" true only if the user clearly wants new images or variations (without providing images).
+- Set "edit" true if the user provided images AND wants to modify/change/transform them.
+- Set "analysis" true only if the user wants commentary/description of provided images (without modification requests).
+- Examples of EDIT: "make this person a woman", "turn this into a cat", "change the background", "edit this image", "transform this"
+- Examples of GENERATE: "create an image of a car", "generate a sunset", "make me a picture" (when no image provided)
+- Examples of ANALYSIS: "what's in this image?", "describe this", "what do you see?"
 - Feel free to set multiple flags to true.
 - Defaults: generate=false, edit=false, analysis=false unless the message suggests otherwise.
 
@@ -1226,21 +1234,42 @@ Context:
 Return ONLY the JSON object."""
     
     try:
+        print(f"🤖 [INTENTION] Calling AI model to make decision...")
         decision_model = get_fast_model()
         decision_response = await queued_generate_content(decision_model, prompt)
         raw_text = (decision_response.text or "").strip()
+        print(f"🤖 [INTENTION] AI raw response: {raw_text[:200]}...")
+        
         match = re.search(r'\{[\s\S]*\}', raw_text)
         if match:
             data = json.loads(match.group(0))
-            return {
+            result = {
                 "generate": bool(data.get("generate")) and bool((message.content or "").strip()),
                 "edit": bool(data.get("edit")) and bool(image_parts),
                 "analysis": bool(data.get("analysis")) and bool(image_parts),
             }
+            print(f"🤖 [INTENTION] ✅ AI decision successful: {result}")
+            print(f"🤖 [INTENTION] Parsed JSON: {data}")
+            return result
+        else:
+            print(f"🤖 [INTENTION] ⚠️  No JSON found in AI response, using safe defaults")
+            # Safe defaults if AI response is malformed
+            return {
+                "generate": False,
+                "edit": bool(image_parts),  # If images provided, assume edit intent
+                "analysis": bool(image_parts),
+            }
     except Exception as e:
-        print(f"Intention decision error: {e}")
-    
-    return heuristics
+        print(f"🤖 [INTENTION] ❌ Error in AI decision: {e}")
+        import traceback
+        print(f"🤖 [INTENTION] ❌ Traceback: {traceback.format_exc()}")
+        # Safe defaults on error - but log it clearly
+        print(f"🤖 [INTENTION] ⚠️  Using safe defaults due to error")
+        return {
+            "generate": False,
+            "edit": bool(image_parts),  # If images provided, assume edit intent
+            "analysis": bool(image_parts),
+        }
 
 async def ai_decide_document_actions(message: discord.Message, document_assets: List[Dict[str, Any]]) -> Dict[str, bool]:
     """Use AI to decide how to handle document attachments/requests."""
@@ -2407,6 +2436,7 @@ CURRENT CONVERSATION CONTEXT:
         image_parts = []
         
         # Get images from current message
+        print(f"📸 [{username}] Checking for images: attachments={len(message.attachments) if message.attachments else 0}, reference={bool(message.reference)}")
         if message.attachments:
             for attachment in message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
@@ -2421,6 +2451,7 @@ CURRENT CONVERSATION CONTEXT:
                                 'mime_type': mime_type,
                                 'data': image_data
                             })
+                            print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
                     except Exception as e:
                         print(f"Error downloading image: {e}")
         
@@ -2443,10 +2474,13 @@ CURRENT CONVERSATION CONTEXT:
                                         'mime_type': mime_type,
                                         'data': image_data
                                     })
+                                    print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
                             except Exception as e:
                                 print(f"Error downloading replied image: {e}")
             except Exception as e:
                 print(f"Error fetching replied message images: {e}")
+        
+        print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
         
         # For summaries, skip document processing from current message (we just mention them)
         if wants_summary:
@@ -2475,8 +2509,11 @@ CURRENT CONVERSATION CONTEXT:
         intention = await ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
+        print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}")
+        print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
         
         if document_request:
+            print(f"📄 [{username}] Document request detected, disabling image generation/edit")
             wants_image = False
             wants_image_edit = False
         
@@ -2973,6 +3010,7 @@ Now decide: "{message.content}" -> """
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
         
+        print(f"🔍 [{username}] Checking image edit: wants_image_edit={wants_image_edit}, image_parts={len(image_parts)}")
         if wants_image_edit:
             print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
             print(f"🛠️  [{username}] Attachments available for edit: {len(image_parts)} image(s)")
@@ -2988,9 +3026,9 @@ Now decide: "{message.content}" -> """
                     loop = asyncio.get_event_loop()
                     pil_image = Image.open(BytesIO(image_parts[0]['data']))
                     print(f"🎨 [IMAGE REMAKE] Analyzing original image with vision model: {vision_model}")
-                    analysis = await loop.run_in_executor(
-                        None,
-                        vision_model.generate_content,
+                    # Use queued generate_content for rate limiting
+                    analysis = await queued_generate_content(
+                        vision_model,
                         ["Describe this image in detail. What is shown in this image?", pil_image]
                     )
                     analysis_text = ""
@@ -3008,12 +3046,19 @@ Now decide: "{message.content}" -> """
                     enhanced_prompt = f"{analysis_text}. {sanitized_request}"
                     print(f"🎨 [IMAGE REMAKE] Generation prompt length: {len(enhanced_prompt)} chars")
                     print(f"🎨 [IMAGE REMAKE] Generation prompt preview: {enhanced_prompt[:200]}...")
+                    print(f"🎨 [IMAGE REMAKE] Calling generate_image() with prompt length: {len(enhanced_prompt)}")
                     generated_images = await generate_image(enhanced_prompt, num_images=1)
+                    print(f"🎨 [IMAGE REMAKE] generate_image() returned: {type(generated_images)}, value: {generated_images}")
                     if generated_images:
-                        print(f"🎨 [IMAGE REMAKE] Generated {len(generated_images)} image(s) with Imagen 4")
+                        print(f"🎨 [IMAGE REMAKE] ✅ Successfully generated {len(generated_images)} image(s) with Imagen 4")
+                        print(f"🎨 [IMAGE REMAKE] Image types: {[type(img) for img in generated_images]}")
                         ai_response += "\n\n*Generated a remastered version based on your image*"
                     else:
-                        print(f"❌ [IMAGE REMAKE] Imagen 4 generation returned no images")
+                        print(f"❌ [IMAGE REMAKE] ❌ Imagen 4 generation returned no images (None or empty list)")
+                        print(f"❌ [IMAGE REMAKE] This could be due to:")
+                        print(f"❌ [IMAGE REMAKE]   - Content safety filters blocking the request")
+                        print(f"❌ [IMAGE REMAKE]   - API error in generate_image()")
+                        print(f"❌ [IMAGE REMAKE]   - Empty response from Imagen API")
                         ai_response += "\n\n(Tried to remake the image but Imagen 4 didn't return results.)"
             except Exception as e:
                 print(f"❌ [IMAGE REMAKE] Error remaking image: {e}")
@@ -3064,6 +3109,11 @@ Now decide: "{message.content}" -> """
             memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
         )
         
+        print(f"📤 [{username}] Returning response with:")
+        print(f"📤 [{username}]   - Response text: {len(ai_response)} chars")
+        print(f"📤 [{username}]   - Generated images: {len(generated_images) if generated_images else 0}")
+        print(f"📤 [{username}]   - Generated documents: {len(generated_documents) if generated_documents else 0}")
+        print(f"📤 [{username}]   - Searched images: {len(searched_images) if searched_images else 0}")
         return (ai_response, generated_images, generated_documents, searched_images)
         
     except Exception as e:
@@ -3198,9 +3248,12 @@ async def on_message(message: discord.Message):
                 pass  # If we can't send error message, just log it
             return
         
+        print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
         if result:
                 # Check if result includes generated images
+                print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                 if isinstance(result, tuple):
+                    print(f"📥 [{message.author.display_name}] Result is tuple with {len(result)} items")
                     if len(result) == 4:
                         response, generated_images, generated_documents, searched_images = result
                     elif len(result) == 3:
@@ -3232,14 +3285,24 @@ async def on_message(message: discord.Message):
                         files_to_attach.append(file)
                 
                 # Add generated images to files_to_attach (attach to same message)
+                print(f"📎 [{message.author.display_name}] Checking generated_images: {generated_images}")
+                print(f"📎 [{message.author.display_name}] generated_images type: {type(generated_images)}, truthy: {bool(generated_images)}")
                 if generated_images:
+                    print(f"📎 [{message.author.display_name}] ✅ Adding {len(generated_images)} generated image(s) to attachments")
                     for idx, img in enumerate(generated_images):
-                        # Convert PIL Image to bytes
-                        img_bytes = BytesIO()
-                        img.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
-                        files_to_attach.append(file)
+                        try:
+                            # Convert PIL Image to bytes
+                            print(f"📎 [{message.author.display_name}] Converting image {idx+1}/{len(generated_images)} to Discord file...")
+                            img_bytes = BytesIO()
+                            img.save(img_bytes, format='PNG')
+                            img_bytes.seek(0)
+                            file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
+                            files_to_attach.append(file)
+                            print(f"📎 [{message.author.display_name}] ✅ Image {idx+1} added to files_to_attach")
+                        except Exception as img_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to convert image {idx+1}: {img_error}")
+                else:
+                    print(f"📎 [{message.author.display_name}] ⚠️  No generated_images to attach (value: {generated_images})")
                 
                 # Send text response with all images attached (if any)
                 if response:
