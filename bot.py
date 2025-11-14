@@ -612,6 +612,61 @@ def is_small_talk_message(content: str, has_question: bool, wants_image: bool, w
     
     return False
 
+def ai_decide_reply_style(message: discord.Message, wants_image: bool, wants_image_edit: bool, has_attachments: bool) -> str:
+    """Use AI to choose reply style (SMALL_TALK, NORMAL, DETAILED)."""
+    message_text = (message.content or "").strip()
+    has_question_mark = '?' in message_text
+    heuristics_guess = 'NORMAL'
+    if is_small_talk_message(message_text, has_question_mark, wants_image, wants_image_edit, has_attachments):
+        heuristics_guess = 'SMALL_TALK'
+    elif len(message_text) > 220 or has_question_mark or wants_image or wants_image_edit:
+        heuristics_guess = 'DETAILED'
+    
+    try:
+        decision_model = get_fast_model()
+        guidance = {
+            "message": message_text,
+            "attachments_count": len(message.attachments),
+            "is_reply": bool(message.reference),
+            "mentions_bot": bot.user.mentioned_in(message),
+            "wants_image": wants_image,
+            "wants_image_edit": wants_image_edit,
+            "has_question_mark": has_question_mark,
+            "author_display_name": message.author.display_name,
+        }
+        decision_prompt = f"""You are choosing the ideal reply style for a helpful Discord assistant.
+
+Possible styles:
+- SMALL_TALK: quick acknowledgements, casual praise, greetings, brief chit-chat. One or two short sentences.
+- NORMAL: typical questions or comments that deserve a helpful but moderately sized reply.
+- DETAILED: complex questions, troubleshooting, planning, or anything that benefits from step-by-step guidance or deep analysis.
+
+Consider the message and metadata (JSON below) and respond with a single JSON object like:
+{{"style": "NORMAL"}}
+Allowed values for "style": SMALL_TALK, NORMAL, DETAILED.
+
+If the user only says thanks, praise, or a simple greeting, choose SMALL_TALK.
+If they ask for significant help, instructions, or problem-solving, choose DETAILED.
+Otherwise choose NORMAL.
+
+Message and metadata:
+{json.dumps(guidance, ensure_ascii=False, indent=2)}
+
+Return ONLY the JSON object."""
+
+        decision_response = decision_model.generate_content(decision_prompt)
+        raw_text = (decision_response.text or "").strip()
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            data = json.loads(match.group(0))
+            style = str(data.get('style', '')).upper()
+            if style in {'SMALL_TALK', 'NORMAL', 'DETAILED'}:
+                return style
+    except Exception as e:
+        print(f"Reply style decision error: {e}")
+    
+    return heuristics_guess
+
 def _mime_type_to_extension(mime_type: str) -> str:
     mime_type = (mime_type or '').lower()
     mapping = {
@@ -1032,8 +1087,10 @@ If you need to search the internet for current information, mention it.{thinking
         
         if small_talk:
             response_prompt += "\n\nThe user is engaging in light conversation or giving quick feedback. Reply warmly and concisely (no more than two short sentences) while keeping the door open for further help."
+        elif detailed_reply:
+            response_prompt += "\n\nThe user needs an in-depth, step-by-step answer. Give a thorough explanation with reasoning, examples, and clear next steps."
         else:
-            response_prompt += "\n\nIf the user is asking for help or information, feel free to provide as much detail as necessary to be genuinely helpful."
+            response_prompt += "\n\nOffer a helpful response with the amount of detail that feels appropriate—enough to be useful without overwhelming them."
         
         # Add images to prompt if present
         if image_parts:
@@ -1158,17 +1215,15 @@ Now decide: "{message.content}" -> """
             any(['edit' in message_lower, 'change' in message_lower, 'modify' in message_lower, 'transform' in message_lower])
         )
         
-        question_words = ['how', 'what', 'why', 'when', 'where', 'can ', 'can you', 'could', 'would', 'should', 'help', 'explain', 'fix', 'solve', 'build', 'generate', 'make', 'guide']
-        message_contains_question = ('?' in message.content) or any(word in message_lower for word in question_words)
-        small_talk = is_small_talk_message(
-            message.content,
-            has_question=message_contains_question,
+        reply_style = ai_decide_reply_style(
+            message,
             wants_image=wants_image,
             wants_image_edit=wants_image_edit,
             has_attachments=bool(image_parts)
         )
-        if small_talk:
-            print(f"💬 [{username}] Small talk detected - keeping response concise")
+        small_talk = reply_style == 'SMALL_TALK'
+        detailed_reply = reply_style == 'DETAILED'
+        print(f"💬 [{username}] Reply style selected: {reply_style}")
         
         if wants_image_edit:
             # Edit the user's image
