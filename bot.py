@@ -150,7 +150,7 @@ def _env_int(name: str, default: int) -> int:
 
 ENABLE_GEMINI_FILE_UPLOADS = _env_flag('ENABLE_GEMINI_FILE_UPLOADS', False)
 GEMINI_INLINE_IMAGE_LIMIT = _env_int('GEMINI_INLINE_IMAGE_LIMIT', 3 * 1024 * 1024)
-MAX_GENERATED_IMAGES = _env_int('MAX_GENERATED_IMAGES', 4)
+MAX_GENERATED_IMAGES = _env_int('MAX_GENERATED_IMAGES', 3)
 
 SUPPORTED_DOCUMENT_EXTENSIONS = {
     '.pdf': 'application/pdf',
@@ -2018,7 +2018,7 @@ Now decide: "{message.content}" -> """
                 f"{idx+1}. {img['title']} - {img['url']}"
                 for idx, img in enumerate(image_search_results)
             ])
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images. \n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them.\n\nIf you don't want to include any images, simply don't mention any image numbers."
+            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS (you can choose which images to include in your response):\n{image_list_text}\n\nIMPORTANT: If you want to include images in your response, you MUST specify which image numbers (1-{len(image_search_results)}) you want to attach. The images will be automatically attached to your message. You can choose 1-4 images (maximum 4 images). \n\nTo include images, add this at the END of your response: [IMAGE_NUMBERS: 1,3,5] (replace with the actual numbers you want, maximum 4 numbers).\n\nAlternatively, you can mention the image numbers naturally in your text like 'I'll show you images 1, 2, and 4' or 'Here are images 2 and 3'. The system will automatically detect and attach them (remember: maximum 4 images total).\n\nIf you don't want to include any images, simply don't mention any image numbers."
         
         # Decide which model to use (thread-safe)
         def decide_model():
@@ -2115,6 +2115,10 @@ If you need to search the internet for current information, mention it.{thinking
             response_prompt += "\n\nThe user needs an in-depth, step-by-step answer. Give a thorough explanation with reasoning, examples, and clear next steps."
         else:
             response_prompt += "\n\nOffer a helpful response with the amount of detail that feels appropriate—enough to be useful without overwhelming them."
+        
+        if wants_image and not image_search_results:
+            # Add instructions for image generation
+            response_prompt += f"\n\nIMAGE GENERATION REQUEST:\n- The user wants you to generate images (up to {MAX_GENERATED_IMAGES} images maximum).\n- DO NOT ask clarification questions. Generate the images directly based on your best interpretation of their request.\n- If details are missing, use your creativity to fill in reasonable details (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed.\n- Keep your response brief and confirm what you're generating, then the images will be automatically created and attached."
         
         if document_request:
             doc_instruction_lines = ["\n\nDOCUMENT WORKFLOW:"]
@@ -2394,13 +2398,8 @@ Now decide: "{message.content}" -> """
                 if len(image_prompt) > 10:  # Make sure there's an actual prompt
                     requested_count = ai_decide_image_count(message)
                     generated_images = await generate_image(image_prompt, num_images=requested_count)
-                    if generated_images:
-                        if len(generated_images) > 1:
-                            ai_response += f"\n\n*Generated {len(generated_images)} images based on your request*"
-                        else:
-                            ai_response += "\n\n*Generated image based on your request*"
-                    else:
-                        ai_response += "\n\n(Tried to generate an image but something went wrong)"
+                    # Don't add "Generated image" text - images will be attached to the message automatically
+                    # User can see the images directly, no need for extra text
             except Exception as e:
                 print(f"Image generation error: {e}")
                 ai_response += "\n\n(Image generation failed)"
@@ -2527,7 +2526,7 @@ async def on_message(message: discord.Message):
                     generated_documents = None
                     searched_images = []
                 
-                # Prepare files to attach (searched images from Google - these go with the text response)
+                # Prepare files to attach (searched images + generated images - these go with the text response)
                 files_to_attach = []
                 if searched_images:
                     for idx, img in enumerate(searched_images):
@@ -2537,7 +2536,17 @@ async def on_message(message: discord.Message):
                         file = discord.File(fp=img_bytes, filename=f'search_{idx+1}.png')
                         files_to_attach.append(file)
                 
-                # Send text response with searched images attached (if any)
+                # Add generated images to files_to_attach (attach to same message)
+                if generated_images:
+                    for idx, img in enumerate(generated_images):
+                        # Convert PIL Image to bytes
+                        img_bytes = BytesIO()
+                        img.save(img_bytes, format='PNG')
+                        img_bytes.seek(0)
+                        file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
+                        files_to_attach.append(file)
+                
+                # Send text response with all images attached (if any)
                 if response:
                     # Split long responses
                     if len(response) > 2000:
@@ -2550,17 +2559,6 @@ async def on_message(message: discord.Message):
                                 await message.channel.send(chunk, reference=message)
                     else:
                         await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
-                
-                # Send generated images if any (these are separate, from Imagen)
-                if generated_images:
-                    for idx, img in enumerate(generated_images):
-                        # Convert PIL Image to bytes
-                        img_bytes = BytesIO()
-                        img.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        
-                        file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
-                        await message.channel.send(file=file, reference=message)
                 
                 if generated_documents:
                     for doc in generated_documents:
