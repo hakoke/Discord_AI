@@ -966,6 +966,8 @@ Respond with ONLY 'YES' or 'NO'."""
         response_prompt = f"""{consciousness_prompt}
 
 Respond with empathy, clarity, and practical help. Focus on solving the user's request, celebrate their wins, and stay respectful even under pressure.
+Do not repeat or quote the user's words unless it helps clarify your answer.
+Keep responses purposeful and avoid mentioning internal system status.
 If you need to search the internet for current information, mention it.{thinking_note}"""
         
         # Add images to prompt if present
