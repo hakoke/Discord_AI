@@ -1343,6 +1343,75 @@ def _collect_document_entries(payload: Any) -> List[Dict[str, Any]]:
             entries.extend(document_outputs)
     return entries
 
+def _extract_descriptor_objects(raw_json: str) -> List[Dict[str, Any]]:
+    """
+    Fallback extractor that scans the payload for standalone descriptor objects
+    such as {"filename": "...", ...} and parses them individually.
+    """
+    sanitized = _sanitize_json_control_chars(raw_json)
+    descriptors: List[Dict[str, Any]] = []
+    seen_serialized: set[str] = set()
+
+    search_index = 0
+    while True:
+        start_index = sanitized.find('{"filename"', search_index)
+        if start_index == -1:
+            break
+
+        depth = 0
+        in_string = False
+        escape = False
+        end_index: Optional[int] = None
+
+        for idx in range(start_index, len(sanitized)):
+            ch = sanitized[idx]
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end_index = idx
+                    break
+
+        if end_index is None:
+            # Unbalanced braces; stop searching to avoid infinite loop
+            break
+
+        candidate_obj = sanitized[start_index:end_index + 1]
+        search_index = end_index + 1
+
+        try:
+            parsed = json.loads(candidate_obj)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(parsed, dict):
+            continue
+
+        # Basic sanity check to avoid capturing nested objects
+        if "sections" not in parsed and "body" not in parsed and "document_outputs" not in parsed:
+            continue
+
+        serialized = json.dumps(parsed, sort_keys=True)
+        if serialized in seen_serialized:
+            continue
+        seen_serialized.add(serialized)
+        descriptors.append(parsed)
+
+    return descriptors
+
 def _parse_document_descriptors(raw_json: str) -> List[Dict[str, Any]]:
     """
     Try to extract document descriptors from a JSON string, attempting to repair
@@ -1394,6 +1463,12 @@ def _parse_document_descriptors(raw_json: str) -> List[Dict[str, Any]]:
               f"Last error: {last_error}. Preview: {preview}...")
     else:
         print(f"⚠️  [DOCUMENT OUTPUT] No document entries found in payload ({len(trimmed)} chars).")
+
+    # Fallback: attempt to parse individual descriptor objects
+    fallback_descriptors = _extract_descriptor_objects(trimmed)
+    if fallback_descriptors:
+        print(f"ℹ️  [DOCUMENT OUTPUT] Parsed {len(fallback_descriptors)} descriptor(s) via fallback extraction.")
+        return fallback_descriptors
 
     return []
 
