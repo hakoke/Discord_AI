@@ -1595,6 +1595,12 @@ async def fetch_webpage_content(url: str) -> str:
     if not BEAUTIFULSOUP_AVAILABLE:
         return None
     
+    # Clean URL before using it (remove trailing parentheses, brackets, etc.)
+    url = clean_url(url)
+    if not url:
+        print(f"❌ [WEB] Invalid URL after cleaning")
+        return None
+    
     try:
         print(f"🌐 [WEB] Fetching webpage: {url[:100]}...")
         
@@ -1696,8 +1702,8 @@ def extract_urls(text: str) -> List[str]:
         # Must have at least one dot (domain.com)
         if '.' not in domain:
             continue
-        # Remove trailing punctuation
-        while domain and domain[-1] in '.,;!?':
+        # Remove trailing punctuation (including parentheses and brackets)
+        while domain and domain[-1] in '.,;!?()[]':
             domain = domain[:-1]
         # Skip if domain itself is too short after cleaning
         if len(domain) < 4:
@@ -1710,16 +1716,55 @@ def extract_urls(text: str) -> List[str]:
             urls.append(domain)
             print(f"🔗 [URL EXTRACTION] Found domain without protocol: {domain}")
     
-    # Remove trailing punctuation from all URLs
+    # Remove trailing punctuation from all URLs (including parentheses and brackets)
     cleaned_urls = []
     for url in urls:
-        # Remove common trailing punctuation
-        while url and url[-1] in '.,;!?':
+        # Remove common trailing punctuation, parentheses, and brackets
+        # Also remove opening parentheses/brackets that might have been incorrectly included
+        while url and url[-1] in '.,;!?()[]':
             url = url[:-1]
+        # Remove opening parentheses/brackets from the start (if URL was inside parentheses)
+        while url and url[0] in '([':
+            url = url[1:]
         if url:
             cleaned_urls.append(url)
     
     return cleaned_urls
+
+def clean_url(url: str) -> str:
+    """Clean and validate a URL by removing invalid trailing characters.
+    
+    NOTE: This is a BACKUP safety measure. The AI is instructed to produce clean URLs
+    without trailing punctuation, but this function ensures URLs are properly formatted
+    before being used in browser navigation, even if the AI makes a mistake.
+    
+    This function removes trailing punctuation, parentheses, brackets, and other invalid characters.
+    It should not add latency as it's a simple string operation.
+    
+    Args:
+        url: URL string to clean
+        
+    Returns:
+        Cleaned URL string
+    """
+    if not url:
+        return url
+    
+    # Remove trailing invalid characters
+    invalid_trailing = '.,;!?()[]{}"\''
+    while url and url[-1] in invalid_trailing:
+        url = url[:-1]
+    
+    # Remove leading invalid characters (if URL was inside parentheses/quotes)
+    invalid_leading = '([{"\''
+    while url and url[0] in invalid_leading:
+        url = url[1:]
+    
+    # Ensure URL is not empty after cleaning
+    if not url or len(url) < 4:
+        return url
+    
+    return url.strip()
 
 # ============================================================================
 # Browser Automation and Screenshot Capability
@@ -1854,6 +1899,12 @@ async def take_multiple_screenshots(url: str, count: int = 3, wait_time: int = 2
         List of BytesIO containing PNG images
     """
     if not PLAYWRIGHT_AVAILABLE:
+        return []
+    
+    # Clean URL before using it (remove trailing parentheses, brackets, etc.)
+    url = clean_url(url)
+    if not url:
+        print(f"❌ [SCREENSHOT] Invalid URL after cleaning")
         return []
     
     count = max(1, min(10, count))  # Clamp between 1 and 10
@@ -2056,6 +2107,12 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
         List of BytesIO containing PNG images
     """
     if not PLAYWRIGHT_AVAILABLE:
+        return []
+    
+    # Clean URL before using it (remove trailing parentheses, brackets, etc.)
+    url = clean_url(url)
+    if not url:
+        print(f"❌ [NAVIGATE] Invalid URL after cleaning")
         return []
     
     browser = await get_browser()
@@ -3962,10 +4019,13 @@ Decision: """
                                     # TIER 1: Fast path - convert known site directly
                                     convert_prompt = f"""Convert the website name "{website_name}" to its full URL.
 
-Rules:
+CRITICAL URL FORMATTING RULES:
 - Use the correct domain (e.g., "x.com" not "twitter.com", "youtube.com" not "yt.com")
 - Format: https://www.[website-name].com (or appropriate TLD)
 - For well-known sites, use the official domain
+- Return ONLY the clean URL with NO trailing punctuation, parentheses, brackets, quotes, or any other characters
+- The URL must end with a valid character (letter, number, or forward slash) - NEVER with punctuation
+- Do NOT include any parentheses, brackets, quotes, periods, commas, or other punctuation after the URL
 
 Examples:
 "reddit" -> https://www.reddit.com
@@ -3975,12 +4035,20 @@ Examples:
 "x" -> https://www.x.com
 "github" -> https://www.github.com
 
-Respond with ONLY the URL, nothing else.
+WRONG (DO NOT DO THIS):
+"amazon" -> https://www.amazon.com)  ❌ NO trailing parenthesis
+"reddit" -> https://www.reddit.com.  ❌ NO trailing period
+"spotify" -> (https://www.spotify.com)  ❌ NO surrounding parentheses
+
+Respond with ONLY the clean URL, nothing else.
 
 URL: """
                                     
                                     convert_response = await queued_generate_content(decision_model, convert_prompt)
                                     extracted_url = convert_response.text.strip().strip('"\'').strip()
+                                    
+                                    # Clean URL as backup (AI should produce clean URLs, but this ensures safety)
+                                    extracted_url = clean_url(extracted_url)
                                     
                                     # Validate and format URL
                                     if extracted_url and extracted_url.upper() != "NONE":
@@ -4008,7 +4076,9 @@ URL: """
                                     if url_matches:
                                         # Get the first URL that looks like the main website (not subpages)
                                         for url_match in url_matches:
-                                            url = url_match.strip()
+                                            url = clean_url(url_match.strip())  # Clean URL from search results
+                                            if not url:
+                                                continue
                                             # Prefer URLs that match the website name in domain
                                             domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
                                             if domain_match:
@@ -4018,20 +4088,36 @@ URL: """
                                                     print(f"🔗 [{username}] Found URL via search: {url[:80]}...")
                                                     return url
                                         
-                                        # If no perfect match, use first result
-                                        found_url = url_matches[0].strip()
-                                        print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
-                                        return found_url
+                                        # If no perfect match, use first result (cleaned)
+                                        found_url = clean_url(url_matches[0].strip())
+                                        if found_url:
+                                            print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
+                                            return found_url
                                 
                                 # If search didn't find URL, try AI conversion as fallback
                                 print(f"⚠️  [{username}] Search didn't find URL, trying AI conversion as fallback...")
                                 fallback_prompt = f"""Convert "{website_name}" to a website URL. Make your best guess.
 
-Format: https://www.[website-name].com
+CRITICAL URL FORMATTING RULES:
+- Format: https://www.[website-name].com (or appropriate TLD)
+- Return ONLY the clean URL with NO trailing punctuation, parentheses, brackets, quotes, or any other characters
+- The URL must end with a valid character (letter, number, or forward slash) - NEVER with punctuation
+- Do NOT include any parentheses, brackets, quotes, periods, commas, or other punctuation after the URL
+
+Examples:
+"example" -> https://www.example.com
+"test" -> https://www.test.com
+
+WRONG (DO NOT DO THIS):
+"example" -> https://www.example.com)  ❌ NO trailing parenthesis
+"test" -> https://www.test.com.  ❌ NO trailing period
 
 URL: """
                                 fallback_response = await queued_generate_content(decision_model, fallback_prompt)
                                 fallback_url = fallback_response.text.strip().strip('"\'').strip()
+                                
+                                # Clean URL as backup (AI should produce clean URLs, but this ensures safety)
+                                fallback_url = clean_url(fallback_url)
                                 
                                 if fallback_url and fallback_url.upper() != "NONE":
                                     if not fallback_url.startswith(('http://', 'https://')):
@@ -4178,8 +4264,12 @@ Decision: """
                 screenshot_attachments = []
                 if screenshot_needed and PLAYWRIGHT_AVAILABLE:
                     # Take screenshots of first URL (limit to 1 URL for screenshots to avoid overload)
-                    screenshot_url = urls[0]
-                    print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
+                    screenshot_url = clean_url(urls[0])  # Clean URL to remove any trailing invalid characters
+                    if not screenshot_url:
+                        print(f"❌ [{username}] Invalid URL after cleaning, skipping screenshot")
+                        screenshot_needed = False
+                    else:
+                        print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
                     
                     try:
                         # AI decides: how many screenshots and what browser actions
