@@ -3792,6 +3792,16 @@ Query: """
             if not SERPER_API_KEY:
                 return False
             
+            # Skip search if we already took screenshots and it's a simple screenshot request
+            if screenshot_attachments and len(screenshot_attachments) > 0:
+                content_lower = (message.content or "").lower()
+                # Only skip if it's clearly just a screenshot request (not asking for additional info)
+                simple_screenshot_keywords = ['screenshot', 'show me', 'what does', 'how does', 'look like']
+                if any(keyword in content_lower for keyword in simple_screenshot_keywords) and \
+                   not any(word in content_lower for word in ['search', 'find', 'what is', 'tell me about', 'explain']):
+                    print(f"⏭️  [{username}] Skipping internet search - simple screenshot request, user has visual")
+                    return False
+            
             # Skip search for image editing requests - user already provided the image
             if wants_image_edit:
                 print(f"⏭️  [{username}] Skipping internet search - image edit request detected")
@@ -3869,6 +3879,11 @@ Now decide: "{message.content}" -> """
         async def decide_if_image_search_needed():
             """AI decides if this question needs Google image search"""
             if not SERPER_API_KEY:
+                return False
+            
+            # Skip image search if we already took screenshots - user has the visual they need
+            if screenshot_attachments and len(screenshot_attachments) > 0:
+                print(f"⏭️  [{username}] Skipping image search - screenshot already taken")
                 return False
             
             # Skip image search for image editing requests - user already provided the image
@@ -4100,9 +4115,23 @@ Now decide: "{message.content}" -> """
         if wants_summary:
             needs_smart_model = False
             decision_time = 0  # Skip decision for summaries
+        # For simple screenshot requests (just taking screenshots, not asking complex questions), use fast model
+        elif screenshot_attachments and len(screenshot_attachments) > 0:
+            content_lower = (message.content or "").lower()
+            # Check if it's a simple screenshot request (not asking for analysis or additional info)
+            simple_screenshot_keywords = ['screenshot', 'show me', 'what does', 'how does', 'look like']
+            complex_keywords = ['analyze', 'explain', 'tell me about', 'what is', 'describe in detail', 'research']
+            if any(keyword in content_lower for keyword in simple_screenshot_keywords) and \
+               not any(word in content_lower for word in complex_keywords):
+                needs_smart_model = False
+                decision_time = 0  # Skip decision for simple screenshots
+                print(f"⚡ [{username}] Simple screenshot request - using fast model")
+            else:
+                needs_smart_model = await decide_model()
+                decision_time = time.time() - decision_start
         else:
             needs_smart_model = await decide_model()
-        decision_time = time.time() - decision_start
+            decision_time = time.time() - decision_start
         
         # Choose model based on AI decision (create fresh instance for thread safety)
         active_model = get_smart_model() if needs_smart_model else get_fast_model()
@@ -4639,47 +4668,42 @@ async def on_ready():
     # Initialize Playwright if available
     if PLAYWRIGHT_AVAILABLE:
         print('🌐 Browser automation ready (Playwright)')
-        # Try to install browsers and deps in background (for Railway/deployment)
+        # Try to install browsers in background if missing (for local development)
+        # Note: On Railway, browsers and deps are installed during build via nixpacks.toml
         async def install_playwright_browsers():
-            """Install Playwright browsers and system dependencies in background"""
+            """Install Playwright browsers in background if missing (browsers are pre-installed on Railway)"""
             try:
                 import subprocess
                 import sys
                 
-                # First install system dependencies
-                print('📦 Installing Playwright system dependencies (this may take a minute)...')
-                deps_result = subprocess.run(
-                    [sys.executable, '-m', 'playwright', 'install-deps'],
+                # Check if Chromium is already installed (it should be on Railway)
+                check_result = subprocess.run(
+                    [sys.executable, '-m', 'playwright', 'install', '--dry-run', 'chromium'],
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5 minute timeout
+                    timeout=30
                 )
-                if deps_result.returncode == 0:
-                    print('✅ Playwright system dependencies installed successfully')
-                else:
-                    print(f'⚠️  Playwright deps installation returned code {deps_result.returncode}')
-                    if deps_result.stderr:
-                        print(f'   Error: {deps_result.stderr[:200]}')
                 
-                # Then install browsers
-                print('📦 Installing Playwright browsers...')
-                browser_result = subprocess.run(
-                    [sys.executable, '-m', 'playwright', 'install', 'chromium'],
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minute timeout
-                )
-                if browser_result.returncode == 0:
-                    print('✅ Playwright browsers installed successfully')
+                # Only install if browsers are missing (for local dev)
+                if 'chromium' in check_result.stdout.lower() and 'installing' in check_result.stdout.lower():
+                    print('📦 Installing Playwright browsers (this may take a minute)...')
+                    browser_result = subprocess.run(
+                        [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+                    if browser_result.returncode == 0:
+                        print('✅ Playwright browsers installed successfully')
+                    else:
+                        print(f'⚠️  Playwright browser installation returned code {browser_result.returncode}')
                 else:
-                    print(f'⚠️  Playwright browser installation returned code {browser_result.returncode}')
-                    if browser_result.stderr:
-                        print(f'   Error: {browser_result.stderr[:200]}')
+                    print('✅ Playwright browsers already installed (skipping)')
             except Exception as e:
-                print(f'⚠️  Could not auto-install Playwright: {e}')
-                print('   Note: For Railway, system deps should be installed during build via nixpacks.toml')
+                # Silently fail - browsers should be pre-installed on Railway
+                pass
         
-        # Run browser installation in background (non-blocking)
+        # Run browser installation check in background (non-blocking, only installs if needed)
         asyncio.create_task(install_playwright_browsers())
     else:
         print('⚠️  Browser automation unavailable (Playwright not installed)')
