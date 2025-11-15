@@ -13,6 +13,7 @@ import re
 import io
 import json
 import unicodedata
+import random
 from PIL import Image
 from io import BytesIO
 from functools import lru_cache
@@ -3274,62 +3275,52 @@ async def get_conversation_context(message: discord.Message, limit: int = 10, in
     return list(reversed(context_messages))
 
 async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyncio.Event):
-    """Manage typing indicator with continuous refresh to avoid rate limits
+    """Manage typing indicator while respecting Discord typing rate limits.
     
     Args:
-        channel: The Discord channel to show typing in
-        stop_event: Event to signal when to stop typing
+        channel: The Discord channel to show typing in.
+        stop_event: Event to signal when to stop typing.
     """
-    refresh_interval = 8.0  # Refresh every 8 seconds (before 10s expiration)
+    base_interval = 8.0  # Seconds before the typing indicator naturally expires.
+    jitter = 2.0         # Spread requests to avoid synchronized bursts.
+    min_interval = 5.0   # Discord typing indicator lasts 10s; stay well within limit.
+    max_failures = 5
     consecutive_failures = 0
-    max_failures = 3  # Stop trying after 3 consecutive failures
     
-    # Keep typing indicator continuously active
     while not stop_event.is_set():
+        wait_time = base_interval + random.uniform(0, jitter)
         try:
-            # Start typing indicator - keep it active continuously
-            async with channel.typing():
-                # Wait for refresh interval or until stop event is set
-                # Check stop event frequently to respond quickly
-                check_interval = 0.5  # Check stop event every 0.5 seconds
-                elapsed = 0.0
-                while elapsed < refresh_interval and not stop_event.is_set():
-                    sleep_time = min(check_interval, refresh_interval - elapsed)
-                    await asyncio.sleep(sleep_time)
-                    elapsed += sleep_time
-                
-                # If stop event was set, break immediately
-                if stop_event.is_set():
-                    break
-                
-                # Immediately start next typing context (no gap)
-                # The context manager will exit and we'll loop back to start a new one
-            consecutive_failures = 0  # Reset on success
-            # No delay - immediately start next typing context for continuous visibility
-                
+            await channel.trigger_typing()
+            consecutive_failures = 0
         except discord.errors.HTTPException as e:
-            status = getattr(e, 'status', getattr(e, 'code', None))
-            if status == 429:  # Rate limited
-                consecutive_failures += 1
-                if consecutive_failures >= max_failures:
-                    print(f"⚠️  Typing indicator rate limited {consecutive_failures} times, stopping...")
-                    break
-                # Wait longer before retry when rate limited
-                await asyncio.sleep(5)
-            else:
-                consecutive_failures += 1
-                if consecutive_failures >= max_failures:
-                    print(f"⚠️  Typing indicator failed {consecutive_failures} times, stopping...")
-                    break
-                # Brief delay before retry
-                await asyncio.sleep(1)
-        except Exception as e:
-            # Other errors - log but continue
+            status = getattr(e, "status", getattr(e, "code", None))
+            retry_after = getattr(e, "retry_after", None)
             consecutive_failures += 1
+            
+            if status == 429:
+                # Respect retry-after header when available.
+                wait_time = max(retry_after if retry_after is not None else base_interval * 1.5, min_interval)
+            else:
+                wait_time = max(min_interval, retry_after if retry_after else min_interval)
+            
             if consecutive_failures >= max_failures:
-                print(f"⚠️  Typing indicator error: {e}, stopping...")
+                print(f"⚠️  Typing indicator HTTP error {status}: stopping after {consecutive_failures} failures.")
                 break
-            await asyncio.sleep(1)
+        except Exception as e:
+            consecutive_failures += 1
+            wait_time = min_interval
+            if consecutive_failures >= max_failures:
+                print(f"⚠️  Typing indicator error: {e}, stopping after {consecutive_failures} failures.")
+                break
+        else:
+            wait_time = max(min_interval, wait_time)
+        
+        # Exit promptly if the stop event fires while waiting.
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_time)
+            break
+        except asyncio.TimeoutError:
+            continue
 
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
