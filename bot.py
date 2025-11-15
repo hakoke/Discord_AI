@@ -36,6 +36,13 @@ try:
 except ImportError:
     FPDF = None
 
+try:
+    from bs4 import BeautifulSoup
+    BEAUTIFULSOUP_AVAILABLE = True
+except ImportError:
+    BEAUTIFULSOUP_AVAILABLE = False
+    print("⚠️  BeautifulSoup not available - HTML parsing disabled. Install with: pip install beautifulsoup4")
+
 from database import Database
 from memory import MemorySystem
 
@@ -677,14 +684,50 @@ if ENABLE_CACHE:
 else:
     cached_generate = None
 
-async def search_internet(query: str) -> str:
-    """Search the internet using Serper API"""
+async def search_internet(query: str, platform: str = None) -> str:
+    """Search the internet using Serper API
+    
+    Args:
+        query: The search query
+        platform: Optional platform to search (reddit, instagram, twitter, x, youtube, etc.)
+    """
     if not SERPER_API_KEY:
         print("⚠️  [SEARCH] SERPER_API_KEY not configured")
         return "Internet search is not configured."
     
+    # Platform mapping for site: operator
+    platform_map = {
+        'reddit': 'reddit.com',
+        'instagram': 'instagram.com',
+        'twitter': 'twitter.com',
+        'x': 'x.com',  # X (formerly Twitter)
+        'youtube': 'youtube.com',
+        'tiktok': 'tiktok.com',
+        'pinterest': 'pinterest.com',
+        'linkedin': 'linkedin.com',
+        'facebook': 'facebook.com',
+        'github': 'github.com',
+        'stackoverflow': 'stackoverflow.com',
+        'quora': 'quora.com',
+        'medium': 'medium.com',
+        'wikipedia': 'wikipedia.org',
+    }
+    
+    # Modify query if platform specified
+    search_query = query
+    if platform:
+        platform_lower = platform.lower().strip()
+        if platform_lower in platform_map:
+            site_domain = platform_map[platform_lower]
+            search_query = f"site:{site_domain} {query}"
+            print(f"🔍 [SEARCH] Platform-specific search on {site_domain}")
+        else:
+            # If platform not in map, try using it as-is (might be a custom domain)
+            search_query = f"site:{platform_lower} {query}"
+            print(f"🔍 [SEARCH] Custom platform search: {platform_lower}")
+    
     try:
-        print(f"🔍 [SEARCH] Searching for: {query[:100]}...")
+        print(f"🔍 [SEARCH] Searching for: {search_query[:100]}...")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 'https://google.serper.dev/search',
@@ -692,7 +735,7 @@ async def search_internet(query: str) -> str:
                     'X-API-KEY': SERPER_API_KEY,
                     'Content-Type': 'application/json'
                 },
-                json={'q': query, 'num': 5}
+                json={'q': search_query, 'num': 5}
             ) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -1534,6 +1577,100 @@ async def download_bytes(url: str, max_retries: int = 2) -> bytes:
 async def download_image(url: str) -> bytes:
     """Download image from URL"""
     return await download_bytes(url)
+
+async def fetch_webpage_content(url: str) -> str:
+    """Fetch and parse webpage content from a URL, extracting readable text"""
+    if not BEAUTIFULSOUP_AVAILABLE:
+        return None
+    
+    try:
+        print(f"🌐 [WEB] Fetching webpage: {url[:100]}...")
+        
+        # Set headers to mimic a browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+        
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    print(f"⚠️  [WEB] Failed to fetch {url}: HTTP {response.status}")
+                    return None
+                
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'text/html' not in content_type and 'application/xhtml' not in content_type:
+                    print(f"⚠️  [WEB] Not HTML content: {content_type}")
+                    return None
+                
+                html_content = await response.text()
+                print(f"✅ [WEB] Fetched {len(html_content)} bytes of HTML")
+                
+                # Parse HTML with BeautifulSoup
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Remove script and style elements
+                for script in soup(["script", "style", "meta", "link", "noscript"]):
+                    script.decompose()
+                
+                # Extract text
+                text = soup.get_text(separator='\n', strip=True)
+                
+                # Clean up text (remove excessive whitespace)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                cleaned_text = '\n'.join(lines)
+                
+                # Limit content size (first 8000 chars to avoid token limits)
+                if len(cleaned_text) > 8000:
+                    cleaned_text = cleaned_text[:8000] + "\n\n[... Content truncated due to length ...]"
+                
+                # Extract title if available
+                title = soup.find('title')
+                title_text = title.get_text().strip() if title else None
+                
+                # Extract meta description if available
+                meta_desc = soup.find('meta', attrs={'name': 'description'}) or soup.find('meta', attrs={'property': 'og:description'})
+                description = meta_desc.get('content', '').strip() if meta_desc else None
+                
+                # Build result
+                result = f"URL: {url}\n"
+                if title_text:
+                    result += f"Title: {title_text}\n"
+                if description:
+                    result += f"Description: {description}\n"
+                result += f"\nContent:\n{cleaned_text}"
+                
+                print(f"✅ [WEB] Extracted {len(cleaned_text)} characters of text from {url}")
+                return result
+                
+    except asyncio.TimeoutError:
+        print(f"⏱️  [WEB] Timeout fetching {url}")
+        return None
+    except Exception as e:
+        print(f"❌ [WEB] Error fetching {url}: {e}")
+        import traceback
+        print(f"❌ [WEB] Traceback: {traceback.format_exc()}")
+        return None
+
+def extract_urls(text: str) -> List[str]:
+    """Extract URLs from text"""
+    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    urls = re.findall(url_pattern, text)
+    # Remove trailing punctuation from URLs
+    cleaned_urls = []
+    for url in urls:
+        # Remove common trailing punctuation
+        while url and url[-1] in '.,;!?':
+            url = url[:-1]
+        if url:
+            cleaned_urls.append(url)
+    return cleaned_urls
 
 def _clean_document_text(text: str) -> str:
     if not text:
@@ -2498,6 +2635,8 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **GENERATE IMAGES** using Imagen 4 (with automatic fallback to Imagen 3 when needed)
 - ✅ Edit images with text prompts
 - ✅ Search the internet for current information
+- ✅ **Platform-Specific Search**: Search specific platforms like Reddit, Instagram, Twitter/X, YouTube, TikTok, Pinterest, LinkedIn, GitHub, StackOverflow, Quora, Medium, Wikipedia, etc. when users ask (e.g., "search reddit for...", "what's on instagram about...", "search twitter for...")
+- ✅ **Read Web Links**: Open and read content from ANY website/URL when users share links (Instagram reels/posts, YouTube videos, Reddit posts, articles, Google links, ANY website). The system automatically fetches and parses webpage content so you can see and answer questions about it.
 - ✅ Remember everything about everyone (stored in PostgreSQL)
 - ✅ See full conversation context and history
 - ✅ Use different AI models (fast for chat, smart for complex reasoning)
@@ -2657,6 +2796,86 @@ CURRENT CONVERSATION CONTEXT:
         
         print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
         
+        # Extract URLs from message and fetch content if relevant
+        webpage_contents = []
+        if message.content:
+            urls = extract_urls(message.content)
+            if urls:
+                print(f"🔗 [{username}] Found {len(urls)} URL(s) in message")
+                
+                # Let AI decide if URLs are relevant/useful
+                async def decide_if_urls_relevant():
+                    """AI decides if URLs in the message are relevant/useful"""
+                    if not urls:
+                        return False
+                    
+                    if not BEAUTIFULSOUP_AVAILABLE:
+                        print(f"⚠️  [{username}] BeautifulSoup not available - skipping URL fetching")
+                        return False
+                    
+                    # Check if user explicitly references the links
+                    content_lower = message.content.lower()
+                    url_keywords = ['link', 'reel', 'video', 'post', 'article', 'website', 'page', 'check this', 'look at this', 'here\'s a', 'heres a']
+                    has_url_reference = any(keyword in content_lower for keyword in url_keywords)
+                    
+                    # Check if links are mentioned in context
+                    link_mentions = ['instagram.com', 'youtube.com', 'youtu.be', 'reddit.com', 'twitter.com', 'x.com', 'tiktok.com']
+                    has_social_media_link = any(domain in ' '.join(urls).lower() for domain in link_mentions)
+                    
+                    decision_prompt = f"""User message: "{message.content}"
+
+URLs found in message: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}
+
+Does the user want you to OPEN/VIEW/READ these URLs?
+- If user says "here's a link", "check this reel", "watch this video", "read this article", etc. -> YES
+- If user asks questions about content in a link ("what's in this reel?", "summarize this video") -> YES
+- If user just mentions a link in passing without asking you to view it -> NO
+- If the link seems like spam/useless (e.g., just random link in conversation) -> NO
+- If URLs are Instagram, YouTube, Reddit, Twitter, TikTok links AND mentioned in context -> YES
+- If user is sharing something and asks you to look at it -> YES
+
+Examples:
+"here's a link to an instagram reel https://..." -> YES
+"check out this youtube video https://..." -> YES
+"what's in this reddit post? https://..." -> YES
+"random website https://example.com" (no context) -> NO
+"i found this cool thing https://..." (context: user wants you to see it) -> YES
+"check this out https://..." -> YES
+"what do you think about https://..." -> YES
+"just a random link https://..." (no action requested) -> NO
+
+Respond with ONLY: "YES" or "NO"
+
+Decision: """
+                    
+                    try:
+                        decision_model = get_fast_model()
+                        decision_response = await queued_generate_content(decision_model, decision_prompt)
+                        decision = decision_response.text.strip().upper()
+                        return 'YES' in decision or has_url_reference or has_social_media_link
+                    except Exception as e:
+                        handle_rate_limit_error(e)
+                        # Fallback: fetch if social media link or has keywords
+                        return has_url_reference or has_social_media_link
+                
+                should_fetch_urls = await decide_if_urls_relevant()
+                
+                if should_fetch_urls:
+                    print(f"🌐 [{username}] URLs are relevant - fetching content...")
+                    # Fetch all URLs (limit to 5 to avoid too many requests)
+                    for url in urls[:5]:
+                        try:
+                            content = await fetch_webpage_content(url)
+                            if content:
+                                webpage_contents.append(content)
+                                print(f"✅ [{username}] Fetched content from {url[:50]}...")
+                            else:
+                                print(f"⚠️  [{username}] Failed to fetch {url[:50]}...")
+                        except Exception as e:
+                            print(f"❌ [{username}] Error fetching {url}: {e}")
+                else:
+                    print(f"⏭️  [{username}] URLs not relevant/useful - skipping fetch")
+        
         # For summaries, skip document processing from current message (we just mention them)
         if wants_summary:
             document_assets = []
@@ -2711,9 +2930,74 @@ CURRENT CONVERSATION CONTEXT:
         detailed_reply = reply_style == 'DETAILED'
         print(f"💬 [{username}] Reply style selected: {reply_style}")
         
-        # Let AI decide if internet search is needed
+        # Let AI decide if internet search is needed and extract platform/query
         search_results = None
         search_query = None
+        search_platform = None
+        
+        async def extract_search_query_and_platform():
+            """AI extracts the search query and detects if a platform is specified"""
+            if not SERPER_API_KEY:
+                return None, None
+            
+            platform_keywords = {
+                'reddit': ['reddit', 'on reddit', 'reddit for'],
+                'instagram': ['instagram', 'on instagram', 'instagram for'],
+                'twitter': ['twitter', 'on twitter', 'twitter for'],
+                'x': ['x.com', 'on x', 'x for', 'search x'],
+                'youtube': ['youtube', 'on youtube', 'youtube for', 'youtube video'],
+                'tiktok': ['tiktok', 'on tiktok', 'tiktok for'],
+                'pinterest': ['pinterest', 'on pinterest'],
+                'linkedin': ['linkedin', 'on linkedin'],
+                'github': ['github', 'on github'],
+                'stackoverflow': ['stackoverflow', 'stack overflow', 'on stackoverflow'],
+                'quora': ['quora', 'on quora'],
+                'medium': ['medium', 'on medium'],
+                'wikipedia': ['wikipedia', 'on wikipedia'],
+            }
+            
+            content_lower = message.content.lower()
+            
+            # Detect platform
+            detected_platform = None
+            for platform, keywords in platform_keywords.items():
+                for keyword in keywords:
+                    if keyword in content_lower:
+                        detected_platform = platform
+                        break
+                if detected_platform:
+                    break
+            
+            # Extract query (remove platform keywords)
+            query_prompt = f"""User message: "{message.content}"
+
+Extract the search query from this message. If the user mentioned a platform (Reddit, Instagram, Twitter/X, YouTube, etc.), remove the platform mention from the query and just extract what they want to search for.
+
+Examples:
+"search reddit for python tips" -> "python tips"
+"what's on instagram about AI" -> "AI"
+"search twitter for news" -> "news"
+"find on youtube how to code" -> "how to code"
+"search for quantum computing" -> "quantum computing"
+
+Just extract the search query, nothing else. If no clear search query, return the original message.
+
+Query: """
+            
+            try:
+                decision_model = get_fast_model()
+                query_response = await queued_generate_content(decision_model, query_prompt)
+                extracted_query = query_response.text.strip().strip('"').strip("'")
+                
+                if detected_platform:
+                    print(f"🔍 [{username}] Detected platform: {detected_platform}")
+                
+                return extracted_query, detected_platform
+            except Exception as e:
+                handle_rate_limit_error(e)
+                # Fallback: return original message
+                return message.content, detected_platform
+        
         async def decide_if_search_needed():
             """AI decides if this question needs internet search"""
             if not SERPER_API_KEY:
@@ -2747,6 +3031,7 @@ ALWAYS SEARCH IF:
 - Identifying a person, place, or thing you're not certain about (especially in images)
 - "Who is this?" or "What is this place?" when you're not sure
 - Any question where you need to verify or get current information
+- User asks to search specific platforms: "search reddit", "search instagram", "search twitter/x", "search youtube", etc.
 
 DON'T SEARCH IF:
 - You're CERTAIN you know the answer from your training
@@ -2758,10 +3043,16 @@ DON'T SEARCH IF:
 
 CRITICAL: If you're UNCERTAIN or DON'T KNOW something, you should search. It's better to search and get accurate information than to guess or say "I don't know" without trying.
 
+PLATFORM-SPECIFIC SEARCHES:
+- If user asks to search Reddit, Instagram, Twitter/X, YouTube, TikTok, Pinterest, LinkedIn, GitHub, StackOverflow, Quora, Medium, Wikipedia, etc., you can search those platforms specifically
+- Examples: "search reddit for...", "what's on instagram about...", "search twitter for...", "find on youtube..."
+
 Respond with ONLY: "SEARCH" or "NO"
 
 Examples:
 "what's the latest AI news?" -> SEARCH
+"search reddit for python tips" -> SEARCH (platform-specific)
+"search instagram for..." -> SEARCH (platform-specific)
 "how do I code in Python?" -> NO (you know this)
 "who won the super bowl yesterday?" -> SEARCH (current event)
 "tell me a joke" -> NO
@@ -2914,15 +3205,39 @@ Return ONLY the search query, nothing else:"""
         
         if await decide_if_search_needed():
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
-            search_query = message.content
             search_start = time.time()
-            search_results = await search_internet(search_query)
-            search_time = time.time() - search_start
-            print(f"⏱️  [{username}] Search completed in {search_time:.2f}s")
-            if search_results and search_results != "Internet search is not configured.":
-                consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
+            
+            # Extract query and platform
+            search_query, search_platform = await extract_search_query_and_platform()
+            
+            if search_query:
+                search_results = await search_internet(search_query, platform=search_platform)
+                search_time = time.time() - search_start
+                platform_text = f" on {search_platform}" if search_platform else ""
+                print(f"⏱️  [{username}] Search{platform_text} completed in {search_time:.2f}s")
+                if search_results and search_results != "Internet search is not configured.":
+                    platform_header = f"\n\nINTERNET SEARCH RESULTS{platform_text.upper()}:" if search_platform else "\n\nINTERNET SEARCH RESULTS:"
+                    consciousness_prompt += f"{platform_header}\n{search_results}"
+                else:
+                    print(f"⚠️  [{username}] Search returned no results or was not configured")
             else:
-                print(f"⚠️  [{username}] Search returned no results or was not configured")
+                # Fallback if extraction fails
+                search_results = await search_internet(message.content)
+                search_time = time.time() - search_start
+                print(f"⏱️  [{username}] Search completed in {search_time:.2f}s")
+                if search_results and search_results != "Internet search is not configured.":
+                    consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}"
+                else:
+                    print(f"⚠️  [{username}] Search returned no results or was not configured")
+        
+        # Add webpage contents to prompt if available
+        if webpage_contents:
+            print(f"🔗 [{username}] Adding {len(webpage_contents)} webpage content(s) to prompt")
+            webpage_section = "\n\n" + "="*80 + "\nWEBPAGE CONTENT FROM LINKS:\n" + "="*80 + "\n"
+            for idx, content in enumerate(webpage_contents, 1):
+                webpage_section += f"\n--- WEBPAGE {idx} ---\n{content}\n"
+            webpage_section += "\n" + "="*80 + "\n"
+            consciousness_prompt += webpage_section
         
         # Add image search results to prompt if available
         if image_search_results and len(image_search_results) > 0:
