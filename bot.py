@@ -4435,8 +4435,8 @@ URL: """
                                         # If no perfect match, use first result (cleaned)
                                         found_url = clean_url(url_matches[0].strip())
                                         if found_url:
-                                        print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
-                                        return found_url
+                                            print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
+                                            return found_url
                                 
                                 # If search didn't find URL, try AI conversion as fallback
                                 print(f"⚠️  [{username}] Search didn't find URL, trying AI conversion as fallback...")
@@ -4613,7 +4613,7 @@ Decision: """
                         print(f"❌ [{username}] Invalid URL after cleaning, skipping screenshot")
                         screenshot_needed = False
                     else:
-                    print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
+                        print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
                     
                     try:
                         # AI decides: how many screenshots and what browser actions
@@ -5712,7 +5712,7 @@ Now decide: "{message.content}" -> """
             print(f"⚠️  [{username}] AI response was blocked or empty, using fallback message")
             raw_ai_response = "I encountered an issue generating a response. The content may have been blocked by safety filters."
         else:
-        raw_ai_response = (response.text or "").strip()
+            raw_ai_response = (response.text or "").strip()
             if not raw_ai_response:
                 print(f"⚠️  [{username}] AI response was empty, using fallback message")
                 raw_ai_response = "I encountered an issue generating a response. The content may have been blocked by safety filters."
