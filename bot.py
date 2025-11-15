@@ -4347,7 +4347,50 @@ async def on_message(message: discord.Message):
     
     await bot.process_commands(message)
 
-def format_personality_profile(profile_data: dict, username: str, user_id: str, interaction_count: int, 
+async def summarize_text_quick(text: str, field_name: str, max_length: int = 1024) -> str:
+    """Use fast model to create a concise summary of long text for Discord embed fields"""
+    if len(text) <= max_length:
+        return text
+    
+    try:
+        # Use the fast model for quick summarization
+        fast_model = get_fast_model()
+        model = genai.GenerativeModel(
+            fast_model,
+            generation_config={
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "max_output_tokens": max_length,  # Limit output to fit in field
+            }
+        )
+        
+        prompt = f"""You are summarizing a {field_name} for a Discord embed profile. 
+
+Original text (to be summarized):
+{text}
+
+Create a concise, comprehensive summary that captures all the key points and important details. The summary must be EXACTLY {max_length} characters or less (preferably around {max_length - 100}). Be thorough but concise. Preserve the tone and important specific details.
+
+Summary:"""
+        
+        # Run in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        def _summarize_sync():
+            return model.generate_content(prompt).text.strip()
+        
+        summary = await loop.run_in_executor(None, _summarize_sync)
+        
+        # Ensure it doesn't exceed max_length
+        if len(summary) > max_length:
+            summary = summary[:max_length - 3] + "..."
+        
+        return summary
+    except Exception as e:
+        print(f"⚠️  [PROFILE] Error summarizing {field_name}: {e}")
+        # Fallback to truncation
+        return text[:max_length - 3] + "..."
+
+async def format_personality_profile(profile_data: dict, username: str, user_id: str, interaction_count: int, 
                                first_interaction: datetime, last_interaction: datetime) -> discord.Embed:
     """Format personality profile data into a neat Discord embed"""
     embed = discord.Embed(
@@ -4384,16 +4427,22 @@ def format_personality_profile(profile_data: dict, username: str, user_id: str, 
     # Summary
     if 'summary' in profile_data:
         summary = profile_data['summary']
-        if len(summary) > 1000:
-            summary = summary[:1000] + "..."
-        embed.add_field(name="📝 Summary", value=summary, inline=False)
+        if len(summary) > 1024:
+            summary = await summarize_text_quick(summary, "personality summary", 1024)
+        embed.add_field(name="📝 Summary", value=summary[:1024], inline=False)
     
     # Request history
     if 'request_history' in profile_data and profile_data['request_history']:
         history = profile_data['request_history'][:10]  # Limit to 10 most recent
         history_text = "\n".join([f"• {req[:80]}{'...' if len(req) > 80 else ''}" for req in history])
         if len(profile_data['request_history']) > 10:
-            history_text += f"\n*...and {len(profile_data['request_history']) - 10} more*"
+            remaining = len(profile_data['request_history']) - 10
+            remaining_text = f"\n*...and {remaining} more*"
+            # Ensure total doesn't exceed 1024
+            if len(history_text) + len(remaining_text) > 1024:
+                history_text = history_text[:1024 - len(remaining_text)] + remaining_text
+            else:
+                history_text += remaining_text
         embed.add_field(name="📜 Recent Requests", value=history_text[:1024], inline=False)
     
     # Topics of interest
@@ -4405,12 +4454,24 @@ def format_personality_profile(profile_data: dict, username: str, user_id: str, 
     if 'communication_style' in profile_data and isinstance(profile_data['communication_style'], dict):
         comm_style = profile_data['communication_style']
         style_text = ""
+        remaining = 1024
         if 'format' in comm_style:
-            style_text += f"**Format:** {comm_style['format'][:300]}\n"
-        if 'quirks' in comm_style:
-            style_text += f"**Quirks:** {comm_style['quirks'][:300]}\n"
-        if 'terseness_level' in comm_style:
-            style_text += f"**Terseness:** {comm_style['terseness_level']}"
+            format_text = f"**Format:** {comm_style['format']}\n"
+            if len(format_text) > remaining - 50:  # Leave room for other fields
+                format_text = f"**Format:** {comm_style['format'][:remaining - 60]}...\n"
+            style_text += format_text
+            remaining -= len(format_text)
+        if 'quirks' in comm_style and remaining > 50:
+            quirks_text = f"**Quirks:** {comm_style['quirks']}\n"
+            if len(quirks_text) > remaining - 30:
+                quirks_text = f"**Quirks:** {comm_style['quirks'][:remaining - 40]}...\n"
+            style_text += quirks_text
+            remaining -= len(quirks_text)
+        if 'terseness_level' in comm_style and remaining > 30:
+            terseness_text = f"**Terseness:** {comm_style['terseness_level']}"
+            if len(terseness_text) > remaining:
+                terseness_text = terseness_text[:remaining]
+            style_text += terseness_text
         if style_text:
             embed.add_field(name="💬 Communication Style", value=style_text[:1024], inline=False)
     
@@ -4418,56 +4479,150 @@ def format_personality_profile(profile_data: dict, username: str, user_id: str, 
     if 'my_honest_impression' in profile_data and isinstance(profile_data['my_honest_impression'], dict):
         impression = profile_data['my_honest_impression']
         impression_text = ""
+        remaining = 1024
         if 'vibe' in impression:
-            impression_text += f"**Vibe:** {impression['vibe'][:300]}\n"
-        if 'my_feelings' in impression:
-            feelings = impression['my_feelings'][:400]
-            if len(impression['my_feelings']) > 400:
-                feelings += "..."
-            impression_text += f"**Feelings:** {feelings}\n"
-        if 'relationship_notes' in impression:
-            rel_notes = impression['relationship_notes'][:300]
-            impression_text += f"**Relationship:** {rel_notes}"
+            vibe_text = f"**Vibe:** {impression['vibe']}\n"
+            if len(vibe_text) > remaining - 200:
+                vibe_text = f"**Vibe:** {impression['vibe'][:remaining - 210]}...\n"
+            impression_text += vibe_text
+            remaining -= len(vibe_text)
+        if 'my_feelings' in impression and remaining > 100:
+            feelings_text = f"**Feelings:** {impression['my_feelings']}\n"
+            if len(feelings_text) > remaining - 50:
+                feelings_text = f"**Feelings:** {impression['my_feelings'][:remaining - 60]}...\n"
+            impression_text += feelings_text
+            remaining -= len(feelings_text)
+        if 'relationship_notes' in impression and remaining > 50:
+            rel_notes_text = f"**Relationship:** {impression['relationship_notes']}"
+            if len(rel_notes_text) > remaining:
+                rel_notes_text = rel_notes_text[:remaining - 3] + "..."
+            impression_text += rel_notes_text
         if impression_text:
+            # Summarize if too long
+            if len(impression_text) > 1024:
+                impression_text = await summarize_text_quick(impression_text, "honest impression", 1024)
             embed.add_field(name="🧠 My Honest Impression", value=impression_text[:1024], inline=False)
     
     # Patterns and predictions
     if 'patterns_and_predictions' in profile_data and isinstance(profile_data['patterns_and_predictions'], dict):
         patterns = profile_data['patterns_and_predictions']
         patterns_text = ""
+        remaining = 1024
         if 'prediction' in patterns:
-            pred = patterns['prediction'][:400]
-            if len(patterns['prediction']) > 400:
-                pred += "..."
-            patterns_text += f"**Prediction:** {pred}\n"
-        if 'confirmed_pattern' in patterns:
-            confirmed = patterns['confirmed_pattern'][:400]
-            if len(patterns['confirmed_pattern']) > 400:
-                confirmed += "..."
-            patterns_text += f"**Pattern:** {confirmed}"
+            pred_text = f"**Prediction:** {patterns['prediction']}\n"
+            if len(pred_text) > remaining - 100:
+                pred_text = f"**Prediction:** {patterns['prediction'][:remaining - 110]}...\n"
+            patterns_text += pred_text
+            remaining -= len(pred_text)
+        if 'confirmed_pattern' in patterns and remaining > 50:
+            confirmed_text = f"**Pattern:** {patterns['confirmed_pattern']}"
+            if len(confirmed_text) > remaining:
+                confirmed_text = confirmed_text[:remaining - 3] + "..."
+            patterns_text += confirmed_text
         if patterns_text:
+            # Summarize if too long
+            if len(patterns_text) > 1024:
+                patterns_text = await summarize_text_quick(patterns_text, "patterns and predictions", 1024)
             embed.add_field(name="🔮 Patterns & Predictions", value=patterns_text[:1024], inline=False)
     
     # If no profile fields were added (only user info), check if we have data in unexpected format
     if len(embed.fields) == 1:  # Only user info
         # Check if profile_data exists but is empty or in unexpected format
         if profile_data and isinstance(profile_data, dict) and len(profile_data) > 0:
-            # Profile exists but doesn't match expected format - show raw data
-            try:
-                # Try to show any data that exists, even if not in expected format
-                profile_json = json.dumps(profile_data, indent=2, ensure_ascii=False)
-                # Discord embed field limit is 1024 chars, but we can show a preview
-                if len(profile_json) > 1000:
-                    profile_json = profile_json[:1000] + "\n... (truncated - see dashboard for full profile)"
-                embed.add_field(
-                    name="📋 Full Profile Data",
-                    value=f"```json\n{profile_json}\n```",
-                    inline=False
-                )
-                embed.description = "Profile data exists but is in a different format. Showing raw data above."
-            except Exception as json_error:
-                print(f"⚠️  [PROFILE] Error formatting JSON: {json_error}")
-                embed.description = "Personality profile exists but is in an unexpected format. Keep chatting and I'll build a proper profile!"
+            # Profile exists but doesn't match expected format - try to extract nested profile
+            nested_profile = profile_data.get('personality_profile')
+            if nested_profile and isinstance(nested_profile, dict):
+                # Try to format the nested profile
+                print(f"🔍 [PROFILE] Found nested personality_profile, attempting to format...")
+                # Recursively try to format nested profile by calling format function again
+                # But we'll extract key parts manually to avoid recursion issues
+                
+                # Try to extract key fields from nested structure
+                if 'memory_summary' in nested_profile:
+                    summary = nested_profile['memory_summary']
+                    if len(summary) > 1024:
+                        summary = await summarize_text_quick(summary, "memory summary", 1024)
+                    embed.add_field(name="📝 Summary", value=summary[:1024], inline=False)
+                
+                if 'my_brutally_honest_take' in nested_profile:
+                    honest = nested_profile['my_brutally_honest_take']
+                    if len(honest) > 1024:
+                        honest = await summarize_text_quick(honest, "brutally honest take", 1024)
+                    embed.add_field(name="🧠 Brutally Honest Take", value=honest[:1024], inline=False)
+                
+                if 'personality_and_behavior' in nested_profile:
+                    try:
+                        pnb = nested_profile['personality_and_behavior']
+                        if isinstance(pnb, dict):
+                            pnb_text = ""
+                            if 'core_motivation' in pnb:
+                                pnb_text += f"**Core Motivation:** {pnb['core_motivation']}\n\n"
+                            if 'behavioral_analysis' in pnb and isinstance(pnb['behavioral_analysis'], dict):
+                                if 'core_motivation' in pnb['behavioral_analysis']:
+                                    pnb_text += f"**Core Motivation:** {pnb['behavioral_analysis']['core_motivation']}\n\n"
+                                if 'patterns_observed' in pnb['behavioral_analysis']:
+                                    patterns_list = pnb['behavioral_analysis']['patterns_observed'][:3]  # Limit to 3
+                                    for pattern in patterns_list:
+                                        if isinstance(pattern, dict):
+                                            name = pattern.get('name', 'Unknown')
+                                            status = pattern.get('status', '')
+                                            desc = pattern.get('description', '')[:200]
+                                            pnb_text += f"**{name}** ({status}): {desc}\n"
+                            if len(pnb_text) > 1024:
+                                pnb_text = await summarize_text_quick(pnb_text, "personality and behavior analysis", 1024)
+                            if pnb_text:
+                                embed.add_field(name="🎭 Personality & Behavior", value=pnb_text[:1024], inline=False)
+                    except Exception as pnb_error:
+                        print(f"⚠️  [PROFILE] Error extracting personality_and_behavior: {pnb_error}")
+                
+                if 'lore_and_inside_jokes' in nested_profile:
+                    try:
+                        lore = nested_profile['lore_and_inside_jokes']
+                        if isinstance(lore, dict):
+                            lore_text = ""
+                            for key, value in list(lore.items())[:3]:  # Limit to 3 items
+                                if isinstance(value, dict):
+                                    note = value.get('note', '')[:200]
+                                    status = value.get('status', '')
+                                    lore_text += f"**{key}** ({status}): {note}\n"
+                            if len(lore_text) > 1024:
+                                lore_text = lore_text[:1021] + "..."
+                            if lore_text:
+                                embed.add_field(name="📚 Lore & Inside Jokes", value=lore_text[:1024], inline=False)
+                    except Exception as lore_error:
+                        print(f"⚠️  [PROFILE] Error extracting lore_and_inside_jokes: {lore_error}")
+                
+                # If we still only have user info, show a message
+                if len(embed.fields) == 1:
+                    embed.description = "Profile data exists but is in a complex nested format. Showing extracted key information above."
+            else:
+                # Try to show raw data as fallback
+                try:
+                    profile_json = json.dumps(profile_data, indent=2, ensure_ascii=False)
+                    # Discord embed field limit is 1024 chars - must respect this strictly
+                    # Code block markers add ~9 chars ("```json\n" + "\n```" = 11 chars)
+                    max_json_length = 1010  # Leave room for code block markers and truncation message
+                    if len(profile_json) > max_json_length:
+                        profile_json = profile_json[:max_json_length] + "\n... (truncated)"
+                    
+                    # Build the full field value
+                    field_value = f"```json\n{profile_json}\n```"
+                    # Ensure it doesn't exceed 1024
+                    if len(field_value) > 1024:
+                        # Recalculate with less JSON content
+                        available = 1024 - 11  # 11 chars for code block markers
+                        profile_json = json.dumps(profile_data, indent=2, ensure_ascii=False)[:available - 20] + "\n... (truncated)"
+                        field_value = f"```json\n{profile_json}\n```"
+                    
+                    embed.add_field(
+                        name="📋 Profile Data",
+                        value=field_value,
+                        inline=False
+                    )
+                    embed.description = "Profile data exists but is in an unexpected format."
+                except Exception as json_error:
+                    print(f"⚠️  [PROFILE] Error formatting JSON: {json_error}")
+                    embed.description = "Personality profile exists but is in an unexpected format. Keep chatting and I'll build a proper profile!"
         else:
             embed.description = "Personality profile is being built. Keep chatting and I'll analyze your interactions to build a detailed profile!"
     
@@ -4499,7 +4654,7 @@ async def profile_command(interaction: discord.Interaction, user: discord.Member
         
         # Debug logging
         print(f"🔍 [PROFILE] Raw personality_profile type: {type(personality_profile)}")
-        print(f"🔍 [PROFILE] Raw personality_profile value: {personality_profile}")
+        print(f"🔍 [PROFILE] Raw personality_profile value (first 500 chars): {str(personality_profile)[:500]}")
         
         # Handle different formats (asyncpg returns JSONB as dict, but could be string or None)
         if isinstance(personality_profile, str):
@@ -4513,14 +4668,29 @@ async def profile_command(interaction: discord.Interaction, user: discord.Member
             personality_profile = {}
         # If it's already a dict (from asyncpg JSONB), use it as-is
         
+        # Check if there's a nested personality_profile (the actual profile data)
+        if isinstance(personality_profile, dict) and 'personality_profile' in personality_profile:
+            # The actual profile is nested inside
+            actual_profile = personality_profile.get('personality_profile')
+            if isinstance(actual_profile, dict):
+                print(f"🔍 [PROFILE] Found nested personality_profile, using that instead")
+                personality_profile = actual_profile
+            elif isinstance(actual_profile, str):
+                try:
+                    personality_profile = json.loads(actual_profile)
+                    print(f"🔍 [PROFILE] Parsed nested personality_profile from string")
+                except:
+                    print(f"⚠️  [PROFILE] Failed to parse nested personality_profile string")
+                    personality_profile = {}
+        
         # Check if it's an empty dict
         if personality_profile == {} or (isinstance(personality_profile, dict) and len(personality_profile) == 0):
             print(f"⚠️  [PROFILE] Personality profile is empty dict for user {username}")
         else:
             print(f"✅ [PROFILE] Personality profile has {len(personality_profile)} keys: {list(personality_profile.keys())[:5]}")
         
-        # Format and send
-        embed = format_personality_profile(
+        # Format and send (now async to handle summaries)
+        embed = await format_personality_profile(
             personality_profile,
             username,
             user_id,
