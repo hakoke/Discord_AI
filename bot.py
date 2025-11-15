@@ -2634,14 +2634,14 @@ YOUR CONVERSATION HISTORY WITH {username}:
 {conversation_history}{other_memories_text}
 
 CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
-- The conversation history above is ONLY for understanding references or context - DO NOT respond to old messages
-- You MUST respond ONLY to the user's CURRENT message (the last one in the conversation)
+- You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something
+- If user replies to a message, @mentions someone, or says "that", "this", "the image", "the document", etc. - USE the context to understand what they mean
+- If user shares images/documents in the current message - ANALYZE them and respond to them
+- BUT: If the current message is simple and doesn't reference anything (like "hello", "what's the link to X"), give a simple direct answer - don't randomly bring up unrelated things from history
 - DO NOT continue, complete, or reference your own previous responses unless the user explicitly asks about them
 - DO NOT mix responses from different conversation turns - each message gets its own independent response
-- If you see your own previous response in the history, IGNORE IT - it's already been sent, don't repeat or continue it
-- If the current message is simple (like "hello", "what's the link to X"), give a simple direct answer - don't bring up unrelated things from history
-- Only use conversation history to understand what "this", "that", "it", "the thing" refers to - otherwise ignore it
-- Each response should be a fresh, independent answer to what the user just asked RIGHT NOW
+- If you see your own previous response in the history, IGNORE IT unless the user is explicitly asking about it - it's already been sent
+- Each response should be a fresh, independent answer to what the user just asked RIGHT NOW, but use context when they explicitly reference something
 
 
 YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
