@@ -5735,7 +5735,14 @@ async def on_ready():
     # Check for banned servers on startup and leave them
     for guild in bot.guilds:
         guild_id = str(guild.id)
-        ban_info = await db.check_server_ban(guild_id)
+        # Only check ban if database is initialized
+        ban_info = None
+        if db and hasattr(db, 'pool') and db.pool is not None:
+            try:
+                ban_info = await db.check_server_ban(guild_id)
+            except Exception as ban_error:
+                print(f"⚠️  Error checking server ban: {ban_error}")
+                ban_info = None
         if ban_info:
             try:
                 # Calculate days remaining or "infinite"
@@ -5861,7 +5868,14 @@ async def on_guild_join(guild):
     # Store server structure in background (no latency)
     asyncio.create_task(store_guild_structure(guild))
     
-    ban_info = await db.check_server_ban(guild_id)
+    # Only check ban if database is initialized
+    ban_info = None
+    if db and hasattr(db, 'pool') and db.pool is not None:
+        try:
+            ban_info = await db.check_server_ban(guild_id)
+        except Exception as ban_error:
+            print(f"⚠️  Error checking server ban: {ban_error}")
+            ban_info = None
     
     if ban_info:
         # Server is banned, leave immediately
@@ -5950,7 +5964,14 @@ async def on_message(message: discord.Message):
     # Check if server is banned (if in a guild)
     if message.guild:
         guild_id = str(message.guild.id)
-        ban_info = await db.check_server_ban(guild_id)
+        # Only check ban if database is initialized
+        ban_info = None
+        if db and hasattr(db, 'pool') and db.pool is not None:
+            try:
+                ban_info = await db.check_server_ban(guild_id)
+            except Exception as ban_error:
+                print(f"⚠️  Error checking server ban: {ban_error}")
+                ban_info = None
         if ban_info:
             # Server is banned, leave immediately
             try:
@@ -6098,16 +6119,16 @@ async def on_message(message: discord.Message):
                 if searched_images:
                     for idx, img in enumerate(searched_images):
                         try:
-                            # Save as PNG (original quality, no compression)
-                            print(f"📎 [{message.author.display_name}] Preparing searched image {idx+1}/{len(searched_images)} (original quality)...")
-                            img_bytes = BytesIO()
-                            img.save(img_bytes, format='PNG', optimize=True)
+                            # Compress large images to prevent blocking the event loop
+                            print(f"📎 [{message.author.display_name}] Preparing searched image {idx+1}/{len(searched_images)}...")
+                            # Use compression for large images to prevent blocking
+                            img_bytes = compress_image_for_discord(img, max_width=1920, max_height=1920, quality=85)
                             img_bytes.seek(0)
                             # Read bytes to ensure they're available when Discord reads the file
                             img_data = img_bytes.read()
                             img_bytes_new = BytesIO(img_data)
                             img_bytes_new.seek(0)
-                            file = discord.File(fp=img_bytes_new, filename=f'search_{idx+1}.png')
+                            file = discord.File(fp=img_bytes_new, filename=f'search_{idx+1}.jpg')
                             files_to_attach.append(file)
                             print(f"📎 [{message.author.display_name}] ✅ Searched image {idx+1} added ({len(img_data)} bytes)")
                         except Exception as img_error:
