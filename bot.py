@@ -2392,75 +2392,71 @@ async def ai_decide_browser_actions(message: discord.Message, url: str) -> Tuple
     actions = []
     take_screenshot = True
     
-    # Check for click requests - stop at "and", "then", "show", etc.
-    click_patterns = [
-        r"click\s+['\"]([^'\"]+)['\"]",  # click "Sign In"
-        r"click\s+(?:on\s+)?(?:the\s+)?(['\"]?[a-zA-Z0-9\s]+?['\"]?)(?:\s+(?:and|then|show|after|before|,)|$)",  # click sign in and... or click sign in then...
-        r"after\s+(?:you\s+)?click\s+(?:on\s+)?(?:the\s+)?['\"]?([^'\"]+?)['\"]?(?:\s+(?:and|then|show)|$)",  # after click X and...
-    ]
-    
-    for pattern in click_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            element = match.group(1).strip().strip('\'"')
-            # Clean up element - remove "and show", "then", etc. at the end
-            element = re.sub(r'\s+(and|then|show|after|before).*$', '', element, flags=re.IGNORECASE).strip()
-            if element and len(element) > 0:
-                actions.append(f"click '{element}'")
-                print(f"🎯 [BROWSER ACTION] Extracted click action: '{element}' from '{message.content}'")
-                break
-    
-    # Check for scroll requests
-    if 'scroll' in content:
-        if 'bottom' in content:
-            actions.append('scroll to bottom')
-        elif 'top' in content:
-            actions.append('scroll to top')
-        else:
-            actions.append('scroll to bottom')
-    
-    # AI decision for complex actions
-    if not actions and ('then' in content or 'after' in content or 'and' in content):
-        decision_prompt = f"""User message: "{message.content}"
+    # Use AI to extract ALL actions (handles multiple sequential actions like "click X then click Y")
+    # This is more reliable than regex patterns which can miss multiple actions
+    decision_prompt = f"""User message: "{message.content}"
 
 URL: {url}
 
-What browser actions should be performed before taking screenshot?
-- Extract click actions: "click 'Sign In'", "click the button"
-- Extract scroll actions: "scroll to bottom", "scroll to top"
-- Extract wait actions: "wait 3 seconds"
-- If user says "then screenshot" or "after clicking X, screenshot" -> extract the actions before screenshot
+Extract ALL browser actions the user wants to perform in sequence. Actions should be performed in the order mentioned.
+
+Action types:
+- Click actions: "click 'Button Name'", "click 'Accept all'", "click 'Play'"
+- Scroll actions: "scroll to bottom", "scroll to top"
+- Wait actions: "wait 3 seconds"
+
+CRITICAL: Extract ALL actions, not just the first one!
+- If user says "click X then click Y" -> extract BOTH: ["click 'X'", "click 'Y'"]
+- If user says "click accept all then click play" -> extract BOTH: ["click 'accept all'", "click 'play'"]
+- Actions should be in the order they appear in the message
 
 Examples:
-"go to https://site.com and click 'Sign In' then screenshot" -> ["click 'Sign In'"]
-"visit https://site.com, scroll to bottom, and take a screenshot" -> ["scroll to bottom"]
-"click the button then screenshot" -> ["click 'button'"]
+"click 'Sign In' then screenshot" -> ["click 'Sign In'"]
+"click 'accept all' then click 'play' and show me" -> ["click 'accept all'", "click 'play'"]
+"go to site.com, click 'Login', then click 'Submit', then screenshot" -> ["click 'Login'", "click 'Submit'"]
+"scroll to bottom then click 'Load More'" -> ["scroll to bottom", "click 'Load More'"]
+"click button then wait 2 seconds then click next" -> ["click 'button'", "wait 2 seconds", "click 'next'"]
 "just screenshot" -> []
 
-Respond with JSON array of action strings, or [] if no actions.
-Format: ["action1", "action2"]
-Example: ["click 'Sign In'", "scroll to bottom"]
+Respond with ONLY a JSON array of action strings. Format: ["action1", "action2", "action3"]
+If no actions, return: []
 
 Actions: """
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
+        response_text = decision_response.text.strip()
         
+        # Clean up response - remove markdown code blocks if present
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0].strip()
+        
+        # Try to parse JSON
         try:
-            decision_model = get_fast_model()
-            decision_response = await queued_generate_content(decision_model, decision_prompt)
-            response_text = decision_response.text.strip()
-            
-            # Try to parse JSON
-            try:
-                parsed_actions = json.loads(response_text)
-                if isinstance(parsed_actions, list):
-                    actions.extend(parsed_actions)
-            except:
-                # Try to extract actions from text
-                if 'click' in response_text.lower():
-                    click_match = re.search(r"click\s+['\"]([^'\"]+)['\"]", response_text)
-                    if click_match:
-                        actions.append(f"click '{click_match.group(1)}'")
-        except Exception as e:
-            handle_rate_limit_error(e)
+            parsed_actions = json.loads(response_text)
+            if isinstance(parsed_actions, list):
+                actions = parsed_actions
+                print(f"🎯 [BROWSER ACTION] AI extracted {len(actions)} action(s): {actions}")
+            else:
+                print(f"⚠️  [BROWSER ACTION] AI returned non-list: {parsed_actions}")
+        except json.JSONDecodeError as json_error:
+            print(f"⚠️  [BROWSER ACTION] Failed to parse AI response as JSON: {json_error}")
+            print(f"⚠️  [BROWSER ACTION] Raw response: {response_text[:200]}")
+            # Fallback: try to extract actions from text using regex
+            click_matches = re.findall(r"click\s+['\"]([^'\"]+)['\"]", response_text, re.IGNORECASE)
+            for match in click_matches:
+                actions.append(f"click '{match}'")
+            if 'scroll' in response_text.lower():
+                if 'bottom' in response_text.lower():
+                    actions.append('scroll to bottom')
+                elif 'top' in response_text.lower():
+                    actions.append('scroll to top')
+    except Exception as e:
+        handle_rate_limit_error(e)
+        print(f"⚠️  [BROWSER ACTION] Error in AI extraction: {e}")
     
     return actions, take_screenshot
 
