@@ -5077,6 +5077,8 @@ Decision: """
                             print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
                             screenshot_images = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
                             screenshot_attachments.extend(screenshot_images)
+                            # Set screenshot_count for logging (autonomous mode returns variable number)
+                            screenshot_count = len(screenshot_images) if screenshot_images else 0
                         else:
                             # Use regular automation with explicit actions
                             screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
