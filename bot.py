@@ -4291,50 +4291,84 @@ Now decide: "{message.content}" -> """
             wants_image_search = False
         
         if wants_image_search and SERPER_API_KEY:
-            # Extract clean search query using AI
-            async def extract_image_search_query():
-                """AI extracts the actual search query from the user message"""
+            # Extract search queries - handle multiple topics
+            async def extract_image_search_queries():
+                """AI extracts search queries from the user message - can return multiple topics"""
                 query_extraction_prompt = f"""User message: "{message.content}"
 
-Extract the actual search query for Google image search from this message. Remove:
+Does this message request images of MULTIPLE different topics? (e.g., "georgia countryside 2 photos and canada 2 photos and dubai downtown 2 photos")
+
+If YES, return a JSON array with separate search queries for each topic:
+{{"queries": ["topic1", "topic2", "topic3"], "multiple": true}}
+
+If NO (single topic), return:
+{{"queries": ["single topic"], "multiple": false}}
+
+Extract clean search queries - remove:
 - Bot mentions (like <@123456789>)
 - Command words like "search for", "show me", "get me", "find", "images of", "pictures of", "photos of"
+- Numbers like "2 photos", "3 images" (keep the topic, not the count)
 - Phrases like "from google", "from the internet"
-- Any extra words that aren't part of what the user wants to search for
-
-Return ONLY the clean search query - just the topic/subject they want images of.
+- Words like "and", "also" (separate topics should be separate queries)
 
 Examples:
-"search google about university of wollongong in dubai, show me how it looks" -> "university of wollongong dubai"
-"get me 3 images of MUST egypt from google" -> "MUST egypt"
-"show us photos of mushrif mall" -> "mushrif mall"
-"what does the Grand Canyon look like?" -> "Grand Canyon"
-"<@123456> show me dalma mall abu dhabi" -> "dalma mall abu dhabi"
+"show me georgia countryside 2 photos and canada 2 photos" -> {{"queries": ["georgia countryside", "canada countryside"], "multiple": true}}
+"show me pictures of dubai" -> {{"queries": ["dubai"], "multiple": false}}
+"georgia countryside 2 photos and canada 2 photos countryside and 2 photos dubai downtown" -> {{"queries": ["georgia countryside", "canada countryside", "dubai downtown"], "multiple": true}}
+"show me MUST egypt" -> {{"queries": ["MUST egypt"], "multiple": false}}
 
-Return ONLY the search query, nothing else:"""
+Return ONLY the JSON object, nothing else:"""
                 
                 try:
                     decision_model = get_fast_model()
                     decision_response = await queued_generate_content(decision_model, query_extraction_prompt)
-                    clean_query = (decision_response.text or "").strip()
-                    # Remove quotes if AI added them
-                    clean_query = clean_query.strip('"\'')
-                    return clean_query if clean_query else message.content
+                    response_text = (decision_response.text or "").strip()
+                    
+                    # Parse JSON response
+                    if '```json' in response_text:
+                        json_start = response_text.find('```json') + 7
+                        json_end = response_text.find('```', json_start)
+                        response_text = response_text[json_start:json_end].strip()
+                    elif '```' in response_text:
+                        json_start = response_text.find('```') + 3
+                        json_end = response_text.find('```', json_start)
+                        response_text = response_text[json_start:json_end].strip()
+                    
+                    data = json.loads(response_text)
+                    queries = data.get('queries', [])
+                    if queries:
+                        return queries
+                    else:
+                        # Fallback: single query
+                        return [message.content]
                 except Exception as e:
-                    print(f"⚠️  [{username}] Error extracting search query: {e}")
+                    print(f"⚠️  [{username}] Error extracting search queries: {e}")
                     # Fallback: remove mentions and common prefixes
                     fallback = re.sub(r'<@!?\d+>', '', message.content).strip()
                     for prefix in ['search for', 'search google about', 'show me', 'get me', 'find', 'images of', 'pictures of', 'photos of', 'from google']:
                         if fallback.lower().startswith(prefix):
                             fallback = fallback[len(prefix):].strip()
-                    return fallback
+                    return [fallback]
             
-            image_search_query = await extract_image_search_query()
-            print(f"🖼️  [{username}] Performing image search for: {image_search_query[:100]}...")
+            search_queries = await extract_image_search_queries()
+            print(f"🖼️  [{username}] Performing {len(search_queries)} image search(es): {', '.join([q[:30] for q in search_queries])}...")
+            
+            # Perform searches for each query and combine results
+            all_image_search_results = []
             image_search_start = time.time()
-            image_search_results = await search_images(image_search_query, num=10)
+            for idx, query in enumerate(search_queries):
+                print(f"🖼️  [{username}] Searching for: {query[:100]}...")
+                results = await search_images(query, num=10)
+                # Tag each result with its query for context
+                for result in results:
+                    result['search_query'] = query
+                    result['query_index'] = idx
+                all_image_search_results.extend(results)
+                print(f"✅ [{username}] Found {len(results)} images for '{query[:50]}...'")
+            
+            image_search_results = all_image_search_results
             image_search_time = time.time() - image_search_start
-            print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} images")
+            print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} total images from {len(search_queries)} search(es)")
             
             # If image search was performed, disable image generation (user wants search, not generation)
             if image_search_results:
@@ -4385,16 +4419,29 @@ Return ONLY the search query, nothing else:"""
         
         # Add image search results to prompt if available
         if image_search_results and len(image_search_results) > 0:
+            # Build image list with search query context if multiple queries were used
             image_list_text = "\n".join([
-                f"{idx+1}. {img['title']}\n   Image URL: {img['url']}"
+                f"{idx+1}. {img['title']}\n   Image URL: {img['url']}" + 
+                (f"\n   (from search: '{img.get('search_query', 'unknown')}')" if img.get('search_query') and len(search_queries) > 1 else "")
                 for idx, img in enumerate(image_search_results)
             ])
             user_query_lower = (message.content or "").lower()
-            search_query_lower = (image_search_query or "").lower()
+            # Use the first query for backward compatibility, or show all if multiple
+            if 'search_queries' in locals() and len(search_queries) > 1:
+                search_queries_display = ', '.join([f"'{q}'" for q in search_queries])
+                search_query_lower = ' | '.join([q.lower() for q in search_queries])
+            else:
+                search_queries_display = search_queries[0] if 'search_queries' in locals() and search_queries else (image_search_query or "")
+                search_query_lower = (search_queries_display or "").lower()
             
             # Split the massive f-string into multiple lines to avoid syntax errors
+            if 'search_queries' in locals() and len(search_queries) > 1:
+                queries_list = ', '.join([f"'{q}'" for q in search_queries])
+                queries_context = f" (from {len(search_queries)} searches: {queries_list})"
+            else:
+                queries_context = ""
             image_selection_prompt = f"""
-GOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':
+GOOGLE IMAGE SEARCH RESULTS{queries_context}:
 {image_list_text}
 
 ⚠️ IMPORTANT - PROVIDING LINKS:
@@ -4484,9 +4531,10 @@ REMEMBER: EVERYTHING is YOUR decision:
 NO HARDCODING - YOU ARE IN FULL CONTROL!
 """
             consciousness_prompt += image_selection_prompt
-        elif image_search_query:
+        elif 'search_queries' in locals() and search_queries:
             # Image search was attempted but returned no results
-            consciousness_prompt += f"\n\nIMPORTANT: The user requested images for '{image_search_query}', but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
+            queries_display = ', '.join([f"'{q}'" for q in search_queries]) if len(search_queries) > 1 else search_queries[0]
+            consciousness_prompt += f"\n\nIMPORTANT: The user requested images for {queries_display}, but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
         
         # Decide which model to use (thread-safe)
         async def decide_model():
@@ -5768,11 +5816,17 @@ async def on_message(message: discord.Message):
                             img_bytes = BytesIO()
                             img.save(img_bytes, format='PNG', optimize=True)
                             img_bytes.seek(0)
-                            file = discord.File(fp=img_bytes, filename=f'search_{idx+1}.png')
+                            # Read bytes to ensure they're available when Discord reads the file
+                            img_data = img_bytes.read()
+                            img_bytes_new = BytesIO(img_data)
+                            img_bytes_new.seek(0)
+                            file = discord.File(fp=img_bytes_new, filename=f'search_{idx+1}.png')
                             files_to_attach.append(file)
-                            print(f"📎 [{message.author.display_name}] ✅ Searched image {idx+1} added")
+                            print(f"📎 [{message.author.display_name}] ✅ Searched image {idx+1} added ({len(img_data)} bytes)")
                         except Exception as img_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to prepare searched image {idx+1}: {img_error}")
+                            import traceback
+                            print(f"📎 [{message.author.display_name}] Traceback: {traceback.format_exc()}")
                 
                 # Add generated images to files_to_attach (attach to same message)
                 print(f"📎 [{message.author.display_name}] Checking generated_images: {generated_images}")
