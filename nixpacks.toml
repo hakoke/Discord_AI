@@ -1,7 +1,7 @@
-[phases.install]
+[phases.build]
 cmds = [
-  "/opt/venv/bin/python -m playwright install chromium",
-  "/opt/venv/bin/python -m playwright install-deps"
+  "python -m playwright install chromium",
+  "python -m playwright install-deps"
 ]
 
 [start]
