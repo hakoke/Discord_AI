@@ -43,6 +43,13 @@ except ImportError:
     BEAUTIFULSOUP_AVAILABLE = False
     print("⚠️  BeautifulSoup not available - HTML parsing disabled. Install with: pip install beautifulsoup4")
 
+try:
+    from playwright.async_api import async_playwright, Page, Browser
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    print("⚠️  Playwright not available - Screenshot capability disabled. Install with: pip install playwright && playwright install chromium")
+
 from database import Database
 from memory import MemorySystem
 
@@ -1678,6 +1685,631 @@ def extract_urls(text: str) -> List[str]:
             cleaned_urls.append(url)
     return cleaned_urls
 
+# ============================================================================
+# Browser Automation and Screenshot Capability
+# ============================================================================
+
+# Global browser instance for reuse (lazy initialization)
+_playwright_instance = None
+_browser: Optional[Browser] = None
+
+async def get_browser() -> Optional[Browser]:
+    """Get or create a browser instance (reused across requests)"""
+    global _playwright_instance, _browser
+    
+    if not PLAYWRIGHT_AVAILABLE:
+        return None
+    
+    try:
+        if _browser is None or not _browser.is_connected():
+            if _playwright_instance is None:
+                _playwright_instance = await async_playwright().start()
+            
+            _browser = await _playwright_instance.chromium.launch(headless=True)
+            print("🌐 [BROWSER] Browser instance created")
+        
+        return _browser
+    except Exception as e:
+        print(f"❌ [BROWSER] Error getting browser: {e}")
+        return None
+
+async def close_browser():
+    """Close browser instance (called on shutdown)"""
+    global _browser, _playwright_instance
+    
+    try:
+        if _browser:
+            await _browser.close()
+            _browser = None
+            print("🌐 [BROWSER] Browser closed")
+        
+        if _playwright_instance:
+            await _playwright_instance.stop()
+            _playwright_instance = None
+            print("🌐 [BROWSER] Playwright stopped")
+    except Exception as e:
+        print(f"⚠️  [BROWSER] Error closing browser: {e}")
+
+async def take_screenshot(url: str, scroll_position: float = 0.0, wait_time: int = 2000, full_page: bool = False) -> Optional[BytesIO]:
+    """Take a screenshot of a webpage
+    
+    Args:
+        url: URL to screenshot
+        scroll_position: Where to scroll (0.0 = top, 0.5 = middle, 1.0 = bottom)
+        wait_time: Time to wait for page load (ms)
+        full_page: If True, capture full page; if False, capture viewport
+    
+    Returns:
+        BytesIO containing PNG image, or None on error
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        print("⚠️  [SCREENSHOT] Playwright not available")
+        return None
+    
+    browser = await get_browser()
+    if not browser:
+        return None
+    
+    page = None
+    try:
+        print(f"📸 [SCREENSHOT] Taking screenshot of {url[:80]}... (scroll: {scroll_position:.1f}, wait: {wait_time}ms)")
+        
+        page = await browser.new_page(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        # Navigate to URL
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        
+        # Wait for page to fully load
+        await page.wait_for_timeout(wait_time)
+        
+        # Get page height
+        if scroll_position > 0:
+            page_height = await page.evaluate('document.body.scrollHeight')
+            viewport_height = 1080
+            scroll_to = int((page_height - viewport_height) * scroll_position)
+            await page.evaluate(f'window.scrollTo(0, {scroll_to})')
+            await page.wait_for_timeout(500)  # Wait for scroll to settle
+        
+        # Take screenshot
+        screenshot_bytes = await page.screenshot(full_page=full_page, type='png')
+        
+        # Convert to BytesIO
+        img_bytes = BytesIO(screenshot_bytes)
+        img_bytes.seek(0)
+        
+        print(f"✅ [SCREENSHOT] Screenshot captured ({len(screenshot_bytes)} bytes)")
+        return img_bytes
+        
+    except Exception as e:
+        print(f"❌ [SCREENSHOT] Error taking screenshot: {e}")
+        import traceback
+        print(f"❌ [SCREENSHOT] Traceback: {traceback.format_exc()}")
+        return None
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
+
+async def take_multiple_screenshots(url: str, count: int = 3, wait_time: int = 2000) -> List[BytesIO]:
+    """Take multiple screenshots at different scroll positions
+    
+    Args:
+        url: URL to screenshot
+        count: Number of screenshots to take (1-10)
+        wait_time: Time to wait for page load (ms)
+    
+    Returns:
+        List of BytesIO containing PNG images
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return []
+    
+    count = max(1, min(10, count))  # Clamp between 1 and 10
+    
+    screenshots = []
+    
+    browser = await get_browser()
+    if not browser:
+        return []
+    
+    page = None
+    try:
+        print(f"📸 [SCREENSHOT] Taking {count} screenshots of {url[:80]}...")
+        
+        page = await browser.new_page(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        # Navigate to URL
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        await page.wait_for_timeout(wait_time)
+        
+        # Get page dimensions
+        page_height = await page.evaluate('document.body.scrollHeight')
+        viewport_height = 1080
+        
+        # If page is shorter than viewport, just take one screenshot
+        if page_height <= viewport_height:
+            screenshot_bytes = await page.screenshot(type='png')
+            img_bytes = BytesIO(screenshot_bytes)
+            img_bytes.seek(0)
+            screenshots.append(img_bytes)
+            print(f"✅ [SCREENSHOT] Page is short, captured 1 screenshot")
+            return screenshots
+        
+        # Calculate scroll positions
+        scroll_positions = []
+        if count == 1:
+            scroll_positions = [0.0]  # Top
+        elif count == 2:
+            scroll_positions = [0.0, 1.0]  # Top, Bottom
+        else:
+            # Distribute evenly: top, middle sections, bottom
+            for i in range(count):
+                if i == 0:
+                    scroll_positions.append(0.0)  # Top
+                elif i == count - 1:
+                    scroll_positions.append(1.0)  # Bottom
+                else:
+                    # Distribute middle positions
+                    scroll_positions.append(i / (count - 1))
+        
+        # Take screenshots at each position
+        for idx, scroll_pos in enumerate(scroll_positions):
+            try:
+                # Scroll to position
+                scroll_to = int((page_height - viewport_height) * scroll_pos)
+                await page.evaluate(f'window.scrollTo(0, {scroll_to})')
+                await page.wait_for_timeout(500)  # Wait for scroll
+                
+                # Take screenshot
+                screenshot_bytes = await page.screenshot(type='png')
+                img_bytes = BytesIO(screenshot_bytes)
+                img_bytes.seek(0)
+                screenshots.append(img_bytes)
+                
+                print(f"✅ [SCREENSHOT] Screenshot {idx + 1}/{count} captured (scroll: {scroll_pos:.2f})")
+            except Exception as e:
+                print(f"⚠️  [SCREENSHOT] Error capturing screenshot {idx + 1}: {e}")
+        
+        return screenshots
+        
+    except Exception as e:
+        print(f"❌ [SCREENSHOT] Error taking multiple screenshots: {e}")
+        import traceback
+        print(f"❌ [SCREENSHOT] Traceback: {traceback.format_exc()}")
+        return []
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
+
+async def click_element_and_screenshot(url: str, element_description: str, wait_after_click: int = 2000) -> Optional[BytesIO]:
+    """Navigate to URL, click an element, and take screenshot
+    
+    Args:
+        url: URL to navigate to
+        element_description: Description of element to click (button text, link text, etc.)
+        wait_after_click: Time to wait after clicking (ms)
+    
+    Returns:
+        BytesIO containing PNG image, or None on error
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return None
+    
+    browser = await get_browser()
+    if not browser:
+        return None
+    
+    page = None
+    try:
+        print(f"🖱️  [CLICK] Navigating to {url[:80]}... clicking '{element_description}'...")
+        
+        page = await browser.new_page(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        # Navigate to URL
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        await page.wait_for_timeout(2000)
+        
+        # Try to find and click element
+        clicked = False
+        
+        # Try various strategies to find element
+        strategies = [
+            # Try by text content (button, link)
+            lambda: page.get_by_text(element_description, exact=False).first.click(),
+            # Try by role and text
+            lambda: page.get_by_role('button', name=element_description, exact=False).first.click(),
+            lambda: page.get_by_role('link', name=element_description, exact=False).first.click(),
+            # Try by CSS selector if description looks like one
+            lambda: page.click(element_description) if any(c in element_description for c in ['#', '.', '[']) else None,
+        ]
+        
+        for strategy in strategies:
+            try:
+                await strategy()
+                clicked = True
+                print(f"✅ [CLICK] Successfully clicked element: '{element_description}'")
+                break
+            except Exception as e:
+                continue
+        
+        if not clicked:
+            print(f"⚠️  [CLICK] Could not find element '{element_description}', taking screenshot anyway")
+        
+        # Wait after click
+        await page.wait_for_timeout(wait_after_click)
+        
+        # Take screenshot
+        screenshot_bytes = await page.screenshot(type='png')
+        img_bytes = BytesIO(screenshot_bytes)
+        img_bytes.seek(0)
+        
+        print(f"✅ [CLICK] Screenshot captured after click ({len(screenshot_bytes)} bytes)")
+        return img_bytes
+        
+    except Exception as e:
+        print(f"❌ [CLICK] Error clicking and screenshotting: {e}")
+        import traceback
+        print(f"❌ [CLICK] Traceback: {traceback.format_exc()}")
+        return None
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
+
+async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[BytesIO]:
+    """Navigate to URL, perform actions, and take screenshots
+    
+    Args:
+        url: URL to navigate to
+        actions: List of action descriptions (e.g., ["click 'Sign In'", "scroll to bottom", "wait 3 seconds"])
+    
+    Returns:
+        List of BytesIO containing PNG images
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return []
+    
+    browser = await get_browser()
+    if not browser:
+        return []
+    
+    page = None
+    screenshots = []
+    
+    try:
+        print(f"🎬 [NAVIGATE] Navigating to {url[:80]}...")
+        
+        page = await browser.new_page(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        # Navigate to URL
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        await page.wait_for_timeout(2000)
+        
+        # Take initial screenshot
+        screenshot_bytes = await page.screenshot(type='png')
+        img_bytes = BytesIO(screenshot_bytes)
+        img_bytes.seek(0)
+        screenshots.append(img_bytes)
+        print(f"✅ [NAVIGATE] Initial screenshot captured")
+        
+        # Perform actions if provided
+        if actions:
+            for action in actions:
+                try:
+                    action_lower = action.lower()
+                    
+                    # Handle different action types
+                    if action_lower.startswith('click'):
+                        # Extract element description
+                        element_desc = action.replace('click', '').strip().strip("'\"")
+                        clicked = False
+                        
+                        strategies = [
+                            lambda: page.get_by_text(element_desc, exact=False).first.click(),
+                            lambda: page.get_by_role('button', name=element_desc, exact=False).first.click(),
+                            lambda: page.get_by_role('link', name=element_desc, exact=False).first.click(),
+                        ]
+                        
+                        for strategy in strategies:
+                            try:
+                                await strategy()
+                                clicked = True
+                                print(f"✅ [NAVIGATE] Clicked: '{element_desc}'")
+                                break
+                            except:
+                                continue
+                        
+                        if clicked:
+                            await page.wait_for_timeout(2000)
+                    
+                    elif action_lower.startswith('scroll'):
+                        if 'bottom' in action_lower:
+                            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        elif 'top' in action_lower:
+                            await page.evaluate('window.scrollTo(0, 0)')
+                        await page.wait_for_timeout(1000)
+                    
+                    elif action_lower.startswith('wait'):
+                        # Extract wait time
+                        wait_match = re.search(r'(\d+)', action)
+                        wait_time = int(wait_match.group(1)) * 1000 if wait_match else 2000
+                        await page.wait_for_timeout(wait_time)
+                    
+                    # Take screenshot after action
+                    screenshot_bytes = await page.screenshot(type='png')
+                    img_bytes = BytesIO(screenshot_bytes)
+                    img_bytes.seek(0)
+                    screenshots.append(img_bytes)
+                    print(f"✅ [NAVIGATE] Screenshot captured after: {action}")
+                    
+                except Exception as e:
+                    print(f"⚠️  [NAVIGATE] Error performing action '{action}': {e}")
+                    continue
+        
+        return screenshots
+        
+    except Exception as e:
+        print(f"❌ [NAVIGATE] Error navigating and screenshotting: {e}")
+        import traceback
+        print(f"❌ [NAVIGATE] Traceback: {traceback.format_exc()}")
+        return screenshots if screenshots else []
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
+
+async def ai_decide_screenshot_needed(message: discord.Message, urls: List[str]) -> bool:
+    """AI decides if screenshot is needed from URLs in message
+    
+    Args:
+        message: The Discord message
+        urls: List of URLs found in the message
+    
+    Returns:
+        True if screenshot should be taken, False otherwise
+    """
+    if not urls or not PLAYWRIGHT_AVAILABLE:
+        return False
+    
+    content = (message.content or "").lower()
+    
+    # Check for explicit screenshot requests
+    screenshot_keywords = [
+        'screenshot', 'screenshot', 'take a screenshot', 'take screenshot',
+        'show me', 'what does', 'how does', 'what does this look like',
+        'how does this look', 'show me this', 'capture', 'snapshot',
+        'take a pic', 'take pic', 'screenshot this', 'screenshot that'
+    ]
+    
+    has_explicit_request = any(keyword in content for keyword in screenshot_keywords)
+    
+    if has_explicit_request:
+        return True
+    
+    # AI decision prompt
+    decision_prompt = f"""User message: "{message.content}"
+
+URLs found in message: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}
+
+Does the user want you to TAKE A SCREENSHOT of these URLs?
+- If user says "screenshot", "take a screenshot", "show me", "what does this look like", "how does this look" -> YES
+- If user says "go to [url] and show me", "visit [url] and screenshot", "take a pic of [url]" -> YES
+- If user just mentions a URL without asking for screenshot -> NO
+- If user asks about content (text, info) but doesn't ask for screenshot -> NO
+- If user explicitly asks for screenshot -> YES
+
+Examples:
+"go to https://example.com and take a screenshot" -> YES
+"what does https://google.com look like?" -> YES
+"show me https://site.com" -> YES
+"screenshot this https://link.com" -> YES
+"check out https://example.com" (no screenshot request) -> NO
+"what's on https://example.com" (asks about content, not visual) -> NO
+"take 3 screenshots of https://site.com" -> YES
+
+Respond with ONLY: "YES" or "NO"
+
+Decision: """
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
+        decision = decision_response.text.strip().upper()
+        return 'YES' in decision or has_explicit_request
+    except Exception as e:
+        handle_rate_limit_error(e)
+        # Fallback: use explicit keywords
+        return has_explicit_request
+
+async def ai_decide_screenshot_count(message: discord.Message, url: str) -> int:
+    """AI decides how many screenshots to take
+    
+    Args:
+        message: The Discord message
+        url: The URL to screenshot
+    
+    Returns:
+        Number of screenshots to take (1-10)
+    """
+    content = (message.content or "").lower()
+    
+    # Check for explicit count in message
+    count_keywords = {
+        '1': ['one screenshot', 'take 1', 'single screenshot', 'one pic', 'take one'],
+        '2': ['two screenshots', 'take 2', 'two pics', 'couple screenshots'],
+        '3': ['three screenshots', 'take 3', 'three pics', 'few screenshots'],
+        '4': ['four screenshots', 'take 4', 'four pics'],
+    }
+    
+    for count, keywords in count_keywords.items():
+        if any(keyword in content for keyword in keywords):
+            return int(count)
+    
+    # Check for numeric patterns
+    count_match = re.search(r'take\s+(\d+)\s+(?:screenshot|pic|image)', content)
+    if count_match:
+        count = int(count_match.group(1))
+        return max(1, min(10, count))
+    
+    # AI decision prompt
+    decision_prompt = f"""User message: "{message.content}"
+
+URL to screenshot: {url}
+
+How many screenshots should be taken?
+- If user says "take 1 screenshot" or "one screenshot" -> 1
+- If user says "take 2 screenshots" or "two screenshots" -> 2
+- If user says "take 3 screenshots" or "few screenshots" -> 3
+- If user says "take X screenshots" where X is a number -> X (max 10)
+- If user says "show me different parts" or "different sections" -> 3-4
+- If user just says "screenshot" or "take screenshot" without number -> YOU DECIDE based on context:
+  * If it's a long page that needs multiple views -> 2-3
+  * If it's a simple page -> 1
+  * If user wants to see "how it looks" -> 2-3 (top, middle, bottom)
+  * Default -> 2-3
+
+Examples:
+"take a screenshot of https://example.com" -> 1-2 (you decide)
+"show me https://site.com" -> 2-3 (show different parts)
+"take 3 screenshots of different parts" -> 3
+"what does this look like?" -> 2-3 (show top and bottom)
+"screenshot" -> 1-2 (default)
+
+Respond with ONLY a number between 1-10: "1", "2", "3", etc.
+
+Decision: """
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
+        decision_text = decision_response.text.strip()
+        
+        # Extract number from response
+        number_match = re.search(r'(\d+)', decision_text)
+        if number_match:
+            count = int(number_match.group(1))
+            return max(1, min(10, count))
+        
+        # Default to 2-3 based on context
+        if 'different' in content or 'parts' in content or 'sections' in content:
+            return 3
+        elif 'look like' in content or 'show me' in content:
+            return 2
+        else:
+            return 1
+    except Exception as e:
+        handle_rate_limit_error(e)
+        # Fallback: default to 2
+        if 'different' in content or 'parts' in content:
+            return 3
+        return 2
+
+async def ai_decide_browser_actions(message: discord.Message, url: str) -> Tuple[List[str], bool]:
+    """AI decides what browser actions to perform (click, scroll, etc.)
+    
+    Args:
+        message: The Discord message
+        url: The URL to navigate to
+    
+    Returns:
+        Tuple of (list of action strings, whether to take screenshot)
+        Actions can be: ["click 'Sign In'", "scroll to bottom", "wait 3 seconds"]
+    """
+    content = (message.content or "").lower()
+    
+    actions = []
+    take_screenshot = True
+    
+    # Check for click requests
+    click_patterns = [
+        r"click\s+['\"]([^'\"]+)['\"]",
+        r"click\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+button|\s+link|\s+element|$)",
+        r"after\s+(?:you\s+)?click\s+(?:on\s+)?(?:the\s+)?['\"]?([^'\"]+?)['\"]?",
+    ]
+    
+    for pattern in click_patterns:
+        match = re.search(pattern, content)
+        if match:
+            element = match.group(1).strip()
+            if element and len(element) > 0:
+                actions.append(f"click '{element}'")
+                break
+    
+    # Check for scroll requests
+    if 'scroll' in content:
+        if 'bottom' in content:
+            actions.append('scroll to bottom')
+        elif 'top' in content:
+            actions.append('scroll to top')
+        else:
+            actions.append('scroll to bottom')
+    
+    # AI decision for complex actions
+    if not actions and ('then' in content or 'after' in content or 'and' in content):
+        decision_prompt = f"""User message: "{message.content}"
+
+URL: {url}
+
+What browser actions should be performed before taking screenshot?
+- Extract click actions: "click 'Sign In'", "click the button"
+- Extract scroll actions: "scroll to bottom", "scroll to top"
+- Extract wait actions: "wait 3 seconds"
+- If user says "then screenshot" or "after clicking X, screenshot" -> extract the actions before screenshot
+
+Examples:
+"go to https://site.com and click 'Sign In' then screenshot" -> ["click 'Sign In'"]
+"visit https://site.com, scroll to bottom, and take a screenshot" -> ["scroll to bottom"]
+"click the button then screenshot" -> ["click 'button'"]
+"just screenshot" -> []
+
+Respond with JSON array of action strings, or [] if no actions.
+Format: ["action1", "action2"]
+Example: ["click 'Sign In'", "scroll to bottom"]
+
+Actions: """
+        
+        try:
+            decision_model = get_fast_model()
+            decision_response = await queued_generate_content(decision_model, decision_prompt)
+            response_text = decision_response.text.strip()
+            
+            # Try to parse JSON
+            try:
+                parsed_actions = json.loads(response_text)
+                if isinstance(parsed_actions, list):
+                    actions.extend(parsed_actions)
+            except:
+                # Try to extract actions from text
+                if 'click' in response_text.lower():
+                    click_match = re.search(r"click\s+['\"]([^'\"]+)['\"]", response_text)
+                    if click_match:
+                        actions.append(f"click '{click_match.group(1)}'")
+        except Exception as e:
+            handle_rate_limit_error(e)
+    
+    return actions, take_screenshot
+
 def _clean_document_text(text: str) -> str:
     if not text:
         return ""
@@ -2492,6 +3124,9 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
     import time
     start_time = time.time()
     
+    # Initialize screenshots list at function start
+    screenshot_attachments = []
+    
     try:
         # Get user info
         user_id = str(message.author.id)
@@ -2662,6 +3297,7 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Create or redraft professional PDF/Word documents on demand without breaking existing structure
 - ✅ **Personality Profiles**: Use `/profile` to view detailed personality assessments for yourself or others
 - ✅ **Image Search**: Search Google Images and attach relevant images to responses
+- ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it". You can open ANY link, click ANY button, scroll, wait, and take screenshots of ANY page.
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
@@ -2676,6 +3312,8 @@ When users ask "what can you do?", "what are your capabilities?", "what can you 
 - "I can help with coding, debugging, and technical questions"
 - "I can search specific platforms like Reddit, YouTube, Instagram, etc."
 - "I can read and summarize web pages and documents"
+- "I can take screenshots of any website - just share a link and ask me to screenshot it!"
+- "I can visit websites, click buttons, scroll pages, and take screenshots of what I see"
 Feel free to be creative and enthusiastic when describing your capabilities!
 
 SLASH COMMANDS AVAILABLE (ONLY THESE TWO EXIST):
@@ -2707,6 +3345,7 @@ Examples of correct responses:
 
 If someone asks "can you make images?" or "generate an image" - say yes and help them shape the prompt.
 If someone asks for a PDF/Word document (new or edited) - say yes, read any provided materials, and deliver a polished document.
+If someone asks "can you take a screenshot?" or "screenshot this link" - say yes, visit the link, and take screenshots. You can take multiple screenshots at different scroll positions, click buttons before screenshotting, or just screenshot the page as-is. You decide how many screenshots to take based on what makes sense (default 2-3 for long pages, 1 for simple pages, or follow user's explicit request like "take 4 screenshots").
 
 IMPORTANT - PERSONALITY PROFILE COMMAND (THIS IS HOW MEMORY IS VIEWED):
 - The `/profile` command is how users view their memory/profile. It shows a neat, organized view of all personality data including summary, request history, topics of interest, communication style, honest impressions, and patterns/predictions.
@@ -2947,6 +3586,9 @@ Decision: """
                 
                 should_fetch_urls = await decide_if_urls_relevant()
                 
+                # Check if screenshot is needed (AI-driven decision)
+                screenshot_needed = await ai_decide_screenshot_needed(message, urls)
+                
                 if should_fetch_urls:
                     print(f"🌐 [{username}] URLs are relevant - fetching content...")
                     # Fetch all URLs (limit to 5 to avoid too many requests)
@@ -2962,6 +3604,58 @@ Decision: """
                             print(f"❌ [{username}] Error fetching {url}: {e}")
                 else:
                     print(f"⏭️  [{username}] URLs not relevant/useful - skipping fetch")
+                
+                # Handle screenshots if needed (separate from text fetching)
+                screenshot_attachments = []
+                if screenshot_needed and PLAYWRIGHT_AVAILABLE:
+                    # Take screenshots of first URL (limit to 1 URL for screenshots to avoid overload)
+                    screenshot_url = urls[0]
+                    print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
+                    
+                    try:
+                        # AI decides: how many screenshots and what browser actions
+                        screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
+                        browser_actions, should_take_screenshot = await ai_decide_browser_actions(message, screenshot_url)
+                        
+                        print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
+                        
+                        if browser_actions:
+                            # Perform actions and take screenshots
+                            screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                            screenshot_attachments.extend(screenshot_images)
+                        else:
+                            # Just take multiple screenshots at different scroll positions
+                            screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
+                            screenshot_attachments.extend(screenshot_images)
+                        
+                        # Compress screenshots for Discord
+                        compressed_screenshots = []
+                        for idx, screenshot_bytes in enumerate(screenshot_attachments):
+                            if screenshot_bytes:
+                                try:
+                                    # Read image
+                                    screenshot_bytes.seek(0)
+                                    from PIL import Image as PILImage
+                                    img = PILImage.open(screenshot_bytes)
+                                    
+                                    # Compress
+                                    compressed = compress_image_for_discord(img, max_width=1920, max_height=1080, quality=90)
+                                    compressed_screenshots.append(compressed)
+                                    print(f"✅ [{username}] Screenshot {idx + 1} compressed ({compressed.getvalue().__len__()} bytes)")
+                                except Exception as e:
+                                    print(f"⚠️  [{username}] Error compressing screenshot {idx + 1}: {e}")
+                                    # Use uncompressed as fallback
+                                    screenshot_bytes.seek(0)
+                                    compressed_screenshots.append(screenshot_bytes)
+                        
+                        screenshot_attachments = compressed_screenshots
+                        print(f"✅ [{username}] Captured {len(screenshot_attachments)} screenshot(s)")
+                        
+                    except Exception as e:
+                        print(f"❌ [{username}] Error taking screenshots: {e}")
+                        import traceback
+                        print(f"❌ [{username}] Screenshot traceback: {traceback.format_exc()}")
+                        screenshot_attachments = []
         
         # For summaries, skip document processing from current message (we just mention them)
         if wants_summary:
@@ -3880,7 +4574,10 @@ Now decide: "{message.content}" -> """
         print(f"📤 [{username}]   - Generated images: {len(generated_images) if generated_images else 0}")
         print(f"📤 [{username}]   - Generated documents: {len(generated_documents) if generated_documents else 0}")
         print(f"📤 [{username}]   - Searched images: {len(searched_images) if searched_images else 0}")
-        return (ai_response, generated_images, generated_documents, searched_images)
+        print(f"📤 [{username}]   - Screenshots: {len(screenshot_attachments) if 'screenshot_attachments' in locals() else 0}")
+        
+        # Include screenshots in return (screenshots is a list of BytesIO)
+        return (ai_response, generated_images, generated_documents, searched_images, screenshot_attachments)
         
     except Exception as e:
         print(f"Error generating response: {e}")
@@ -3919,7 +4616,7 @@ Now decide: "{message.content}" -> """
                 "Please try again, or rephrase your request if the problem persists."
             )
         
-        return (user_message, None, None, [])
+        return (user_message, None, None, [], [])
 
 @bot.event
 async def on_ready():
@@ -3932,6 +4629,12 @@ async def on_ready():
     await db.initialize()
     print('Memory systems online')
     
+    # Initialize Playwright if available
+    if PLAYWRIGHT_AVAILABLE:
+        print('🌐 Browser automation ready (Playwright)')
+    else:
+        print('⚠️  Browser automation unavailable (Playwright not installed)')
+    
     # Sync slash commands
     try:
         synced = await bot.tree.sync()
@@ -3942,7 +4645,7 @@ async def on_ready():
         print(f'Failed to sync slash commands: {e}')
         import traceback
         print(traceback.format_exc())
-    
+
     # Store server structure for all existing servers (background, no latency)
     for guild in bot.guilds:
         asyncio.create_task(store_guild_structure(guild))
@@ -4275,29 +4978,48 @@ async def on_message(message: discord.Message):
                 print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                 if isinstance(result, tuple):
                     print(f"📥 [{message.author.display_name}] Result is tuple with {len(result)} items")
-                    if len(result) == 4:
+                    if len(result) == 5:
+                        response, generated_images, generated_documents, searched_images, screenshots = result
+                    elif len(result) == 4:
                         response, generated_images, generated_documents, searched_images = result
+                        screenshots = []
                     elif len(result) == 3:
                         response, generated_images, generated_documents = result
                         searched_images = []
+                        screenshots = []
                     elif len(result) == 2:
                         response, generated_images = result
                         generated_documents = None
                         searched_images = []
+                        screenshots = []
                     else:
                         response = result[0] if result else None
                         generated_images = result[1] if len(result) > 1 else None
                         generated_documents = result[2] if len(result) > 2 else None
                         searched_images = result[3] if len(result) > 3 else []
+                        screenshots = result[4] if len(result) > 4 else []
                 else:
                     response = result
                     generated_images = None
                     generated_documents = None
                     searched_images = []
                 
-                # Prepare files to attach (searched images + generated images - these go with the text response)
+                # Prepare files to attach (searched images + generated images + screenshots - these go with the text response)
                 # Try without compression first (original quality)
                 files_to_attach = []
+                
+                # Add screenshots first (they're already compressed)
+                if 'screenshots' in locals() and screenshots:
+                    print(f"📎 [{message.author.display_name}] Adding {len(screenshots)} screenshot(s) to attachments")
+                    for idx, screenshot_bytes in enumerate(screenshots):
+                        try:
+                            screenshot_bytes.seek(0)
+                            file = discord.File(fp=screenshot_bytes, filename=f'screenshot_{idx+1}.png')
+                            files_to_attach.append(file)
+                            print(f"📎 [{message.author.display_name}] ✅ Screenshot {idx+1} added")
+                        except Exception as screenshot_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to prepare screenshot {idx+1}: {screenshot_error}")
+                
                 if searched_images:
                     for idx, img in enumerate(searched_images):
                         try:
@@ -4949,6 +5671,8 @@ async def help_command(interaction: discord.Interaction):
             "• **Analyze Images** - Share images and I'll analyze them\n"
             "• **Search the Internet** - Get current information from the web\n"
             "• **Platform-Specific Search** - Search Reddit, YouTube, Instagram, etc.\n"
+            "• **Take Screenshots** - Visit any link and screenshot web pages (I decide how many and what actions to take!)\n"
+            "• **Browser Automation** - Click buttons, scroll pages, navigate websites\n"
             "• **Code Help** - Write, debug, and explain code\n"
             "• **Create Documents** - Generate PDF/Word files from code or content\n"
             "• **Read Web Pages** - Share links and I'll read the content\n"
@@ -4974,6 +5698,9 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`@{bot_name} what can you do?`\n"
             "`@{bot_name} generate an image of a sunset`\n"
+            "`@{bot_name} go to https://example.com and take a screenshot`\n"
+            "`@{bot_name} what does https://google.com look like?`\n"
+            "`@{bot_name} take 3 screenshots of https://site.com`\n"
             "`@{bot_name} debug this python code`\n"
             "`@{bot_name} search reddit for python tips`\n"
             "`@{bot_name} create a PDF with this code`"
@@ -5089,6 +5816,12 @@ async def generate_image_command(ctx, *, prompt: str):
                 await ctx.send("Failed to generate image. Try again!")
         except Exception as e:
             await ctx.send(f"Image generation error: {str(e)}")
+
+@bot.event
+async def on_disconnect():
+    """Cleanup on disconnect"""
+    if PLAYWRIGHT_AVAILABLE:
+        await close_browser()
 
 if __name__ == '__main__':
     bot.run(os.getenv('DISCORD_TOKEN'))
