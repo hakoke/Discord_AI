@@ -1679,10 +1679,46 @@ async def fetch_webpage_content(url: str) -> str:
         return None
 
 def extract_urls(text: str) -> List[str]:
-    """Extract URLs from text"""
-    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    urls = re.findall(url_pattern, text)
-    # Remove trailing punctuation from URLs
+    """Extract URLs from text - handles both http(s):// URLs and domain names without protocol"""
+    urls = []
+    
+    # First, try to find URLs with protocol (http:// or https://)
+    url_pattern_with_protocol = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    protocol_urls = re.findall(url_pattern_with_protocol, text)
+    urls.extend(protocol_urls)
+    
+    # Also find domain names without protocol (e.g., "bespoke-ae.com", "www.example.com")
+    # Pattern: word characters, hyphens, dots (must have at least one dot)
+    # Examples: example.com, www.example.com, subdomain.example.com, example.co.uk
+    domain_pattern = r'(?:^|\s)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?:[/?#][^\s]*)?'
+    domain_matches = re.finditer(domain_pattern, text, re.IGNORECASE)
+    
+    for match in domain_matches:
+        domain = match.group(0).strip()
+        # Skip if it looks like an email address (contains @)
+        if '@' in domain:
+            continue
+        # Skip if it's too short (likely not a URL)
+        if len(domain) < 4:
+            continue
+        # Must have at least one dot (domain.com)
+        if '.' not in domain:
+            continue
+        # Remove trailing punctuation
+        while domain and domain[-1] in '.,;!?':
+            domain = domain[:-1]
+        # Skip if domain itself is too short after cleaning
+        if len(domain) < 4:
+            continue
+        # Add https:// if no protocol
+        if not domain.startswith(('http://', 'https://')):
+            domain = f'https://{domain}'
+        # Only add if not already in urls list
+        if domain not in urls:
+            urls.append(domain)
+            print(f"🔗 [URL EXTRACTION] Found domain without protocol: {domain}")
+    
+    # Remove trailing punctuation from all URLs
     cleaned_urls = []
     for url in urls:
         # Remove common trailing punctuation
@@ -1690,6 +1726,7 @@ def extract_urls(text: str) -> List[str]:
             url = url[:-1]
         if url:
             cleaned_urls.append(url)
+    
     return cleaned_urls
 
 # ============================================================================
@@ -3569,7 +3606,8 @@ CURRENT CONVERSATION CONTEXT:
                                 mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
                             image_parts.append({
                                 'mime_type': mime_type,
-                                'data': image_data
+                                'data': image_data,
+                                'is_current': True  # Mark as current (from current message)
                             })
                             print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
                     except Exception as e:
@@ -3592,7 +3630,8 @@ CURRENT CONVERSATION CONTEXT:
                                         mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
                                     image_parts.append({
                                         'mime_type': mime_type,
-                                        'data': image_data
+                                        'data': image_data,
+                                        'is_current': False  # Mark as OLD image from previous message
                                     })
                                     print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
                             except Exception as e:
@@ -3605,7 +3644,12 @@ CURRENT CONVERSATION CONTEXT:
         # Extract URLs from message and fetch content if relevant
         webpage_contents = []
         if message.content:
+            # Extract URLs from current message first - this has highest priority
             urls = extract_urls(message.content)
+            urls_found_in_current_message = len(urls) > 0
+            
+            if urls_found_in_current_message:
+                print(f"🔗 [{username}] Found {len(urls)} URL(s) in CURRENT message: {', '.join([url[:50] for url in urls[:3]])}")
             
             # CRITICAL: Check if user wants image search BEFORE looking for URLs in context
             # If they're asking for "images of X", don't use URLs from context - they want image search, not screenshots
@@ -3615,8 +3659,9 @@ CURRENT CONVERSATION CONTEXT:
             
             # If no URLs in current message but user wants to interact with a page (click, scroll, etc.)
             # Check replied message FIRST, then conversation context for URLs from recent messages
-            # BUT skip this if user explicitly wants image search (they don't want screenshots from context URLs)
-            if not urls and not wants_image_search:
+            # BUT skip this if user explicitly wants image search OR if URLs were found in current message
+            # IMPORTANT: Only use context URLs if NO URLs were found in the current message
+            if not urls_found_in_current_message and not wants_image_search:
                 interaction_keywords = ['click', 'scroll', 'show me', 'screenshot', 'take a screenshot', 'after you', 'then']
                 has_interaction_request = any(keyword in content_lower for keyword in interaction_keywords)
                 
@@ -3894,8 +3939,11 @@ Screenshot {idx + 1}:"""
                         }
         
         # Add screenshots to image_parts so AI can see them
+        # Track how many NEW screenshots were taken in this request (for AI instructions)
+        new_screenshot_count = 0
         if screenshot_attachments and len(screenshot_attachments) > 0:
-            print(f"👁️  [{username}] Adding {len(screenshot_attachments)} screenshot(s) to image_parts for AI analysis")
+            new_screenshot_count = len(screenshot_attachments)
+            print(f"👁️  [{username}] Adding {len(screenshot_attachments)} NEW screenshot(s) to image_parts for AI analysis")
             for idx, screenshot_bytes in enumerate(screenshot_attachments):
                 try:
                     screenshot_bytes.seek(0)
@@ -3903,6 +3951,7 @@ Screenshot {idx + 1}:"""
                         'mime_type': 'image/png',
                         'data': screenshot_bytes.read(),
                         'source': 'screenshot',
+                        'is_current': True,  # Mark as NEW screenshot from current request
                         'index': idx + 1
                     })
                     screenshot_bytes.seek(0)  # Reset for later use
@@ -4454,7 +4503,13 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         if 'screenshot_attachments_metadata' in locals() and screenshot_attachments_metadata:
             metadata = screenshot_attachments_metadata
             if metadata.get('count', 0) > 0:
-                response_prompt += f"\n\n📸 SCREENSHOT STATUS:\n- You requested {metadata.get('requested', 0)} screenshot(s) of {metadata.get('url', 'the URL')}\n- You ACTUALLY captured {metadata.get('count', 0)} screenshot(s) (some may have failed or timed out)\n"
+                screenshot_url_used = metadata.get('url', 'the URL')
+                user_requested_url = message.content
+                # Try to extract what URL the user asked for from their message
+                user_urls = extract_urls(user_requested_url)
+                user_requested_url_display = user_urls[0] if user_urls else "the URL from their message"
+                
+                response_prompt += f"\n\n📸 SCREENSHOT STATUS:\n- User asked you to visit/show: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- You requested {metadata.get('requested', 0)} screenshot(s) and ACTUALLY captured {metadata.get('count', 0)} screenshot(s)\n\n⚠️  CRITICAL - VERIFY SCREENSHOTS MATCH USER REQUEST:\n- The user asked about: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- LOOK at the screenshots and describe WHAT YOU ACTUALLY SEE in them\n- The screenshots must be of {screenshot_url_used} - if they show a different website, mention this as an error\n- DO NOT describe a different website than what's in the screenshots - describe ONLY what you see\n- If the screenshots show {screenshot_url_used}, describe that website accurately\n- If you see something else in the screenshots, tell the user there's a mismatch\n"
                 
                 if metadata.get('analysis'):
                     error_screenshots = [s for s in metadata['analysis'] if s.get('is_error', False)]
@@ -4523,7 +4578,17 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         
         # Add images to prompt if present
         if image_parts:
-            response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+            # Count NEW screenshots vs OLD images from previous messages
+            new_screenshots = [img for img in image_parts if img.get('source') == 'screenshot' and img.get('is_current', False)]
+            old_images = [img for img in image_parts if not img.get('is_current', True)]
+            total_images = len(image_parts)
+            
+            if new_screenshots and len(new_screenshots) > 0:
+                # User took NEW screenshots in this request - only reference those!
+                response_prompt += f"\n\n📸 CRITICAL - NEW SCREENSHOTS TAKEN IN THIS REQUEST:\n- You just took {len(new_screenshots)} NEW screenshot(s) in response to the user's current request\n- There are {total_images} total images attached: {len(new_screenshots)} NEW screenshots + {len(old_images)} old images from previous messages\n\n⚠️  IMPORTANT - ONLY REFERENCE NEW SCREENSHOTS:\n- You MUST ONLY describe and reference the {len(new_screenshots)} NEW screenshot(s) you just took\n- DO NOT describe or reference old images from previous messages - the user only asked about the NEW screenshots\n- When labeling NEW screenshots, count ONLY from the NEW ones:\n  * The FIRST NEW screenshot = 'the first image' or 'the first screenshot'\n  * The SECOND NEW screenshot = 'the second image' or 'the second screenshot'\n  * And so on...\n- IGNORE old images from previous messages - they're only there for context, not to describe\n- The user asked you to take screenshots and show them - only show what you just captured, not old screenshots\n\nExample: If you took 2 new screenshots and there are 4 total images (2 old + 2 new), you should say:\n- 'The first image shows...' (referring to the FIRST NEW screenshot)\n- 'The second image shows...' (referring to the SECOND NEW screenshot)\n- DO NOT mention the old images unless the user explicitly asks about them"
+            else:
+                # No new screenshots, just regular image analysis
+                response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
             uploaded_files = []
             try:
                 content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts)
@@ -4838,6 +4903,9 @@ Now decide: "{message.content}" -> """
                                 # Extract document outputs if any
                                 new_ai_response, new_document_outputs = extract_document_outputs(new_ai_response)
                                 
+                                # Remove [IMAGE_NUMBERS: ...] marker from regenerated response (user shouldn't see this)
+                                new_ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', new_ai_response, flags=re.IGNORECASE).strip()
+                                
                                 # Update response
                                 ai_response = new_ai_response
                                 if new_document_outputs:
@@ -4856,6 +4924,9 @@ Now decide: "{message.content}" -> """
         if document_outputs:
             generated_documents = document_outputs
             print(f"📄 [{username}] Prepared {len(document_outputs)} document(s) for delivery")
+        
+        # Final cleanup: Remove [IMAGE_NUMBERS: ...] marker from response if still present (user shouldn't see this)
+        ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
         
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
