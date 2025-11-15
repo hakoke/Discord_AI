@@ -5774,58 +5774,24 @@ async def on_message(message: discord.Message):
     # (Removed the "let AI decide for all messages" section)
     
     if should_respond:
+        # Start typing indicator manager in background
+        typing_stop_event = asyncio.Event()
+        typing_task = None
         try:
-            # Start typing indicator manager in background
-            typing_stop_event = asyncio.Event()
+            typing_task = asyncio.create_task(
+                manage_typing_indicator(message.channel, typing_stop_event)
+            )
+            print(f"⌨️  [{message.author.display_name}] Typing indicator started")
+        except Exception as typing_start_error:
+            print(f"⚠️  [{message.author.display_name}] Failed to start typing indicator: {typing_start_error}")
             typing_task = None
-            try:
-                typing_task = asyncio.create_task(
-                    manage_typing_indicator(message.channel, typing_stop_event)
-                )
-                print(f"⌨️  [{message.author.display_name}] Typing indicator started")
-            except Exception as typing_start_error:
-                print(f"⚠️  [{message.author.display_name}] Failed to start typing indicator: {typing_start_error}")
-                typing_task = None
-            
-            try:
-                # Generate response (typing indicator runs in background)
-                result = await generate_response(message, force_response)
-            finally:
-                # Stop typing indicator
-                typing_stop_event.set()
-                if typing_task:
-                    try:
-                        await asyncio.wait_for(typing_task, timeout=1.0)
-                    except asyncio.TimeoutError:
-                        typing_task.cancel()
-                        try:
-                            await typing_task
-                        except asyncio.CancelledError:
-                            pass
-                    except Exception as e:
-                        print(f"⚠️  Error stopping typing indicator: {e}")
-        except Exception as e:
-            print(f"❌ Error in on_message handler: {e}")
-            import traceback
-            print(f"❌ Traceback:\n{traceback.format_exc()}")
-            # Try to send a user-friendly error message
-            try:
-                error_str = str(e).lower()
-                if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy']):
-                    await message.channel.send(
-                        "I can't fulfill that request as it violates content safety policies. "
-                        "Please try rephrasing your request."
-                    )
-                else:
-                    await message.channel.send(
-                        "Sorry, I encountered an error processing your request. Please try again."
-                    )
-            except:
-                pass  # If we can't send error message, just log it
-            return
         
-        print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
-        if result:
+        try:
+            # Generate response (typing indicator runs in background)
+            result = await generate_response(message, force_response)
+            
+            print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
+            if result:
                 # Check if result includes generated images
                 print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                 if isinstance(result, tuple):
@@ -6036,6 +6002,38 @@ async def on_message(message: discord.Message):
                         doc_bytes.seek(0)
                         file = discord.File(fp=doc_bytes, filename=doc["filename"])
                         await message.channel.send(file=file, reference=message)
+        except Exception as e:
+            print(f"❌ Error in on_message handler: {e}")
+            import traceback
+            print(f"❌ Traceback:\n{traceback.format_exc()}")
+            # Try to send a user-friendly error message
+            try:
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy']):
+                    await message.channel.send(
+                        "I can't fulfill that request as it violates content safety policies. "
+                        "Please try rephrasing your request."
+                    )
+                else:
+                    await message.channel.send(
+                        "Sorry, I encountered an error processing your request. Please try again."
+                    )
+            except:
+                pass  # If we can't send error message, just log it
+        finally:
+            # Stop typing indicator after all messages are sent
+            typing_stop_event.set()
+            if typing_task:
+                try:
+                    await asyncio.wait_for(typing_task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    typing_task.cancel()
+                    try:
+                        await typing_task
+                    except asyncio.CancelledError:
+                        pass
+                except Exception as e:
+                    print(f"⚠️  Error stopping typing indicator: {e}")
     
     await bot.process_commands(message)
 
