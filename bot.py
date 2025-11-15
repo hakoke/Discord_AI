@@ -3706,13 +3706,129 @@ Decision: """
                                     compressed_screenshots.append(screenshot_bytes)
                         
                         screenshot_attachments = compressed_screenshots
-                        print(f"✅ [{username}] Captured {len(screenshot_attachments)} screenshot(s)")
+                        actual_count = len(screenshot_attachments)
+                        print(f"✅ [{username}] Captured {actual_count} screenshot(s) (requested {screenshot_count})")
+                        
+                        # Analyze screenshots to detect errors/issues
+                        screenshot_analysis = []
+                        if screenshot_attachments:
+                            print(f"🔍 [{username}] Analyzing {actual_count} screenshot(s) for errors/issues...")
+                            for idx, screenshot_bytes in enumerate(screenshot_attachments):
+                                try:
+                                    screenshot_bytes.seek(0)
+                                    # Analyze screenshot for error pages
+                                    analysis_prompt = f"""Analyze this screenshot. Does it show an error page, block message, or access denied? 
+
+Common patterns to look for:
+- "You've been blocked" or "blocked by network security"
+- "Access denied" or "Forbidden"
+- Error messages like "403", "404", "500", "Timeout"
+- Captcha challenges
+- Login required messages
+- "This page isn't working" or similar errors
+
+Respond with JSON:
+{{"is_error": true/false, "error_type": "blocked/access_denied/timeout/login_required/none", "description": "brief description of what the screenshot shows"}}
+
+Screenshot {idx + 1}:"""
+                                    
+                                    # Prepare image for vision model
+                                    screenshot_bytes.seek(0)
+                                    from PIL import Image as PILImage
+                                    img = PILImage.open(screenshot_bytes)
+                                    
+                                    # Convert to format Gemini can use
+                                    import io
+                                    img_bytes_io = io.BytesIO()
+                                    img.save(img_bytes_io, format='PNG')
+                                    img_bytes_io.seek(0)
+                                    
+                                    # Use vision model to analyze
+                                    vision_model = get_vision_model()
+                                    content_parts = [
+                                        analysis_prompt,
+                                        {'mime_type': 'image/png', 'data': img_bytes_io.read()}
+                                    ]
+                                    
+                                    analysis_response = await queued_generate_content(vision_model, content_parts)
+                                    analysis_text = analysis_response.text.strip()
+                                    
+                                    # Try to parse JSON from response
+                                    import json
+                                    try:
+                                        # Extract JSON from markdown code blocks if present
+                                        if '```json' in analysis_text:
+                                            json_start = analysis_text.find('```json') + 7
+                                            json_end = analysis_text.find('```', json_start)
+                                            analysis_text = analysis_text[json_start:json_end].strip()
+                                        elif '```' in analysis_text:
+                                            json_start = analysis_text.find('```') + 3
+                                            json_end = analysis_text.find('```', json_start)
+                                            analysis_text = analysis_text[json_start:json_end].strip()
+                                        
+                                        analysis_data = json.loads(analysis_text)
+                                        screenshot_analysis.append({
+                                            'index': idx + 1,
+                                            'is_error': analysis_data.get('is_error', False),
+                                            'error_type': analysis_data.get('error_type', 'none'),
+                                            'description': analysis_data.get('description', '')
+                                        })
+                                        print(f"🔍 [{username}] Screenshot {idx + 1}: {'❌ ERROR - ' + analysis_data.get('error_type', 'unknown') if analysis_data.get('is_error') else '✅ OK'}")
+                                    except:
+                                        # Fallback: simple text analysis
+                                        is_error = any(keyword in analysis_text.lower() for keyword in ['blocked', 'error', 'denied', 'forbidden', 'captcha', 'login required'])
+                                        screenshot_analysis.append({
+                                            'index': idx + 1,
+                                            'is_error': is_error,
+                                            'error_type': 'unknown' if is_error else 'none',
+                                            'description': analysis_text[:200]
+                                        })
+                                        print(f"🔍 [{username}] Screenshot {idx + 1}: {'❌ ERROR detected' if is_error else '✅ OK'}")
+                                except Exception as analysis_error:
+                                    print(f"⚠️  [{username}] Error analyzing screenshot {idx + 1}: {analysis_error}")
+                                    screenshot_analysis.append({
+                                        'index': idx + 1,
+                                        'is_error': False,
+                                        'error_type': 'analysis_failed',
+                                        'description': 'Could not analyze screenshot'
+                                    })
+                        
+                        # Store analysis for later use in prompt
+                        screenshot_attachments_metadata = {
+                            'count': actual_count,
+                            'requested': screenshot_count,
+                            'analysis': screenshot_analysis,
+                            'url': screenshot_url
+                        }
                         
                     except Exception as e:
                         print(f"❌ [{username}] Error taking screenshots: {e}")
                         import traceback
                         print(f"❌ [{username}] Screenshot traceback: {traceback.format_exc()}")
                         screenshot_attachments = []
+                        screenshot_attachments_metadata = {
+                            'count': 0,
+                            'requested': screenshot_count if 'screenshot_count' in locals() else 0,
+                            'analysis': [],
+                            'url': screenshot_url if 'screenshot_url' in locals() else '',
+                            'error': str(e)
+                        }
+        
+        # Add screenshots to image_parts so AI can see them
+        if screenshot_attachments and len(screenshot_attachments) > 0:
+            print(f"👁️  [{username}] Adding {len(screenshot_attachments)} screenshot(s) to image_parts for AI analysis")
+            for idx, screenshot_bytes in enumerate(screenshot_attachments):
+                try:
+                    screenshot_bytes.seek(0)
+                    image_parts.append({
+                        'mime_type': 'image/png',
+                        'data': screenshot_bytes.read(),
+                        'source': 'screenshot',
+                        'index': idx + 1
+                    })
+                    screenshot_bytes.seek(0)  # Reset for later use
+                except Exception as img_error:
+                    print(f"⚠️  [{username}] Error adding screenshot {idx + 1} to image_parts: {img_error}")
         
         # For summaries, skip document processing from current message (we just mention them)
         if wants_summary:
@@ -4243,6 +4359,28 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 attachment_info += f"\n- Images shared in conversation: {img_list}"
             
             response_prompt += f"\n\nCRITICAL: CONVERSATION SUMMARY REQUEST\n- The user wants you to summarize the last {len(context_messages)} messages from the conversation.{attachment_info}\n- Provide a clear, organized summary of the key topics, decisions, and important points discussed.\n- Group related topics together and highlight any action items or conclusions.\n- Mention any documents or images that were shared and what they were about (if relevant to the conversation).\n- Be concise but comprehensive - capture the essence of the conversation.\n- If there are multiple people in the conversation, note who said what when relevant.\n- Format the summary in a readable way (use bullet points or sections if helpful)."
+        
+        # Add screenshot information if screenshots were taken
+        if 'screenshot_attachments_metadata' in locals() and screenshot_attachments_metadata:
+            metadata = screenshot_attachments_metadata
+            if metadata.get('count', 0) > 0:
+                response_prompt += f"\n\n📸 SCREENSHOT STATUS:\n- You requested {metadata.get('requested', 0)} screenshot(s) of {metadata.get('url', 'the URL')}\n- You ACTUALLY captured {metadata.get('count', 0)} screenshot(s) (some may have failed or timed out)\n"
+                
+                if metadata.get('analysis'):
+                    error_screenshots = [s for s in metadata['analysis'] if s.get('is_error', False)]
+                    if error_screenshots:
+                        response_prompt += f"\n⚠️  CRITICAL - ERROR DETECTED IN SCREENSHOTS:\n"
+                        for err in error_screenshots:
+                            response_prompt += f"- Screenshot {err.get('index', '?')}: Shows an ERROR PAGE ({err.get('error_type', 'unknown')}) - {err.get('description', '')}\n"
+                        response_prompt += "\nIMPORTANT: You MUST tell the user that the screenshots show error/block pages, NOT the actual content. Don't pretend everything worked! Be honest about what happened.\n"
+                    
+                    if metadata.get('count', 0) < metadata.get('requested', 0):
+                        response_prompt += f"\n⚠️  NOTE: You requested {metadata.get('requested', 0)} screenshot(s) but only {metadata.get('count', 0)} were successfully captured. Mention this to the user - some may have failed due to timeouts or errors.\n"
+                
+                if metadata.get('error'):
+                    response_prompt += f"\n❌ SCREENSHOT CAPTURE ERROR: {metadata.get('error', 'Unknown error')}\nYou must inform the user that screenshot capture failed completely.\n"
+            elif metadata.get('error'):
+                response_prompt += f"\n❌ SCREENSHOT CAPTURE FAILED: {metadata.get('error', 'Unknown error')}\nYou must inform the user that no screenshots could be captured.\n"
         
         if image_search_results and len(image_search_results) > 0:
             # Add reminder about proper image labeling when images are available
