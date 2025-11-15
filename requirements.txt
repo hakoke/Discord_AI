@@ -12,4 +12,6 @@ gunicorn==21.2.0
 pypdf==4.2.0
 python-docx==0.8.11
 fpdf2==2.7.9
+playwright==1.40.0
+beautifulsoup4==4.12.2
 

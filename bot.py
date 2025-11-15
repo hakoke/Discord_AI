@@ -17,7 +17,7 @@ from PIL import Image
 from io import BytesIO
 from functools import lru_cache
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 try:
     from pypdf import PdfReader
@@ -43,11 +43,18 @@ except ImportError:
     BEAUTIFULSOUP_AVAILABLE = False
     print("⚠️  BeautifulSoup not available - HTML parsing disabled. Install with: pip install beautifulsoup4")
 
+# Handle Playwright imports conditionally
+if TYPE_CHECKING:
+    from playwright.async_api import Browser
+else:
+    Browser = None
+
 try:
     from playwright.async_api import async_playwright, Page, Browser
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+    Browser = None  # Set to None if not available
     print("⚠️  Playwright not available - Screenshot capability disabled. Install with: pip install playwright && playwright install chromium")
 
 from database import Database
@@ -1691,9 +1698,9 @@ def extract_urls(text: str) -> List[str]:
 
 # Global browser instance for reuse (lazy initialization)
 _playwright_instance = None
-_browser: Optional[Browser] = None
+_browser: Optional[Any] = None  # Using Any instead of Browser to avoid import issues
 
-async def get_browser() -> Optional[Browser]:
+async def get_browser() -> Optional[Any]:
     """Get or create a browser instance (reused across requests)"""
     global _playwright_instance, _browser
     
@@ -4632,6 +4639,31 @@ async def on_ready():
     # Initialize Playwright if available
     if PLAYWRIGHT_AVAILABLE:
         print('🌐 Browser automation ready (Playwright)')
+        # Try to install browsers in background (for Railway/deployment)
+        async def install_playwright_browsers():
+            """Install Playwright browsers in background"""
+            try:
+                import subprocess
+                import sys
+                print('📦 Installing Playwright browsers (this may take a minute)...')
+                result = subprocess.run(
+                    [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                if result.returncode == 0:
+                    print('✅ Playwright browsers installed successfully')
+                else:
+                    print(f'⚠️  Playwright browser installation returned code {result.returncode}')
+                    if result.stderr:
+                        print(f'   Error: {result.stderr[:200]}')
+            except Exception as e:
+                print(f'⚠️  Could not auto-install Playwright browsers: {e}')
+                print('   You may need to run: playwright install chromium')
+        
+        # Run browser installation in background (non-blocking)
+        asyncio.create_task(install_playwright_browsers())
     else:
         print('⚠️  Browser automation unavailable (Playwright not installed)')
     
