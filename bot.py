@@ -4310,7 +4310,98 @@ Return ONLY the search query, nothing else:"""
             user_query_lower = (message.content or "").lower()
             search_query_lower = (image_search_query or "").lower()
             
-            consciousness_prompt += f"\n\nGOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':\n{image_list_text}\n\n⚠️ IMPORTANT - PROVIDING LINKS:\n- If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to this image', etc., you MUST provide the actual image URL from the search results above.\n- Each image has a URL listed (Image URL: ...). Use that exact URL when asked.\n- Format: Output plain URLs only (no markdown like [text](url)), just the URL directly so Discord makes it clickable. DO NOT duplicate links - show each URL only once.\n- You can reference specific images by their number (e.g., 'Image #3 is from: https://example.com/image.jpg').\n\n🤖 FULLY AI-DRIVEN IMAGE SELECTION - YOU HAVE COMPLETE CONTROL:\n\nYOUR DECISIONS (ALL AI-DRIVEN, NO HARDCODING):\n1. HOW MANY images to include: You decide 0-10 images (your choice, based on what makes sense and what the user requests)\n2. WHICH images to select: You analyze and choose the most relevant images from the list above\n3. WHICH image matches WHICH item: You intelligently match images to items you're discussing\n4. HOW to label them: You label them correctly (first, second, third, etc.) based on YOUR selection order\n\nCRITICAL - YOU DECIDE EVERYTHING:\n\n1. NUMBER OF IMAGES (YOUR CHOICE):\n   - You can choose 0 images if none are relevant (just don't include [IMAGE_NUMBERS: ...])\n   - You can choose 1 image if only one is relevant\n   - You can choose 2-10 images if multiple are relevant\n   - Maximum is 10 images (Discord's attachment limit), but YOU decide how many (0-10)\n   - If the user explicitly asks for a specific number (e.g., "5 images"), respect their request and select that many\n   - NO minimum requirement - you can choose 0 if appropriate\n\n2. WHICH IMAGES TO SELECT (YOUR ANALYSIS):\n   - Analyze each image's title and URL from the search results above\n   - Determine relevance to the user's request\n   - Select the images YOU think are most relevant\n   - You make the decision - no hardcoded rules\n\n3. MATCHING IMAGES TO ITEMS (YOUR INTELLIGENCE):\n   - If user asks for 'top 3 malls with an image of each':\n     * YOU analyze which image best represents the first mall\n     * YOU analyze which image best represents the second mall\n     * YOU analyze which image best represents the third mall\n     * YOU select them in order: first mall's image first, second mall's image second, etc.\n   - You match based on titles, URLs, and your understanding - fully AI-driven\n\n4. LABELING (YOUR RESPONSIBILITY):\n   - The FIRST image YOU select = label it 'the first image' or 'the first photo'\n   - The SECOND image YOU select = label it 'the second image' or 'the second photo'\n   - The THIRD image YOU select = label it 'the third image' or 'the third photo'\n   - You MUST know which images you selected and label them correctly\n   - Match labels to items: 'The first image shows [first item]', 'The second image displays [second item]'\n\n5. SELECTION FORMAT:\n   - To include images, add [IMAGE_NUMBERS: X,Y,Z] at the END of your response\n   - X, Y, Z are image numbers (1-{len(image_search_results)}) from the search results above\n   - Order matters: first number = first image, second number = second image, etc.\n   - If you don't want any images, simply don't include [IMAGE_NUMBERS: ...]\n\n6. EXAMPLES OF YOUR DECISIONS:\n   \n   Example 1 - User: 'top 3 malls with an image of each'\n   YOUR PROCESS:\n   a) YOU analyze: Find images for Dubai Mall (#1), Mall of Emirates (#2), Yas Mall (#3)\n   b) YOU decide: Select 3 images (one for each mall)\n   c) YOU choose: [IMAGE_NUMBERS: 1, 4, 6] (if those match best)\n   d) YOU label: 'The first image shows The Dubai Mall...', 'The second image displays Mall of the Emirates...', 'The third image captures Yas Mall...'\n   \n   Example 2 - User: 'show me pictures of cats'\n   YOUR PROCESS:\n   a) YOU analyze: Multiple cat images available\n   b) YOU decide: Maybe 2-3 images would be good\n   c) YOU choose: [IMAGE_NUMBERS: 2, 5] (if you want 2)\n   d) YOU label: 'The first image shows...', 'The second image displays...'\n   \n   Example 3 - User: 'tell me about quantum physics'\n   YOUR PROCESS:\n   a) YOU analyze: Images might not be relevant to this text question\n   b) YOU decide: 0 images (don't include [IMAGE_NUMBERS: ...])\n   c) YOU respond: Just text, no images\n\n7. IF NO RELEVANT IMAGES:\n   - YOU can choose 0 images\n   - Tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'\n\nREMEMBER: EVERYTHING is YOUR decision:\n- How many images (0-10, up to Discord's limit): YOUR CHOICE (respect user's explicit request if they say a number)\n- Which images: YOUR ANALYSIS\n- Which image for which item: YOUR MATCHING\n- How to label: YOUR RESPONSIBILITY\n- You know exactly which images you selected and label them accordingly\n\nNO HARDCODING - YOU ARE IN FULL CONTROL!"
+            # Split the massive f-string into multiple lines to avoid syntax errors
+            image_selection_prompt = f"""
+GOOGLE IMAGE SEARCH RESULTS for '{image_search_query}':
+{image_list_text}
+
+⚠️ IMPORTANT - PROVIDING LINKS:
+- If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to this image', etc., you MUST provide the actual image URL from the search results above.
+- Each image has a URL listed (Image URL: ...). Use that exact URL when asked.
+- Format: Output plain URLs only (no markdown like [text](url)), just the URL directly so Discord makes it clickable. DO NOT duplicate links - show each URL only once.
+- You can reference specific images by their number (e.g., 'Image #3 is from: https://example.com/image.jpg').
+
+🤖 FULLY AI-DRIVEN IMAGE SELECTION - YOU HAVE COMPLETE CONTROL:
+
+YOUR DECISIONS (ALL AI-DRIVEN, NO HARDCODING):
+1. HOW MANY images to include: You decide 0-10 images (your choice, based on what makes sense and what the user requests)
+2. WHICH images to select: You analyze and choose the most relevant images from the list above
+3. WHICH image matches WHICH item: You intelligently match images to items you're discussing
+4. HOW to label them: You label them correctly (first, second, third, etc.) based on YOUR selection order
+
+CRITICAL - YOU DECIDE EVERYTHING:
+
+1. NUMBER OF IMAGES (YOUR CHOICE):
+   - You can choose 0 images if none are relevant (just don't include [IMAGE_NUMBERS: ...])
+   - You can choose 1 image if only one is relevant
+   - You can choose 2-10 images if multiple are relevant
+   - Maximum is 10 images (Discord's attachment limit), but YOU decide how many (0-10)
+   - If the user explicitly asks for a specific number (e.g., "5 images"), respect their request and select that many
+   - NO minimum requirement - you can choose 0 if appropriate
+
+2. WHICH IMAGES TO SELECT (YOUR ANALYSIS):
+   - Analyze each image's title and URL from the search results above
+   - Determine relevance to the user's request
+   - Select the images YOU think are most relevant
+   - You make the decision - no hardcoded rules
+
+3. MATCHING IMAGES TO ITEMS (YOUR INTELLIGENCE):
+   - If user asks for 'top 3 malls with an image of each':
+     * YOU analyze which image best represents the first mall
+     * YOU analyze which image best represents the second mall
+     * YOU analyze which image best represents the third mall
+     * YOU select them in order: first mall's image first, second mall's image second, etc.
+   - You match based on titles, URLs, and your understanding - fully AI-driven
+
+4. LABELING (YOUR RESPONSIBILITY):
+   - The FIRST image YOU select = label it 'the first image' or 'the first photo'
+   - The SECOND image YOU select = label it 'the second image' or 'the second photo'
+   - The THIRD image YOU select = label it 'the third image' or 'the third photo'
+   - You MUST know which images you selected and label them correctly
+   - Match labels to items: 'The first image shows [first item]', 'The second image displays [second item]'
+
+5. SELECTION FORMAT:
+   - To include images, add [IMAGE_NUMBERS: X,Y,Z] at the END of your response
+   - X, Y, Z are image numbers (1-{len(image_search_results)}) from the search results above
+   - Order matters: first number = first image, second number = second image, etc.
+   - If you don't want any images, simply don't include [IMAGE_NUMBERS: ...]
+
+6. EXAMPLES OF YOUR DECISIONS:
+   
+   Example 1 - User: 'top 3 malls with an image of each'
+   YOUR PROCESS:
+   a) YOU analyze: Find images for Dubai Mall (#1), Mall of Emirates (#2), Yas Mall (#3)
+   b) YOU decide: Select 3 images (one for each mall)
+   c) YOU choose: [IMAGE_NUMBERS: 1, 4, 6] (if those match best)
+   d) YOU label: 'The first image shows The Dubai Mall...', 'The second image displays Mall of the Emirates...', 'The third image captures Yas Mall...'
+   
+   Example 2 - User: 'show me pictures of cats'
+   YOUR PROCESS:
+   a) YOU analyze: Multiple cat images available
+   b) YOU decide: Maybe 2-3 images would be good
+   c) YOU choose: [IMAGE_NUMBERS: 2, 5] (if you want 2)
+   d) YOU label: 'The first image shows...', 'The second image displays...'
+   
+   Example 3 - User: 'tell me about quantum physics'
+   YOUR PROCESS:
+   a) YOU analyze: Images might not be relevant to this text question
+   b) YOU decide: 0 images (don't include [IMAGE_NUMBERS: ...])
+   c) YOU respond: Just text, no images
+
+7. IF NO RELEVANT IMAGES:
+   - YOU can choose 0 images
+   - Tell the user: 'I couldn't find any relevant images for [search query]. Please try a different search term or be more specific.'
+
+REMEMBER: EVERYTHING is YOUR decision:
+- How many images (0-10, up to Discord's limit): YOUR CHOICE (respect user's explicit request if they say a number)
+- Which images: YOUR ANALYSIS
+- Which image for which item: YOUR MATCHING
+- How to label: YOUR RESPONSIBILITY
+- You know exactly which images you selected and label them accordingly
+
+NO HARDCODING - YOU ARE IN FULL CONTROL!
+"""
+            consciousness_prompt += image_selection_prompt
         elif image_search_query:
             # Image search was attempted but returned no results
             consciousness_prompt += f"\n\nIMPORTANT: The user requested images for '{image_search_query}', but Google image search returned no results. You MUST inform the user clearly: 'I couldn't find any images for [search query]. Please try a different search term or be more specific.'"
