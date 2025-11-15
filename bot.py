@@ -1459,9 +1459,11 @@ Return ONLY a JSON object like:
 Rules:
 - analyze_documents: true when the user wants feedback, summary, or commentary on provided documents (including when they say "look at this").
 - edit_documents: true when they want you to revise or rewrite existing DOCUMENTS (PDF, Word, text files) - NOT images.
-- generate_new_document: true when they ask for a new deliverable (report, proposal, plan, etc.) from scratch.
+- generate_new_document: true when they ask for a new deliverable (report, proposal, plan, etc.) from scratch OR when they explicitly ask to create/put content in a PDF, Word document, or any file format.
+- CRITICAL: generate_new_document MUST be true if user says: "put it in a PDF", "create a PDF", "make a PDF file", "put it in a document", "save it as PDF", "generate a PDF", "put code in PDF", "create a document", "make a docx", "put it in a file", etc.
 - IMPORTANT: If the user is asking to edit/modify IMAGES (photos, pictures), set all document flags to FALSE.
 - Examples of DOCUMENT edit: "edit this PDF", "revise this document", "update this report"
+- Examples of DOCUMENT generation: "put this code in a PDF", "create a PDF with this", "make me a PDF file", "put it in a document", "save as PDF", "generate a PDF from this code"
 - Examples of IMAGE edit (NOT documents): "make this person a woman", "edit this photo", "change this image"
 - Multiple fields can be true simultaneously (e.g., summarize AND rewrite).
 - Default to false unless the message (plus context below) suggests otherwise.
@@ -2634,7 +2636,7 @@ YOUR CONVERSATION HISTORY WITH {username}:
 {conversation_history}{other_memories_text}
 
 CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
-- You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something
+- You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something OR you think you should use it
 - If user replies to a message, @mentions someone, or says "that", "this", "the image", "the document", etc. - USE the context to understand what they mean
 - If user shares images/documents in the current message - ANALYZE them and respond to them
 - BUT: If the current message is simple and doesn't reference anything (like "hello", "what's the link to X"), give a simple direct answer - don't randomly bring up unrelated things from history
@@ -2931,12 +2933,13 @@ Decision: """
         print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}")
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
         
-        # Only check for document actions if there are actual documents AND no image edit request
-        # (to avoid confusing image edits with document edits)
-        if document_assets and not wants_image_edit:
+        # Check for document actions - even if no documents attached (user might want to create one)
+        # Skip if image edit is requested (to avoid confusing image edits with document edits)
+        if not wants_image_edit:
             document_actions = await ai_decide_document_actions(message, document_assets)
             document_request = any(document_actions.values())
             print(f"🗂️  [{username}] Document actions decided: {document_actions}")
+            # If documents are attached but no action was detected, default to analyze
             if not document_request and document_assets:
                 document_actions["analyze_documents"] = True
                 document_request = True
@@ -3424,11 +3427,13 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 doc_instruction_lines.append("- The user expects revisions to existing documents. Preserve structure and integrate changes cleanly.")
             if document_actions.get("generate_new_document"):
                 doc_instruction_lines.append("- The user wants a brand-new, polished document. Propose a professional structure and deliver the draft.")
-                doc_instruction_lines.append("- CRITICAL: If the user asks to create a PDF/document from code or content mentioned in the conversation, you MUST:")
-                doc_instruction_lines.append("  1. Look at the conversation context above to find the code/content")
-                doc_instruction_lines.append("  2. Extract that code/content from the conversation")
-                doc_instruction_lines.append("  3. Include it in the document JSON output (put the code in the 'body' field of a section)")
-                doc_instruction_lines.append("  4. DO NOT just say you'll do it - actually output the JSON with the extracted content")
+                doc_instruction_lines.append("- CRITICAL: If the user asks to create a PDF/document from code or content, you MUST:")
+                doc_instruction_lines.append("  1. If code/content is in the conversation context above, extract it from there")
+                doc_instruction_lines.append("  2. If you're generating new code/content in this response, include that code/content")
+                doc_instruction_lines.append("  3. Put the code/content in the document JSON output (use 'body' field of a section for code, or create appropriate sections)")
+                doc_instruction_lines.append("  4. If user asks for PDF specifically, set 'type': 'pdf' in the document descriptor")
+                doc_instruction_lines.append("  5. DO NOT just say you'll do it - actually output the JSON with the content NOW")
+                doc_instruction_lines.append("  6. The document MUST be included in your response as JSON - the system will automatically create the file")
             
             if any([
                 document_actions.get("edit_documents"),
@@ -3441,8 +3446,13 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     "```json",
                     "{\"documents\":[{\"filename\":\"Updated Proposal.docx\",\"type\":\"docx\",\"title\":\"Updated Proposal\",\"sections\":[{\"heading\":\"Executive Summary\",\"body\":\"Concise overview...\",\"bullet_points\":[\"Key win 1\",\"Key win 2\"]},{\"heading\":\"Next Steps\",\"body\":\"Action plan...\"}]}]}",
                     "```",
+                    "- Example for code in PDF:",
+                    "```json",
+                    "{\"documents\":[{\"filename\":\"code.pdf\",\"type\":\"pdf\",\"title\":\"Python Code\",\"sections\":[{\"heading\":\"Code\",\"body\":\"import turtle\\n\\ndef draw_spiral():\\n    t = turtle.Turtle()\\n    for i in range(100):\\n        t.forward(i)\\n        t.right(90)\\n    turtle.done()\\n\\ndraw_spiral()\"}]}]}",
+                    "```",
                     "- Keep your normal conversational reply outside the JSON block.",
-                    "- Omit the JSON block when no deliverable is produced."
+                    "- Omit the JSON block when no deliverable is produced.",
+                    "- CRITICAL: When user asks for PDF with code, you MUST include the actual code in the 'body' field of a section."
                 ])
             
             response_prompt += "\n".join(doc_instruction_lines)
