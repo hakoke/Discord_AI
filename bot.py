@@ -2494,9 +2494,11 @@ URL: {url}
 
 Extract ALL browser actions the user wants to perform in sequence. Actions should be performed in the order mentioned.
 
-CRITICAL: THINK DYNAMICALLY AND UNDERSTAND USER INTENT - DON'T TAKE REQUESTS LITERALLY!
+CRITICAL: BE SMART - USE LITERAL WHEN SPECIFIC, DYNAMIC WHEN GENERIC!
 
-You must interpret what the user MEANS, not what they literally say. Be flexible and smart like a human would be.
+You must distinguish between:
+- LITERAL requests: User mentions a specific button/link name → Keep it literal
+- DYNAMIC requests: User mentions generic items (first, random, any) → Make it dynamic
 
 Action types:
 - Click actions: "click 'Button Name'", "click 'Accept all'", "click 'Play'"
@@ -2504,40 +2506,56 @@ Action types:
 - Wait actions: "wait 3 seconds"
 
 INTELLIGENT INTERPRETATION RULES:
-1. "first video", "a video", "any video", "random video" → ALL mean "click on a video" (use generic description)
-   - User says "click on the first video" → Extract: "click 'video'" (not "click 'the first video'")
-   - User says "click on a random post" → Extract: "click 'post'" (not "click 'a random post'")
-   - User says "click on any video" → Extract: "click 'video'" (not "click 'any video'")
 
-2. Age verification / 18+ buttons → Use flexible descriptions
-   - User says "click i am 18 or older" → Extract: "click '18' or 'age verification' or 'i am 18'"
-   - User says "verify that you're 18" → Extract: "click '18' or 'verify' or 'age'"
-   - User says "click 18+" → Extract: "click '18' or '18+'"
+1. KEEP LITERAL when user mentions SPECIFIC button/link names:
+   ✅ "click 'Sign In'" → Extract: "click 'Sign In'" (KEEP LITERAL - specific button name)
+   ✅ "click accept all" → Extract: "click 'accept all'" (KEEP LITERAL - specific button)
+   ✅ "click 'Login'" → Extract: "click 'Login'" (KEEP LITERAL - specific button)
+   ✅ "click on the 'Submit' button" → Extract: "click 'Submit'" (KEEP LITERAL - specific name)
+   ✅ "click the 'Play' button" → Extract: "click 'Play'" (KEEP LITERAL - specific name)
 
-3. Generic items → Use the item type, not specific position
-   - User says "click on the first post" → Extract: "click 'post'" (not "click 'the first post'")
-   - User says "click on a random article" → Extract: "click 'article'" (not "click 'a random article'")
-   - User says "click on any button" → Extract: "click 'button'" (not "click 'any button'")
+2. USE DYNAMIC when user mentions GENERIC items (first, random, any, a):
+   ✅ "click on the first video" → Extract: "click 'video'" (DYNAMIC - find any video)
+   ✅ "click on a random post" → Extract: "click 'post'" (DYNAMIC - find any post)
+   ✅ "click on any video" → Extract: "click 'video'" (DYNAMIC - find any)
+   ✅ "click on the first post" → Extract: "click 'post'" (DYNAMIC - not specific)
+   ✅ "click on a random article" → Extract: "click 'article'" (DYNAMIC - not specific)
 
-4. Keep specific button names when they're actually specific
-   - User says "click 'Sign In'" → Extract: "click 'Sign In'" (this is specific, keep it)
-   - User says "click accept all" → Extract: "click 'accept all'" (this is specific, keep it)
+3. Age verification / 18+ buttons → Use flexible descriptions (DYNAMIC):
+   ✅ "click i am 18 or older" → Extract: "click '18' or 'age verification' or 'i am 18'"
+   ✅ "verify that you're 18" → Extract: "click '18' or 'verify' or 'age'"
+   ✅ "click 18+" → Extract: "click '18' or '18+'"
+   ✅ "click enter" (after age verification context) → Extract: "click 'enter' or 'continue' or '18'"
+
+4. Generic item types without specific names → Use generic (DYNAMIC):
+   ✅ "click on any button" → Extract: "click 'button'" (DYNAMIC - no specific name)
+   ✅ "click on a link" → Extract: "click 'link'" (DYNAMIC - no specific name)
 
 5. Extract ALL actions in sequence
    - If user says "click X then click Y" → extract BOTH: ["click 'X'", "click 'Y'"]
    - Actions should be in the order they appear in the message
 
 EXAMPLES OF SMART INTERPRETATION:
-"click on the first video" → ["click 'video'"]  ✅ (not ["click 'the first video'"])
-"click i am 18 or older" → ["click '18' or 'age verification'"]  ✅ (flexible matching)
-"click on a random post" → ["click 'post'"]  ✅ (not ["click 'a random post'"])
-"click on the first video then click play" → ["click 'video'", "click 'play'"]  ✅
-"go to site.com, click 'Login', then click 'Submit'" → ["click 'Login'", "click 'Submit'"]  ✅ (specific names kept)
-"verify that you're 18 then click on a video" → ["click '18' or 'verify' or 'age'", "click 'video'"]  ✅
-"click accept all then click on the first post" → ["click 'accept all'", "click 'post'"]  ✅
 
-WRONG (LITERAL - DON'T DO THIS):
-"click on the first video" → ["click 'the first video'"]  ❌ (too literal, won't work)
+LITERAL (Keep Specific Names):
+"click 'Sign In'" → ["click 'Sign In'"]  ✅ (specific button name - KEEP LITERAL)
+"click accept all" → ["click 'accept all'"]  ✅ (specific button - KEEP LITERAL)
+"click on the 'Login' button" → ["click 'Login'"]  ✅ (specific name - KEEP LITERAL)
+"go to site.com, click 'Login', then click 'Submit'" → ["click 'Login'", "click 'Submit'"]  ✅ (both specific - KEEP LITERAL)
+
+DYNAMIC (Generic Items):
+"click on the first video" → ["click 'video'"]  ✅ (generic - MAKE DYNAMIC)
+"click on a random post" → ["click 'post'"]  ✅ (generic - MAKE DYNAMIC)
+"click on any video" → ["click 'video'"]  ✅ (generic - MAKE DYNAMIC)
+"click on the first video then click play" → ["click 'video'", "click 'play'"]  ✅ (first is generic, play is specific)
+
+MIXED (Literal + Dynamic):
+"click accept all then click on the first post" → ["click 'accept all'", "click 'post'"]  ✅ (first is literal, second is dynamic)
+"verify that you're 18 then click on a video" → ["click '18' or 'verify' or 'age'", "click 'video'"]  ✅ (first is dynamic age, second is dynamic video)
+
+WRONG (Don't Do This):
+"click on the first video" → ["click 'the first video'"]  ❌ (too literal for generic request)
+"click 'Sign In'" → ["click 'Sign In'"]  ✅ (this is CORRECT - keep literal for specific names)
 "click i am 18 or older" → ["click 'i am 18 or older'"]  ❌ (too literal, won't match button)
 "click on a random post" → ["click 'a random post'"]  ❌ (too literal, won't work)
 
