@@ -2080,23 +2080,39 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
                         element_desc = action.replace('click', '').strip().strip("'\"")
                         clicked = False
                         
+                        # Try multiple strategies with timeouts
+                        import asyncio
                         strategies = [
-                            lambda: page.get_by_text(element_desc, exact=False).first.click(),
-                            lambda: page.get_by_role('button', name=element_desc, exact=False).first.click(),
-                            lambda: page.get_by_role('link', name=element_desc, exact=False).first.click(),
+                            lambda: page.get_by_text(element_desc, exact=False).first.click(timeout=10000),
+                            lambda: page.get_by_role('button', name=element_desc, exact=False).first.click(timeout=10000),
+                            lambda: page.get_by_role('link', name=element_desc, exact=False).first.click(timeout=10000),
+                            lambda: page.locator(f'text="{element_desc}"').first.click(timeout=10000),
+                            lambda: page.locator(f'[aria-label*="{element_desc}"]').first.click(timeout=10000),
                         ]
                         
-                        for strategy in strategies:
+                        for idx, strategy in enumerate(strategies):
                             try:
-                                await strategy()
+                                print(f"🔄 [NAVIGATE] Trying click strategy {idx+1}/{len(strategies)} for: '{element_desc}'")
+                                await asyncio.wait_for(strategy(), timeout=12.0)  # Max 12 seconds per strategy
                                 clicked = True
-                                print(f"✅ [NAVIGATE] Clicked: '{element_desc}'")
+                                print(f"✅ [NAVIGATE] Clicked: '{element_desc}' (strategy {idx+1})")
                                 break
-                            except:
+                            except asyncio.TimeoutError:
+                                print(f"⏱️  [NAVIGATE] Click strategy {idx+1} timed out for: '{element_desc}'")
+                                continue
+                            except Exception as e:
+                                print(f"⚠️  [NAVIGATE] Click strategy {idx+1} failed: {e}")
                                 continue
                         
                         if clicked:
-                            await page.wait_for_timeout(2000)
+                            # Wait for page to load after click (but not too long)
+                            try:
+                                await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=15000), timeout=16.0)
+                            except:
+                                # If load state wait fails, just wait a bit
+                                await page.wait_for_timeout(2000)
+                        else:
+                            print(f"❌ [NAVIGATE] Failed to click: '{element_desc}' - element not found")
                     
                     elif action_lower.startswith('scroll'):
                         if 'bottom' in action_lower:
@@ -2302,19 +2318,22 @@ async def ai_decide_browser_actions(message: discord.Message, url: str) -> Tuple
     actions = []
     take_screenshot = True
     
-    # Check for click requests
+    # Check for click requests - stop at "and", "then", "show", etc.
     click_patterns = [
-        r"click\s+['\"]([^'\"]+)['\"]",
-        r"click\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+button|\s+link|\s+element|$)",
-        r"after\s+(?:you\s+)?click\s+(?:on\s+)?(?:the\s+)?['\"]?([^'\"]+?)['\"]?",
+        r"click\s+['\"]([^'\"]+)['\"]",  # click "Sign In"
+        r"click\s+(?:on\s+)?(?:the\s+)?(['\"]?[a-zA-Z0-9\s]+?['\"]?)(?:\s+(?:and|then|show|after|before|,)|$)",  # click sign in and... or click sign in then...
+        r"after\s+(?:you\s+)?click\s+(?:on\s+)?(?:the\s+)?['\"]?([^'\"]+?)['\"]?(?:\s+(?:and|then|show)|$)",  # after click X and...
     ]
     
     for pattern in click_patterns:
-        match = re.search(pattern, content)
+        match = re.search(pattern, content, re.IGNORECASE)
         if match:
-            element = match.group(1).strip()
+            element = match.group(1).strip().strip('\'"')
+            # Clean up element - remove "and show", "then", etc. at the end
+            element = re.sub(r'\s+(and|then|show|after|before).*$', '', element, flags=re.IGNORECASE).strip()
             if element and len(element) > 0:
                 actions.append(f"click '{element}'")
+                print(f"🎯 [BROWSER ACTION] Extracted click action: '{element}' from '{message.content}'")
                 break
     
     # Check for scroll requests
@@ -3588,22 +3607,56 @@ CURRENT CONVERSATION CONTEXT:
         if message.content:
             urls = extract_urls(message.content)
             
+            # CRITICAL: Check if user wants image search BEFORE looking for URLs in context
+            # If they're asking for "images of X", don't use URLs from context - they want image search, not screenshots
+            content_lower = (message.content or "").lower()
+            image_search_keywords = ['images of', 'pictures of', 'photos of', 'image search', 'search for images', 'show me images', 'get images', 'find images']
+            wants_image_search = any(keyword in content_lower for keyword in image_search_keywords)
+            
             # If no URLs in current message but user wants to interact with a page (click, scroll, etc.)
-            # Check conversation context for URLs from recent messages
-            if not urls:
-                content_lower = (message.content or "").lower()
+            # Check replied message FIRST, then conversation context for URLs from recent messages
+            # BUT skip this if user explicitly wants image search (they don't want screenshots from context URLs)
+            if not urls and not wants_image_search:
                 interaction_keywords = ['click', 'scroll', 'show me', 'screenshot', 'take a screenshot', 'after you', 'then']
                 has_interaction_request = any(keyword in content_lower for keyword in interaction_keywords)
                 
-                if has_interaction_request and context_messages:
-                    # Look for URLs in recent messages (last 5 messages)
-                    for msg in context_messages[-5:]:
-                        msg_content = msg.get('content', '') or ''
-                        context_urls = extract_urls(msg_content)
-                        if context_urls:
-                            urls = context_urls[:1]  # Use first URL found
-                            print(f"🔗 [{username}] No URL in current message, but found URL in context: {urls[0][:80]}...")
-                            break
+                if has_interaction_request:
+                    # PRIORITY 1: Check replied message first (most relevant)
+                    if message.reference:
+                        try:
+                            replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                            replied_content = replied_msg.content or ''
+                            replied_urls = extract_urls(replied_content)
+                            if replied_urls:
+                                urls = replied_urls[:1]  # Use first URL from replied message
+                                print(f"🔗 [{username}] No URL in current message, but found URL in replied message: {urls[0][:80]}...")
+                            else:
+                                # Also check if the replied message had attachments (screenshots might have URLs in text)
+                                # Look at the replied message's text for URLs
+                                if not urls and context_messages:
+                                    # Find the replied message in context
+                                    replied_id = str(message.reference.message_id)
+                                    for msg in context_messages:
+                                        if str(msg.get('id', '')) == replied_id:
+                                            msg_content = msg.get('content', '') or ''
+                                            context_urls = extract_urls(msg_content)
+                                            if context_urls:
+                                                urls = context_urls[:1]
+                                                print(f"🔗 [{username}] Found URL in replied message context: {urls[0][:80]}...")
+                                                break
+                        except Exception as e:
+                            print(f"⚠️  [{username}] Error fetching replied message for URL: {e}")
+                    
+                    # PRIORITY 2: If still no URL, check recent context messages (last 5 messages, most recent first)
+                    if not urls and context_messages:
+                        # Check most recent messages first (they're more relevant)
+                        for msg in reversed(context_messages[-5:]):  # Reverse to check newest first
+                            msg_content = msg.get('content', '') or ''
+                            context_urls = extract_urls(msg_content)
+                            if context_urls:
+                                urls = context_urls[:1]  # Use first URL found
+                                print(f"🔗 [{username}] No URL in current/replied message, but found URL in context: {urls[0][:80]}...")
+                                break
             
             if urls:
                 print(f"🔗 [{username}] Found {len(urls)} URL(s) in message")
@@ -3666,7 +3719,12 @@ Decision: """
                 should_fetch_urls = await decide_if_urls_relevant()
                 
                 # Check if screenshot is needed (AI-driven decision)
-                screenshot_needed = await ai_decide_screenshot_needed(message, urls)
+                # BUT skip screenshots if user explicitly wants image search (they want Google images, not website screenshots)
+                screenshot_needed = False
+                if not wants_image_search:
+                    screenshot_needed = await ai_decide_screenshot_needed(message, urls)
+                else:
+                    print(f"⏭️  [{username}] Skipping screenshot - user wants image search, not website screenshots")
                 
                 if should_fetch_urls:
                     print(f"🌐 [{username}] URLs are relevant - fetching content...")
@@ -4068,7 +4126,18 @@ Now decide: "{message.content}" -> """
             if not SERPER_API_KEY:
                 return False
             
+            # CRITICAL: If user explicitly asks for image search ("images of", "pictures of"), ALWAYS do image search
+            # Don't skip even if screenshots were taken - user wants Google images, not website screenshots
+            content_lower = (message.content or "").lower()
+            image_search_keywords = ['images of', 'pictures of', 'photos of', 'image search', 'search for images', 'show me images', 'get images', 'find images']
+            explicit_image_search_request = any(keyword in content_lower for keyword in image_search_keywords)
+            
+            if explicit_image_search_request:
+                print(f"🖼️  [{username}] User explicitly requested image search - proceeding despite screenshots")
+                return True
+            
             # Skip image search if we already took screenshots - user has the visual they need
+            # (Only skip if it wasn't an explicit image search request)
             if screenshot_attachments and len(screenshot_attachments) > 0:
                 print(f"⏭️  [{username}] Skipping image search - screenshot already taken")
                 return False
