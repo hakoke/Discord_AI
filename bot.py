@@ -2616,6 +2616,458 @@ Analysis: """
             except:
                 pass
 
+async def autonomous_browser_automation(url: str, goal: str, max_iterations: int = 10) -> List[BytesIO]:
+    """Fully autonomous browser automation - AI dynamically analyzes pages and works towards goals
+    
+    This function uses AI vision to:
+    1. Analyze the current page state
+    2. Identify obstacles (cookie banners, popups, age verification, etc.)
+    3. Automatically handle obstacles
+    4. Work towards the user's goal step by step
+    5. Continue until goal is achieved or max iterations reached
+    
+    Args:
+        url: URL to navigate to
+        goal: User's goal (e.g., "show me sign up", "click on the first video", "go to login page")
+        max_iterations: Maximum number of AI decision cycles (prevents infinite loops)
+    
+    Returns:
+        List of BytesIO containing PNG screenshots showing the journey
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return []
+    
+    # Clean URL
+    url = clean_url(url)
+    if not url:
+        print(f"❌ [AUTONOMOUS] Invalid URL after cleaning")
+        return []
+    
+    browser = await get_browser()
+    if not browser:
+        return []
+    
+    page = None
+    screenshots = []
+    iteration = 0
+    goal_achieved = False
+    
+    try:
+        print(f"🤖 [AUTONOMOUS] Starting autonomous automation for goal: '{goal}'")
+        print(f"🎬 [AUTONOMOUS] Navigating to {url[:80]}...")
+        
+        page = await browser.new_page(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        # Navigate to URL
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(2000)  # Wait for dynamic content
+        except Exception as nav_error:
+            print(f"⚠️  [AUTONOMOUS] domcontentloaded failed, trying networkidle: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)
+            except Exception as final_error:
+                print(f"⚠️  [AUTONOMOUS] networkidle also failed, using load: {final_error}")
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)
+        
+        # Main autonomous loop
+        while iteration < max_iterations and not goal_achieved:
+            iteration += 1
+            print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
+            
+            # Take screenshot of current state
+            current_screenshot = await page.screenshot(type='png')
+            screenshot_img = Image.open(BytesIO(current_screenshot))
+            screenshot_bytes_io = BytesIO(current_screenshot)
+            screenshot_bytes_io.seek(0)
+            screenshots.append(screenshot_bytes_io)
+            
+            # Use AI to analyze current state and decide next action
+            vision_model = get_smart_model()  # Use smart model for complex reasoning
+            
+            analysis_prompt = f"""You are an autonomous browser agent. Your goal is: "{goal}"
+
+Look at this webpage screenshot and analyze:
+
+1. CURRENT STATE: What page are we on? What do you see?
+2. OBSTACLES: Are there any obstacles blocking progress?
+   - Cookie consent banners (Accept, Accept All, I Agree, etc.)
+   - Age verification popups (18+, Enter, Continue, etc.)
+   - Login prompts or modals
+   - Popups or overlays
+   - Other blocking elements
+3. GOAL PROGRESS: Are we closer to the goal? Can you see elements related to the goal?
+4. NEXT ACTION: What should be done next?
+
+CRITICAL RULES:
+- ALWAYS handle obstacles FIRST before working on the goal
+- If you see cookie banners, age verification, or blocking popups → handle them immediately
+- Be smart about identifying elements - use visual cues, text, buttons, links
+- If the goal is achieved (e.g., "show me sign up" and sign up page is visible) → mark as achieved
+
+Return a JSON object with this exact format:
+{{
+    "goal_achieved": true/false,
+    "current_state": "description of what you see",
+    "obstacles": ["list of obstacles found", "or empty array if none"],
+    "next_action": {{
+        "type": "click" | "scroll" | "wait" | "none",
+        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button')",
+        "reason": "why this action is needed"
+    }},
+    "confidence": 0.0-1.0
+}}
+
+Examples:
+- Cookie banner visible → {{"next_action": {{"type": "click", "description": "Accept Cookies or Accept All", "reason": "Cookie banner is blocking the page"}}}}
+- Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
+- Goal element visible → {{"next_action": {{"type": "click", "description": "Sign Up button", "reason": "This is the goal element"}}, "goal_achieved": true}}
+- No obstacles, goal not visible → {{"next_action": {{"type": "scroll", "description": "scroll down to find goal element", "reason": "Need to search for the goal"}}}}
+
+Analyze the screenshot now: """
+            
+            screenshot_bytes_io = BytesIO()
+            screenshot_img.save(screenshot_bytes_io, format='PNG')
+            screenshot_bytes_io.seek(0)
+            
+            content_parts = [
+                analysis_prompt,
+                {'mime_type': 'image/png', 'data': screenshot_bytes_io.read()}
+            ]
+            
+            try:
+                analysis_response = await queued_generate_content(vision_model, content_parts)
+                analysis_text = analysis_response.text.strip()
+                
+                # Parse JSON response
+                if '```json' in analysis_text:
+                    json_start = analysis_text.find('```json') + 7
+                    json_end = analysis_text.find('```', json_start)
+                    analysis_text = analysis_text[json_start:json_end].strip()
+                elif '```' in analysis_text:
+                    json_start = analysis_text.find('```') + 3
+                    json_end = analysis_text.find('```', json_start)
+                    analysis_text = analysis_text[json_start:json_end].strip()
+                
+                analysis_data = json.loads(analysis_text)
+                
+                goal_achieved = analysis_data.get('goal_achieved', False)
+                current_state = analysis_data.get('current_state', 'Unknown')
+                obstacles = analysis_data.get('obstacles', [])
+                next_action = analysis_data.get('next_action', {})
+                confidence = analysis_data.get('confidence', 0.5)
+                
+                print(f"🤖 [AUTONOMOUS] Analysis:")
+                print(f"   State: {current_state}")
+                print(f"   Obstacles: {obstacles}")
+                print(f"   Next action: {next_action.get('type')} - {next_action.get('description')}")
+                print(f"   Goal achieved: {goal_achieved}")
+                print(f"   Confidence: {confidence:.2f}")
+                
+                # If goal is achieved, we're done
+                if goal_achieved:
+                    print(f"✅ [AUTONOMOUS] Goal achieved!")
+                    break
+                
+                # Perform next action
+                action_type = next_action.get('type', 'none')
+                action_desc = next_action.get('description', '')
+                
+                if action_type == 'none':
+                    print(f"⏸️  [AUTONOMOUS] No action needed, stopping")
+                    break
+                
+                elif action_type == 'click':
+                    # Use AI to find and click the element
+                    print(f"🖱️  [AUTONOMOUS] Attempting to click: '{action_desc}'")
+                    
+                    # Take fresh screenshot for element identification
+                    click_screenshot = await page.screenshot(type='png')
+                    click_img = Image.open(BytesIO(click_screenshot))
+                    
+                    # Use AI to identify the exact element
+                    click_prompt = f"""Look at this webpage screenshot. I need to click on: "{action_desc}"
+
+Find the exact clickable element. Return JSON:
+{{
+    "exact_text": "exact text on the button/link",
+    "element_type": "button/link/etc",
+    "location": "where it is on page",
+    "suggested_selector": "CSS selector if possible, or null",
+    "coordinates": {{"x": center_x, "y": center_y}} or null
+}}
+
+If found, return the data. If not found, return {{"exact_text": null}}.
+"""
+                    
+                    click_bytes_io = BytesIO()
+                    click_img.save(click_bytes_io, format='PNG')
+                    click_bytes_io.seek(0)
+                    
+                    click_content = [
+                        click_prompt,
+                        {'mime_type': 'image/png', 'data': click_bytes_io.read()}
+                    ]
+                    
+                    try:
+                        click_response = await queued_generate_content(vision_model, click_content)
+                        click_text = click_response.text.strip()
+                        
+                        # Parse JSON
+                        if '```json' in click_text:
+                            click_text = click_text.split('```json')[1].split('```')[0].strip()
+                        elif '```' in click_text:
+                            click_text = click_text.split('```')[1].split('```')[0].strip()
+                        
+                        click_data = json.loads(click_text)
+                        exact_text = click_data.get('exact_text')
+                        suggested_selector = click_data.get('suggested_selector')
+                        coordinates = click_data.get('coordinates')
+                        
+                        clicked = False
+                        
+                        # Try multiple click strategies
+                        if exact_text:
+                            # Strategy 1: Click by text
+                            try:
+                                await page.get_by_text(exact_text, exact=False).first.click(timeout=8000)
+                                clicked = True
+                                print(f"✅ [AUTONOMOUS] Clicked by text: '{exact_text}'")
+                            except:
+                                pass
+                            
+                            # Strategy 2: Click by role
+                            if not clicked:
+                                try:
+                                    await page.get_by_role('button', name=exact_text, exact=False).first.click(timeout=8000)
+                                    clicked = True
+                                    print(f"✅ [AUTONOMOUS] Clicked by role: '{exact_text}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 3: Click by link
+                            if not clicked:
+                                try:
+                                    await page.get_by_role('link', name=exact_text, exact=False).first.click(timeout=8000)
+                                    clicked = True
+                                    print(f"✅ [AUTONOMOUS] Clicked by link: '{exact_text}'")
+                                except:
+                                    pass
+                        
+                        # Strategy 4: Use CSS selector
+                        if not clicked and suggested_selector:
+                            try:
+                                await page.locator(suggested_selector).first.click(timeout=8000)
+                                clicked = True
+                                print(f"✅ [AUTONOMOUS] Clicked by selector: '{suggested_selector}'")
+                            except:
+                                pass
+                        
+                        # Strategy 5: Click at coordinates
+                        if not clicked and coordinates:
+                            try:
+                                await page.mouse.click(coordinates['x'], coordinates['y'])
+                                clicked = True
+                                print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
+                            except:
+                                pass
+                        
+                        # Strategy 6: Fallback - try flexible text matching
+                        if not clicked:
+                            # Try variations of the action description
+                            text_variations = [
+                                action_desc,
+                                action_desc.lower(),
+                                action_desc.title(),
+                            ]
+                            # Extract key words
+                            words = action_desc.lower().split()
+                            if 'accept' in words:
+                                text_variations.extend(['accept', 'accept all', 'i agree', 'agree'])
+                            if 'cookie' in words:
+                                text_variations.extend(['accept cookies', 'accept all cookies'])
+                            if '18' in words or 'age' in words:
+                                text_variations.extend(['18', '18+', 'enter', 'continue', 'i am 18'])
+                            if 'sign' in words and 'up' in words:
+                                text_variations.extend(['sign up', 'signup', 'create account', 'register'])
+                            
+                            for variant in text_variations:
+                                try:
+                                    await page.get_by_text(variant, exact=False).first.click(timeout=5000)
+                                    clicked = True
+                                    print(f"✅ [AUTONOMOUS] Clicked by variant: '{variant}'")
+                                    break
+                                except:
+                                    continue
+                        
+                        if clicked:
+                            # Wait for page to respond
+                            await page.wait_for_timeout(2000)
+                            try:
+                                await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=10000), timeout=11.0)
+                            except:
+                                await page.wait_for_timeout(1000)
+                        else:
+                            print(f"⚠️  [AUTONOMOUS] Could not click: '{action_desc}' - will retry in next iteration")
+                    
+                    except Exception as click_error:
+                        print(f"⚠️  [AUTONOMOUS] Error during click attempt: {click_error}")
+                
+                elif action_type == 'scroll':
+                    if 'down' in action_desc.lower() or 'bottom' in action_desc.lower():
+                        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        print(f"📜 [AUTONOMOUS] Scrolled down")
+                    elif 'up' in action_desc.lower() or 'top' in action_desc.lower():
+                        await page.evaluate('window.scrollTo(0, 0)')
+                        print(f"📜 [AUTONOMOUS] Scrolled up")
+                    else:
+                        # Scroll down by default
+                        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        print(f"📜 [AUTONOMOUS] Scrolled down (default)")
+                    await page.wait_for_timeout(1500)
+                
+                elif action_type == 'wait':
+                    wait_time = 2000  # Default 2 seconds
+                    # Try to extract wait time from description
+                    wait_match = re.search(r'(\d+)', action_desc)
+                    if wait_match:
+                        wait_time = int(wait_match.group(1)) * 1000
+                    await page.wait_for_timeout(wait_time)
+                    print(f"⏳ [AUTONOMOUS] Waited {wait_time}ms")
+            
+            except Exception as analysis_error:
+                print(f"⚠️  [AUTONOMOUS] Error in AI analysis: {analysis_error}")
+                import traceback
+                print(f"⚠️  [AUTONOMOUS] Traceback: {traceback.format_exc()}")
+                # Take screenshot and continue (might have made progress)
+                await page.wait_for_timeout(1000)
+        
+        # Take final screenshot
+        if not goal_achieved or iteration >= max_iterations:
+            final_screenshot = await page.screenshot(type='png')
+            final_img_bytes = BytesIO(final_screenshot)
+            final_img_bytes.seek(0)
+            screenshots.append(final_img_bytes)
+            print(f"📸 [AUTONOMOUS] Final screenshot captured")
+        
+        if goal_achieved:
+            print(f"✅ [AUTONOMOUS] Successfully achieved goal: '{goal}'")
+        else:
+            print(f"⚠️  [AUTONOMOUS] Stopped after {iteration} iterations (goal may not be fully achieved)")
+        
+        return screenshots
+    
+    except Exception as e:
+        print(f"❌ [AUTONOMOUS] Error in autonomous automation: {e}")
+        import traceback
+        print(f"❌ [AUTONOMOUS] Traceback: {traceback.format_exc()}")
+        
+        # Try to capture error screenshot
+        if page:
+            try:
+                error_screenshot = await page.screenshot(type='png')
+                error_img_bytes = BytesIO(error_screenshot)
+                error_img_bytes.seek(0)
+                screenshots.append(error_img_bytes)
+            except:
+                pass
+        
+        return screenshots if screenshots else []
+    
+    finally:
+        if page:
+            try:
+                await page.close()
+            except:
+                pass
+
+async def ai_detect_autonomous_goal(message: discord.Message, url: str) -> Optional[str]:
+    """AI detects if user wants autonomous goal-oriented automation and extracts the goal
+    
+    Args:
+        message: The Discord message
+        url: The URL to navigate to
+    
+    Returns:
+        Goal string if autonomous automation is needed, None otherwise
+        Examples: "show me sign up", "click on the first video", "go to login page"
+    """
+    content = message.content or ""
+    
+    # AI decision prompt
+    decision_prompt = f"""User message: "{content}"
+
+URL: {url}
+
+Does the user want AUTONOMOUS browser automation where the AI should:
+1. Navigate to the page
+2. Automatically detect and handle obstacles (cookie banners, popups, age verification)
+3. Work towards a specific goal dynamically
+4. Continue until the goal is achieved
+
+AUTONOMOUS automation is needed when:
+- User has a GOAL (e.g., "show me sign up", "go to reddit and click sign up", "show me the login page")
+- User wants the AI to figure out how to get there (not just specific instructions)
+- User mentions obstacles that need handling (e.g., "accept cookies", "handle age verification")
+- User wants dynamic navigation (e.g., "go to reddit and show me sign up" - AI should find sign up button)
+
+AUTONOMOUS automation is NOT needed when:
+- User just wants a screenshot of the page as-is
+- User gives very specific step-by-step instructions (use regular automation)
+- No goal is mentioned, just "show me this website"
+
+If autonomous automation is needed, extract the GOAL (what the user wants to achieve).
+The goal should be a clear objective like:
+- "show me sign up" or "show sign up page"
+- "click on the first video"
+- "go to login page"
+- "show me the registration form"
+
+Return JSON:
+{{
+    "needs_autonomous": true/false,
+    "goal": "the goal to achieve" or null
+}}
+
+Examples:
+"go to reddit and show me sign up" -> {{"needs_autonomous": true, "goal": "show me sign up"}}
+"go to amazon and click on sign in" -> {{"needs_autonomous": true, "goal": "click on sign in"}}
+"go to reddit click on sign up and show me" -> {{"needs_autonomous": true, "goal": "show me sign up"}}
+"take a screenshot of reddit.com" -> {{"needs_autonomous": false, "goal": null}}
+"show me this website" -> {{"needs_autonomous": false, "goal": null}}
+
+Now analyze: """
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
+        response_text = decision_response.text.strip()
+        
+        # Parse JSON
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0].strip()
+        
+        decision_data = json.loads(response_text)
+        
+        if decision_data.get('needs_autonomous', False):
+            goal = decision_data.get('goal')
+            if goal:
+                print(f"🤖 [AUTONOMOUS] Detected autonomous goal: '{goal}'")
+                return goal
+        
+        return None
+    except Exception as e:
+        handle_rate_limit_error(e)
+        print(f"⚠️  [AUTONOMOUS] Error detecting autonomous goal: {e}")
+        return None
+
 async def ai_decide_screenshot_needed(message: discord.Message, urls: List[str]) -> bool:
     """AI decides if screenshot is needed from URLs in message
     
@@ -4617,19 +5069,29 @@ Decision: """
                     
                     try:
                         # AI decides: how many screenshots and what browser actions
-                        screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
-                        browser_actions, should_take_screenshot = await ai_decide_browser_actions(message, screenshot_url)
+                        # Check if user wants autonomous goal-oriented automation
+                        autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
                         
-                        print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
-                        
-                        if browser_actions:
-                            # Perform actions and take screenshots
-                            screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                        if autonomous_goal:
+                            # Use fully autonomous automation - AI will handle everything dynamically
+                            print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
+                            screenshot_images = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
                             screenshot_attachments.extend(screenshot_images)
                         else:
-                            # Just take multiple screenshots at different scroll positions
-                            screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
-                            screenshot_attachments.extend(screenshot_images)
+                            # Use regular automation with explicit actions
+                            screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
+                            browser_actions, should_take_screenshot = await ai_decide_browser_actions(message, screenshot_url)
+                            
+                            print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
+                            
+                            if browser_actions:
+                                # Perform actions and take screenshots
+                                screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                                screenshot_attachments.extend(screenshot_images)
+                            else:
+                                # Just take multiple screenshots at different scroll positions
+                                screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
+                                screenshot_attachments.extend(screenshot_images)
                         
                         # Compress screenshots for Discord
                         compressed_screenshots = []
