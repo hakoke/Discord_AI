@@ -2208,8 +2208,10 @@ If the user asks for "18" or "age verification", find the age verification butto
 
 Identify the exact element they want to click:
 1. What is the EXACT text displayed on the button/link? (e.g., if user says "login", but button says "Log In", return "Log In")
+   - For videos/posts: Return the video/post TITLE text (this will be used to find the clickable link/container)
 2. Where is it located? (e.g., "top-right", "bottom-left", "center", "navigation bar")
-3. What type of element is it? (button, link, menu item, etc.)
+3. What type of element is it? (button, link, menu item, video thumbnail, post container, etc.)
+   - IMPORTANT: For videos/posts, the clickable element is usually a LINK or CONTAINER that contains the title text, not the text itself
 
 CRITICAL: Return ONLY a JSON object with this exact format:
 {{"exact_text": "The exact text as displayed on the page", "location": "where it is", "element_type": "button/link/etc"}}
@@ -2275,22 +2277,98 @@ Now identify: {description_text} -> """
                         for search_text in search_texts:
                             if not search_text:
                                 continue
-                            # Try AI-identified exact text first (case-insensitive)
+                            
+                            # Strategy 1-3: Try clicking text directly (for buttons/links with visible text)
                             strategies.append(lambda st=search_text: page.get_by_text(st, exact=False).first.click(timeout=10000))
-                            # Try case variations
                             strategies.append(lambda st=search_text: page.get_by_text(st.lower(), exact=False).first.click(timeout=10000))
                             strategies.append(lambda st=search_text: page.get_by_text(st.title(), exact=False).first.click(timeout=10000))
-                            # Try as button
+                            
+                            # Strategy 4-5: Try as role-based elements
                             strategies.append(lambda st=search_text: page.get_by_role('button', name=st, exact=False).first.click(timeout=10000))
-                            # Try as link
                             strategies.append(lambda st=search_text: page.get_by_role('link', name=st, exact=False).first.click(timeout=10000))
-                            # Try with locator
+                            
+                            # Strategy 6-7: Try with locators
                             strategies.append(lambda st=search_text: page.locator(f'text="{st}"').first.click(timeout=10000))
                             strategies.append(lambda st=search_text: page.locator(f'[aria-label*="{st}"]').first.click(timeout=10000))
+                            
+                            # Strategy 8: Find parent clickable elements (for videos/posts where text is inside a link)
+                            # Find element containing the text, then find its parent link/button
+                            def make_click_parent(st):
+                                async def click_parent_link():
+                                    try:
+                                        # Find element with text, then use locator to find parent link
+                                        text_locator = page.get_by_text(st, exact=False).first
+                                        # Try to find parent <a> tag using locator
+                                        try:
+                                            # Get the element's bounding box to find nearby clickable elements
+                                            box = await text_locator.bounding_box()
+                                            if box:
+                                                # Click at the center of the text element (often the link is clickable there)
+                                                await page.mouse.click(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                                                return
+                                        except:
+                                            pass
+                                        
+                                        # Fallback: Try to find link containing this text
+                                        # Use get_by_role to find links, then filter by text content
+                                        try:
+                                            # Try all links and find one that contains our text
+                                            all_links = page.locator('a')
+                                            link_count = await all_links.count()
+                                            for i in range(min(link_count, 20)):  # Check first 20 links
+                                                link = all_links.nth(i)
+                                                link_text = await link.text_content()
+                                                if link_text and st.lower() in link_text.lower():
+                                                    await link.click(timeout=10000)
+                                                    return
+                                        except:
+                                            pass
+                                        
+                                        # Try finding link by href pattern (for video sites)
+                                        if 'video' in element_desc.lower() or is_generic:
+                                            video_link = page.locator('a[href*="/view_video"], a[href*="/video"]').first
+                                            if await video_link.count() > 0:
+                                                await video_link.click(timeout=10000)
+                                                return
+                                        
+                                        raise Exception("No clickable parent found")
+                                    except:
+                                        raise
+                                return click_parent_link
+                            
+                            strategies.append(make_click_parent(search_text))
+                            
+                            # Strategy 9: For generic items like "video", try finding video containers (only add once per search_text)
+                            if (is_generic or element_desc.lower() in ['video', 'post', 'article']) and search_text == search_texts[0]:
+                                async def click_first_video_container():
+                                    try:
+                                        # Try common video site selectors
+                                        video_selectors = [
+                                            'a[href*="/view_video"]',  # Pornhub
+                                            'a[href*="/video"]',  # Generic video links
+                                            '.phimage a',  # Pornhub image container
+                                            '[data-m-id] a',  # Video containers
+                                            'a:has(img)',  # Links with images (video thumbnails)
+                                            'a[class*="video"]',  # Links with "video" in class
+                                        ]
+                                        for selector in video_selectors:
+                                            try:
+                                                video_link = page.locator(selector).first
+                                                if await video_link.count() > 0:
+                                                    await video_link.click(timeout=10000)
+                                                    return
+                                            except:
+                                                continue
+                                        raise Exception("No video container found")
+                                    except:
+                                        raise
+                                
+                                strategies.append(click_first_video_container)
                         
                         # Also try original description as final fallback
                         strategies.append(lambda: page.get_by_text(element_desc, exact=False).first.click(timeout=10000))
                         
+                        # Try all strategies first
                         for idx, strategy in enumerate(strategies):
                             try:
                                 current_text = search_texts[0] if search_texts else element_desc
@@ -2306,6 +2384,159 @@ Now identify: {description_text} -> """
                                 print(f"⚠️  [NAVIGATE] Click strategy {idx+1} failed: {e}")
                                 continue
                         
+                        # If all strategies failed, use AI to analyze and retry (max 2 AI-driven retries to avoid latency)
+                        max_ai_retries = 2
+                        ai_retry_count = 0
+                        while not clicked and ai_retry_count < max_ai_retries:
+                            ai_retry_count += 1
+                            print(f"🤖 [NAVIGATE] All strategies failed, using AI to analyze and retry (attempt {ai_retry_count}/{max_ai_retries})...")
+                            
+                            # Take screenshot to see current state
+                            failure_screenshot = await page.screenshot(type='png')
+                            failure_img = Image.open(BytesIO(failure_screenshot))
+                            
+                            # Use AI vision to analyze why it failed and suggest a new approach
+                            vision_model = get_vision_model()
+                            analysis_prompt = f"""Look at this webpage screenshot. I tried to click on: "{element_desc}" but all attempts failed.
+
+What I tried:
+- Clicking on text: "{ai_identified_text if ai_identified_text else element_desc}"
+- Various click strategies (text matching, role-based, parent elements, etc.)
+
+ANALYZE WHY IT FAILED:
+1. Can you see the element the user wants to click? What does it look like?
+2. Is it visible on the page? Is it hidden, covered, or in a different location?
+3. What is the ACTUAL clickable element? (e.g., is the text inside a link? Is there a thumbnail/image that's clickable?)
+4. What's the best way to click it?
+
+SUGGEST A NEW APPROACH:
+Return a JSON object with:
+{{
+    "visible": true/false,
+    "element_description": "what the element looks like",
+    "clickable_element": "what should be clicked (e.g., 'the link containing the text', 'the thumbnail image', 'the button with text X')",
+    "suggested_selector": "CSS selector or description to find it (e.g., 'a[href*=\"/video\"]', 'img with alt containing video', 'link with class phimage')",
+    "suggested_text": "exact text to search for, or null if not text-based",
+    "reason": "why previous attempts failed"
+}}
+
+If you cannot see the element or it's not on the page, return:
+{{
+    "visible": false,
+    "element_description": null,
+    "clickable_element": null,
+    "suggested_selector": null,
+    "suggested_text": null,
+    "reason": "element not visible or not on page"
+}}
+
+Analysis: """
+                            
+                            screenshot_bytes_io = BytesIO()
+                            failure_img.save(screenshot_bytes_io, format='PNG')
+                            screenshot_bytes_io.seek(0)
+                            
+                            content_parts = [
+                                analysis_prompt,
+                                {'mime_type': 'image/png', 'data': screenshot_bytes_io.read()}
+                            ]
+                            
+                            try:
+                                analysis_response = await queued_generate_content(vision_model, content_parts)
+                                analysis_text = analysis_response.text.strip()
+                                
+                                # Parse JSON response
+                                if '```json' in analysis_text:
+                                    json_start = analysis_text.find('```json') + 7
+                                    json_end = analysis_text.find('```', json_start)
+                                    analysis_text = analysis_text[json_start:json_end].strip()
+                                elif '```' in analysis_text:
+                                    json_start = analysis_text.find('```') + 3
+                                    json_end = analysis_text.find('```', json_start)
+                                    analysis_text = analysis_text[json_start:json_end].strip()
+                                
+                                analysis_data = json.loads(analysis_text)
+                                
+                                if not analysis_data.get('visible', False):
+                                    print(f"🤖 [NAVIGATE] AI analysis: Element not visible on page")
+                                    break  # Stop retrying if element isn't visible
+                                
+                                suggested_selector = analysis_data.get('suggested_selector')
+                                suggested_text = analysis_data.get('suggested_text')
+                                reason = analysis_data.get('reason', 'Unknown')
+                                
+                                print(f"🤖 [NAVIGATE] AI analysis: {reason}")
+                                print(f"🤖 [NAVIGATE] AI suggests: selector='{suggested_selector}', text='{suggested_text}'")
+                                
+                                # Try AI-suggested approach
+                                try:
+                                    if suggested_selector:
+                                        # Try CSS selector
+                                        selector_element = page.locator(suggested_selector).first
+                                        if await selector_element.count() > 0:
+                                            await selector_element.click(timeout=10000)
+                                            clicked = True
+                                            print(f"✅ [NAVIGATE] AI-suggested selector worked!")
+                                            break
+                                    
+                                    if suggested_text and not clicked:
+                                        # Try suggested text
+                                        text_element = page.get_by_text(suggested_text, exact=False).first
+                                        await text_element.click(timeout=10000)
+                                        clicked = True
+                                        print(f"✅ [NAVIGATE] AI-suggested text worked!")
+                                        break
+                                    
+                                    # If selector/text didn't work, try clicking at coordinates of the element
+                                    if not clicked:
+                                        # Try to find any element matching the description and click it
+                                        clickable_desc = analysis_data.get('clickable_element', '')
+                                        if clickable_desc:
+                                            # Try to find element by description using AI again
+                                            desc_element = page.get_by_text(clickable_desc, exact=False).first
+                                            try:
+                                                await desc_element.click(timeout=10000)
+                                                clicked = True
+                                                print(f"✅ [NAVIGATE] AI-suggested description worked!")
+                                                break
+                                            except:
+                                                # Try clicking at element coordinates
+                                                try:
+                                                    box = await desc_element.bounding_box()
+                                                    if box:
+                                                        await page.mouse.click(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                                                        clicked = True
+                                                        print(f"✅ [NAVIGATE] Clicked at AI-suggested coordinates!")
+                                                        break
+                                                except:
+                                                    pass
+                                
+                                except Exception as ai_click_error:
+                                    print(f"⚠️  [NAVIGATE] AI-suggested approach failed: {ai_click_error}")
+                                    # Take screenshot after failed AI retry attempt
+                                    try:
+                                        retry_failure_screenshot = await page.screenshot(type='png')
+                                        retry_img_bytes = BytesIO(retry_failure_screenshot)
+                                        retry_img_bytes.seek(0)
+                                        screenshots.append(retry_img_bytes)
+                                        print(f"📸 [NAVIGATE] Captured screenshot after AI retry attempt {ai_retry_count}")
+                                    except:
+                                        pass
+                                    # Continue to next retry or give up
+                            
+                            except Exception as ai_analysis_error:
+                                print(f"⚠️  [NAVIGATE] AI analysis failed: {ai_analysis_error}")
+                                # Take screenshot even if AI analysis fails
+                                try:
+                                    analysis_failure_screenshot = await page.screenshot(type='png')
+                                    analysis_img_bytes = BytesIO(analysis_failure_screenshot)
+                                    analysis_img_bytes.seek(0)
+                                    screenshots.append(analysis_img_bytes)
+                                    print(f"📸 [NAVIGATE] Captured screenshot after AI analysis failure")
+                                except:
+                                    pass
+                                break  # Stop retrying if AI analysis itself fails
+                        
                         if clicked:
                             # Wait for JavaScript effects (modals, overlays, etc.) to appear
                             await page.wait_for_timeout(1500)  # Give time for modals/overlays to appear
@@ -2316,7 +2547,13 @@ Now identify: {description_text} -> """
                                 # If load state wait fails, just wait a bit more
                                 await page.wait_for_timeout(500)
                         else:
-                            print(f"❌ [NAVIGATE] Failed to click: '{element_desc}' - element not found")
+                            print(f"❌ [NAVIGATE] Failed to click: '{element_desc}' - all strategies and AI retries exhausted")
+                            # Take final screenshot to show what we see (for user to see why it failed)
+                            final_screenshot = await page.screenshot(type='png')
+                            final_img_bytes = BytesIO(final_screenshot)
+                            final_img_bytes.seek(0)
+                            screenshots.append(final_img_bytes)
+                            print(f"📸 [NAVIGATE] Captured failure screenshot for user to see")
                     
                     elif action_lower.startswith('scroll'):
                         if 'bottom' in action_lower:
@@ -2340,14 +2577,37 @@ Now identify: {description_text} -> """
                     
                 except Exception as e:
                     print(f"⚠️  [NAVIGATE] Error performing action '{action}': {e}")
+                    # Take screenshot even on error to show what happened
+                    try:
+                        error_screenshot = await page.screenshot(type='png')
+                        error_img_bytes = BytesIO(error_screenshot)
+                        error_img_bytes.seek(0)
+                        screenshots.append(error_img_bytes)
+                        print(f"📸 [NAVIGATE] Captured error screenshot for action: {action}")
+                    except:
+                        pass
                     continue
         
+        # Always return screenshots, even if some actions failed
         return screenshots
         
     except Exception as e:
         print(f"❌ [NAVIGATE] Error navigating and screenshotting: {e}")
         import traceback
         print(f"❌ [NAVIGATE] Traceback: {traceback.format_exc()}")
+        
+        # Try to capture a screenshot even on critical error
+        if page:
+            try:
+                error_screenshot = await page.screenshot(type='png')
+                error_img_bytes = BytesIO(error_screenshot)
+                error_img_bytes.seek(0)
+                screenshots.append(error_img_bytes)
+                print(f"📸 [NAVIGATE] Captured error screenshot")
+            except:
+                pass
+        
+        # Always return screenshots we managed to capture
         return screenshots if screenshots else []
     finally:
         if page:
@@ -2533,7 +2793,7 @@ INTELLIGENT INTERPRETATION RULES:
 
 5. Extract ALL actions in sequence
    - If user says "click X then click Y" → extract BOTH: ["click 'X'", "click 'Y'"]
-   - Actions should be in the order they appear in the message
+- Actions should be in the order they appear in the message
 
 EXAMPLES OF SMART INTERPRETATION:
 
@@ -4175,8 +4435,8 @@ URL: """
                                         # If no perfect match, use first result (cleaned)
                                         found_url = clean_url(url_matches[0].strip())
                                         if found_url:
-                                            print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
-                                            return found_url
+                                        print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
+                                        return found_url
                                 
                                 # If search didn't find URL, try AI conversion as fallback
                                 print(f"⚠️  [{username}] Search didn't find URL, trying AI conversion as fallback...")
@@ -4353,7 +4613,7 @@ Decision: """
                         print(f"❌ [{username}] Invalid URL after cleaning, skipping screenshot")
                         screenshot_needed = False
                     else:
-                        print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
+                    print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
                     
                     try:
                         # AI decides: how many screenshots and what browser actions
@@ -5159,7 +5419,8 @@ Respond with ONLY 'YES' or 'NO'."""
             decision = decision_response.text.strip().upper()
             
             if 'NO' in decision and not force_response:
-                return None
+                # Return empty tuple instead of None to maintain consistent return type
+                return ("", None, None, [], [])
         
         # Generate response
         thinking_note = f" [Using {model_name} for this]" if needs_smart_model else ""
@@ -5445,7 +5706,17 @@ Now decide: "{message.content}" -> """
                     raise  # Re-raise if not a rate limit error
         
         generation_time = time.time() - start_time
+        
+        # Safely extract response text - handle cases where response might be blocked
+        if not hasattr(response, 'text') or response.text is None:
+            print(f"⚠️  [{username}] AI response was blocked or empty, using fallback message")
+            raw_ai_response = "I encountered an issue generating a response. The content may have been blocked by safety filters."
+        else:
         raw_ai_response = (response.text or "").strip()
+            if not raw_ai_response:
+                print(f"⚠️  [{username}] AI response was empty, using fallback message")
+                raw_ai_response = "I encountered an issue generating a response. The content may have been blocked by safety filters."
+        
         ai_response, document_outputs = extract_document_outputs(raw_ai_response)
         # Format links to be clickable markdown links and remove duplicates
         ai_response = format_links_in_response(ai_response)
@@ -6255,7 +6526,8 @@ async def on_message(message: discord.Message):
             result = await generate_response(message, force_response)
             
             print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
-            if result:
+            # Handle both tuple and bool/None returns (for backward compatibility)
+            if result and isinstance(result, tuple):
                 # Check if result includes generated images
                 print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                 if isinstance(result, tuple):
