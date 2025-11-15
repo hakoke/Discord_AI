@@ -6079,12 +6079,15 @@ Now decide: "{message.content}" -> """
         print(f"📤 [{username}]   - Screenshots: {len(screenshot_attachments) if 'screenshot_attachments' in locals() else 0}")
         
         # Include screenshots in return (screenshots is a list of BytesIO)
-        return (ai_response, generated_images, generated_documents, searched_images, screenshot_attachments)
+        print(f"🔍 [{username}] About to return tuple from generate_response")
+        result = (ai_response, generated_images, generated_documents, searched_images, screenshot_attachments)
+        print(f"🔍 [{username}] Returning result type: {type(result)}, length: {len(result) if isinstance(result, tuple) else 'N/A'}")
+        return result
         
     except Exception as e:
-        print(f"Error generating response: {e}")
+        print(f"❌ [{username}] Error generating response: {e}")
         import traceback
-        print(f"Full traceback:\n{traceback.format_exc()}")
+        print(f"❌ [{username}] Full traceback:\n{traceback.format_exc()}")
         
         # Provide user-friendly error messages
         error_str = str(e).lower()
