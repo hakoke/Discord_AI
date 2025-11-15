@@ -5635,8 +5635,18 @@ Now decide: "{message.content}" -> """
                             handle_rate_limit_error(e)
                             return False  # Fallback to deep vision if uncertain
                     
-                    is_simple_vision = await decide_screenshot_vision_complexity()
-                    print(f"🔍 [{username}] DEBUG: decide_screenshot_vision_complexity returned: {is_simple_vision}")
+                    try:
+                        print(f"🔍 [{username}] DEBUG: About to await decide_screenshot_vision_complexity")
+                        is_simple_vision = await decide_screenshot_vision_complexity()
+                        print(f"🔍 [{username}] DEBUG: decide_screenshot_vision_complexity returned: {is_simple_vision}")
+                    except Exception as vision_decision_error:
+                        print(f"🔍 [{username}] DEBUG: Exception in await decide_screenshot_vision_complexity: {vision_decision_error}")
+                        import traceback
+                        print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
+                        # Don't return False here - that would exit generate_response!
+                        # Instead, use a default value
+                        is_simple_vision = False
+                        print(f"🔍 [{username}] DEBUG: Using default is_simple_vision=False due to exception")
                     if is_simple_vision:
                         # Skip decision for simple screenshot requests - use fast vision model directly
                         needs_deep_vision = False
