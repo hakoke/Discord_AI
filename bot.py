@@ -3825,6 +3825,149 @@ Now decide: "{message.content}" -> """
                                 urls = context_urls[:1]  # Use first URL found
                                 print(f"🔗 [{username}] No URL in current/replied message, but found URL in context: {urls[0][:80]}...")
                                 break
+                    
+                    # PRIORITY 3: If still no URL but user wants screenshot, use AI to extract website name and convert to URL
+                    if not urls and wants_screenshot:
+                        async def ai_extract_website_url():
+                            """AI extracts website name from message and converts it to a URL (two-tier: fast for known sites, search for unknown)"""
+                            
+                            # STEP 1: Extract website name from message
+                            extract_name_prompt = f"""User message: "{message.content}"
+
+Extract the website/domain name the user wants to visit (e.g., "reddit", "amazon", "spotify", "bandle").
+
+Rules:
+- Look for website/domain names mentioned in the message
+- Ignore common words that aren't websites
+- Return ONLY the website name, nothing else
+- If no website name can be identified, respond with "NONE"
+
+Examples:
+"go to reddit and show me" -> reddit
+"visit amazon" -> amazon
+"show me spotify" -> spotify
+"go to bandl" -> bandl
+"check out github" -> github
+
+Website name: """
+                            
+                            try:
+                                decision_model = get_fast_model()
+                                name_response = await queued_generate_content(decision_model, extract_name_prompt)
+                                website_name = name_response.text.strip().strip('"\'').strip().lower()
+                                
+                                if not website_name or website_name.upper() == "NONE":
+                                    return None
+                                
+                                # STEP 2: Quick check if it's a well-known/popular site
+                                known_site_check = f"""Is "{website_name}" a well-known, popular website that you're 100% certain about?
+
+Examples of well-known sites: reddit, amazon, spotify, youtube, github, twitter, x, instagram, facebook, netflix, etc.
+
+Respond with ONLY: "YES" or "NO"
+
+Decision: """
+                                
+                                known_check_response = await queued_generate_content(decision_model, known_site_check)
+                                is_known = known_check_response.text.strip().upper()
+                                
+                                if 'YES' in is_known:
+                                    # TIER 1: Fast path - convert known site directly
+                                    convert_prompt = f"""Convert the website name "{website_name}" to its full URL.
+
+Rules:
+- Use the correct domain (e.g., "x.com" not "twitter.com", "youtube.com" not "yt.com")
+- Format: https://www.[website-name].com (or appropriate TLD)
+- For well-known sites, use the official domain
+
+Examples:
+"reddit" -> https://www.reddit.com
+"spotify" -> https://www.spotify.com
+"amazon" -> https://www.amazon.com
+"youtube" -> https://www.youtube.com
+"x" -> https://www.x.com
+"github" -> https://www.github.com
+
+Respond with ONLY the URL, nothing else.
+
+URL: """
+                                    
+                                    convert_response = await queued_generate_content(decision_model, convert_prompt)
+                                    extracted_url = convert_response.text.strip().strip('"\'').strip()
+                                    
+                                    # Validate and format URL
+                                    if extracted_url and extracted_url.upper() != "NONE":
+                                        if not extracted_url.startswith(('http://', 'https://')):
+                                            if '.' in extracted_url:
+                                                extracted_url = f'https://{extracted_url}'
+                                            else:
+                                                return None
+                                        
+                                        if '.' in extracted_url and ('http://' in extracted_url or 'https://' in extracted_url):
+                                            print(f"🔗 [{username}] Fast path: Converted known site '{website_name}' to URL")
+                                            return extracted_url
+                                
+                                # TIER 2: Unknown/uncertain site - search for it
+                                print(f"🔍 [{username}] Unknown site '{website_name}', searching internet...")
+                                search_query = f"{website_name} website"
+                                search_results = await search_internet(search_query)
+                                
+                                # Extract URL from search results
+                                if search_results and "URL:" in search_results:
+                                    # Try to find the first URL in search results
+                                    url_pattern = r'URL:\s*(https?://[^\s\n]+)'
+                                    url_matches = re.findall(url_pattern, search_results)
+                                    
+                                    if url_matches:
+                                        # Get the first URL that looks like the main website (not subpages)
+                                        for url_match in url_matches:
+                                            url = url_match.strip()
+                                            # Prefer URLs that match the website name in domain
+                                            domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
+                                            if domain_match:
+                                                domain = domain_match.group(1).lower()
+                                                # Check if website name appears in domain
+                                                if website_name.lower() in domain or domain.replace('.com', '').replace('.org', '').replace('.net', '') == website_name.lower():
+                                                    print(f"🔗 [{username}] Found URL via search: {url[:80]}...")
+                                                    return url
+                                        
+                                        # If no perfect match, use first result
+                                        found_url = url_matches[0].strip()
+                                        print(f"🔗 [{username}] Found URL via search (first result): {found_url[:80]}...")
+                                        return found_url
+                                
+                                # If search didn't find URL, try AI conversion as fallback
+                                print(f"⚠️  [{username}] Search didn't find URL, trying AI conversion as fallback...")
+                                fallback_prompt = f"""Convert "{website_name}" to a website URL. Make your best guess.
+
+Format: https://www.[website-name].com
+
+URL: """
+                                fallback_response = await queued_generate_content(decision_model, fallback_prompt)
+                                fallback_url = fallback_response.text.strip().strip('"\'').strip()
+                                
+                                if fallback_url and fallback_url.upper() != "NONE":
+                                    if not fallback_url.startswith(('http://', 'https://')):
+                                        if '.' in fallback_url:
+                                            fallback_url = f'https://{fallback_url}'
+                                        else:
+                                            return None
+                                    
+                                    if '.' in fallback_url and ('http://' in fallback_url or 'https://' in fallback_url):
+                                        print(f"🔗 [{username}] Fallback: AI converted '{website_name}' to URL")
+                                        return fallback_url
+                                
+                                return None
+                                
+                            except Exception as e:
+                                handle_rate_limit_error(e)
+                                print(f"⚠️  [{username}] Error in ai_extract_website_url: {e}")
+                                return None
+                        
+                        extracted_url = await ai_extract_website_url()
+                        if extracted_url:
+                            urls = [extracted_url]
+                            print(f"🔗 [{username}] AI converted website name to URL: {urls[0][:80]}...")
             
             if urls:
                 print(f"🔗 [{username}] Found {len(urls)} URL(s) in message")
