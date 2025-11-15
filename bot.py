@@ -4424,17 +4424,22 @@ async def format_personality_profile(profile_data: dict, username: str, user_id:
         embed.set_footer(text="Use /profile @user to see someone else's profile")
         return embed
     
-    # Check if this is the actual nested profile structure (with memory_summary, my_brutally_honest_take, etc.)
+    # Check if this is the actual nested profile structure (with memory_summary, summary, my_brutally_honest_take, etc.)
     # If so, handle it directly instead of looking for summary/request_history
-    if 'memory_summary' in profile_data or 'my_brutally_honest_take' in profile_data or 'personality_and_behavior' in profile_data:
+    if 'memory_summary' in profile_data or 'summary' in profile_data or 'my_brutally_honest_take' in profile_data or 'personality_and_behavior' in profile_data or 'behavioral_analysis' in profile_data:
         # This is the actual profile structure - extract and format it
         print(f"🔍 [PROFILE] Detected actual profile structure, extracting fields...")
         
-        # Memory summary
+        # Summary (check both memory_summary and summary)
         if 'memory_summary' in profile_data:
             summary = profile_data['memory_summary']
             if len(summary) > 1024:
                 summary = await summarize_text_quick(summary, "memory summary", 1024)
+            embed.add_field(name="📝 Summary", value=summary[:1024], inline=False)
+        elif 'summary' in profile_data:
+            summary = profile_data['summary']
+            if len(summary) > 1024:
+                summary = await summarize_text_quick(summary, "summary", 1024)
             embed.add_field(name="📝 Summary", value=summary[:1024], inline=False)
         
         # Brutally honest take
@@ -4444,7 +4449,7 @@ async def format_personality_profile(profile_data: dict, username: str, user_id:
                 honest = await summarize_text_quick(honest, "brutally honest take", 1024)
             embed.add_field(name="🧠 Brutally Honest Take", value=honest[:1024], inline=False)
         
-        # Personality and behavior
+        # Personality and behavior (check both personality_and_behavior and behavioral_analysis)
         if 'personality_and_behavior' in profile_data:
             try:
                 pnb = profile_data['personality_and_behavior']
@@ -4469,6 +4474,56 @@ async def format_personality_profile(profile_data: dict, username: str, user_id:
                         embed.add_field(name="🎭 Personality & Behavior", value=pnb_text[:1024], inline=False)
             except Exception as pnb_error:
                 print(f"⚠️  [PROFILE] Error extracting personality_and_behavior: {pnb_error}")
+        
+        # Behavioral analysis (if separate from personality_and_behavior)
+        if 'behavioral_analysis' in profile_data:
+            try:
+                ba = profile_data['behavioral_analysis']
+                if isinstance(ba, dict):
+                    ba_text = ""
+                    if 'core_motivation' in ba:
+                        ba_text += f"**Core Motivation:** {ba['core_motivation']}\n\n"
+                    if 'patterns_observed' in ba:
+                        patterns_list = ba['patterns_observed']
+                        if isinstance(patterns_list, list):
+                            patterns_list = patterns_list[:3]  # Limit to 3
+                            for pattern in patterns_list:
+                                if isinstance(pattern, dict):
+                                    name = pattern.get('name', 'Unknown')
+                                    status = pattern.get('status', '')
+                                    desc = pattern.get('description', '')
+                                    if len(desc) > 200:
+                                        desc = desc[:200] + "..."
+                                    ba_text += f"**{name}** ({status}): {desc}\n"
+                    if len(ba_text) > 1024:
+                        ba_text = await summarize_text_quick(ba_text, "behavioral analysis", 1024)
+                    if ba_text:
+                        embed.add_field(name="🎭 Behavioral Analysis", value=ba_text[:1024], inline=False)
+            except Exception as ba_error:
+                print(f"⚠️  [PROFILE] Error extracting behavioral_analysis: {ba_error}")
+        
+        # Linguistic profile
+        if 'linguistic_profile' in profile_data:
+            try:
+                lp = profile_data['linguistic_profile']
+                if isinstance(lp, dict):
+                    lp_text = ""
+                    if 'primary' in lp:
+                        lp_text += f"**Primary Language:** {lp['primary']}\n"
+                    if 'secondary' in lp:
+                        lp_text += f"**Secondary Language:** {lp['secondary']}\n"
+                    if 'quirks' in lp and isinstance(lp['quirks'], list):
+                        lp_text += "\n**Linguistic Quirks:**\n"
+                        for quirk in lp['quirks'][:5]:  # Limit to 5
+                            if len(quirk) > 150:
+                                quirk = quirk[:150] + "..."
+                            lp_text += f"• {quirk}\n"
+                    if len(lp_text) > 1024:
+                        lp_text = await summarize_text_quick(lp_text, "linguistic profile", 1024)
+                    if lp_text:
+                        embed.add_field(name="💬 Linguistic Profile", value=lp_text[:1024], inline=False)
+            except Exception as lp_error:
+                print(f"⚠️  [PROFILE] Error extracting linguistic_profile: {lp_error}")
         
         # Lore and inside jokes
         if 'lore_and_inside_jokes' in profile_data:
