@@ -4424,7 +4424,83 @@ async def format_personality_profile(profile_data: dict, username: str, user_id:
         embed.set_footer(text="Use /profile @user to see someone else's profile")
         return embed
     
-    # Summary
+    # Check if this is the actual nested profile structure (with memory_summary, my_brutally_honest_take, etc.)
+    # If so, handle it directly instead of looking for summary/request_history
+    if 'memory_summary' in profile_data or 'my_brutally_honest_take' in profile_data or 'personality_and_behavior' in profile_data:
+        # This is the actual profile structure - extract and format it
+        print(f"🔍 [PROFILE] Detected actual profile structure, extracting fields...")
+        
+        # Memory summary
+        if 'memory_summary' in profile_data:
+            summary = profile_data['memory_summary']
+            if len(summary) > 1024:
+                summary = await summarize_text_quick(summary, "memory summary", 1024)
+            embed.add_field(name="📝 Summary", value=summary[:1024], inline=False)
+        
+        # Brutally honest take
+        if 'my_brutally_honest_take' in profile_data:
+            honest = profile_data['my_brutally_honest_take']
+            if len(honest) > 1024:
+                honest = await summarize_text_quick(honest, "brutally honest take", 1024)
+            embed.add_field(name="🧠 Brutally Honest Take", value=honest[:1024], inline=False)
+        
+        # Personality and behavior
+        if 'personality_and_behavior' in profile_data:
+            try:
+                pnb = profile_data['personality_and_behavior']
+                if isinstance(pnb, dict):
+                    pnb_text = ""
+                    if 'core_motivation' in pnb:
+                        pnb_text += f"**Core Motivation:** {pnb['core_motivation']}\n\n"
+                    if 'behavioral_analysis' in pnb and isinstance(pnb['behavioral_analysis'], dict):
+                        if 'core_motivation' in pnb['behavioral_analysis']:
+                            pnb_text += f"**Core Motivation:** {pnb['behavioral_analysis']['core_motivation']}\n\n"
+                        if 'patterns_observed' in pnb['behavioral_analysis']:
+                            patterns_list = pnb['behavioral_analysis']['patterns_observed'][:3]  # Limit to 3
+                            for pattern in patterns_list:
+                                if isinstance(pattern, dict):
+                                    name = pattern.get('name', 'Unknown')
+                                    status = pattern.get('status', '')
+                                    desc = pattern.get('description', '')[:200]
+                                    pnb_text += f"**{name}** ({status}): {desc}\n"
+                    if len(pnb_text) > 1024:
+                        pnb_text = await summarize_text_quick(pnb_text, "personality and behavior analysis", 1024)
+                    if pnb_text:
+                        embed.add_field(name="🎭 Personality & Behavior", value=pnb_text[:1024], inline=False)
+            except Exception as pnb_error:
+                print(f"⚠️  [PROFILE] Error extracting personality_and_behavior: {pnb_error}")
+        
+        # Lore and inside jokes
+        if 'lore_and_inside_jokes' in profile_data:
+            try:
+                lore = profile_data['lore_and_inside_jokes']
+                if isinstance(lore, dict):
+                    lore_text = ""
+                    for key, value in list(lore.items())[:3]:  # Limit to 3 items
+                        if isinstance(value, dict):
+                            note = value.get('note', '')[:200]
+                            status = value.get('status', '')
+                            lore_text += f"**{key}** ({status}): {note}\n"
+                    if len(lore_text) > 1024:
+                        lore_text = await summarize_text_quick(lore_text, "lore and inside jokes", 1024)
+                    if lore_text:
+                        embed.add_field(name="📚 Lore & Inside Jokes", value=lore_text[:1024], inline=False)
+            except Exception as lore_error:
+                print(f"⚠️  [PROFILE] Error extracting lore_and_inside_jokes: {lore_error}")
+        
+        # Relationship notes
+        if 'relationship_notes' in profile_data:
+            rel_notes = profile_data['relationship_notes']
+            if len(rel_notes) > 1024:
+                rel_notes = await summarize_text_quick(rel_notes, "relationship notes", 1024)
+            embed.add_field(name="💭 Relationship Notes", value=rel_notes[:1024], inline=False)
+        
+        # If we added fields, we're done
+        if len(embed.fields) > 1:  # More than just user info
+            embed.set_footer(text="Use /profile @user to see someone else's profile")
+            return embed
+    
+    # Summary (for expected format)
     if 'summary' in profile_data:
         summary = profile_data['summary']
         if len(summary) > 1024:
