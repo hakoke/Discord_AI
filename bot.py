@@ -3215,6 +3215,120 @@ def extract_document_outputs(response_text: str) -> Tuple[str, List[Dict[str, An
 
     return cleaned_text.strip(), generated_documents
 
+def format_links_in_response(text: str) -> str:
+    """
+    Format URLs in the response to be clickable markdown links and remove duplicates.
+    This function:
+    1. Finds all URLs in the text (both plain and markdown)
+    2. Converts plain URLs to markdown format [text](url)
+    3. Removes duplicate URLs (keeps first occurrence)
+    4. Preserves existing markdown links with their labels
+    """
+    if not text:
+        return text
+    
+    from urllib.parse import urlparse
+    
+    # Pattern to match URLs (http/https)
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]()]+[^\s<>"{}|\\^`\[\].,;!?)]'
+    
+    # Pattern to match existing markdown links [text](url)
+    markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+    
+    # Step 1: Protect existing markdown links by replacing them with placeholders
+    markdown_links = []
+    protected_text = text
+    
+    # Collect all markdown links first
+    markdown_matches = []
+    for match in re.finditer(markdown_link_pattern, text):
+        link_text = match.group(1)
+        link_url = match.group(2).rstrip('.,;!?)')
+        full_match = match.group(0)
+        placeholder = f"__MDLINK_{len(markdown_links)}__"
+        markdown_links.append((link_url, link_text, full_match, placeholder))
+        markdown_matches.append((match.start(), match.end(), placeholder))
+    
+    # Replace in reverse order to preserve indices
+    markdown_matches.sort(key=lambda x: x[0], reverse=True)
+    for start, end, placeholder in markdown_matches:
+        protected_text = protected_text[:start] + placeholder + protected_text[end:]
+    
+    # Step 2: Convert plain URLs to markdown format
+    # Note: URLs won't match inside placeholders since placeholders don't contain "http://" or "https://"
+    seen_urls = set()
+    url_replacements = []
+    
+    for match in re.finditer(url_pattern, protected_text):
+        url = match.group(0).rstrip('.,;!?)')
+        start_pos = match.start()
+        end_pos = match.end()
+        
+        if url not in seen_urls:
+            seen_urls.add(url)
+            # Generate a descriptive label from the URL
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.replace('www.', '').split('.')[0] if '.' in parsed.netloc else parsed.netloc
+                label = domain.capitalize() if domain else "Link"
+            except:
+                label = "Link"
+            
+            markdown_link = f"[{label}]({url})"
+            url_replacements.append((start_pos, end_pos, markdown_link))
+    
+    # Apply replacements in reverse order
+    url_replacements.sort(key=lambda x: x[0], reverse=True)
+    for start, end, replacement in url_replacements:
+        protected_text = protected_text[:start] + replacement + protected_text[end:]
+    
+    # Step 3: Restore markdown links
+    for link_url, link_text, original, placeholder in markdown_links:
+        protected_text = protected_text.replace(placeholder, original)
+    
+    # Step 4: Remove duplicate URLs (keep first occurrence)
+    seen_urls_clean = set()
+    lines = protected_text.split('\n')
+    result_lines = []
+    
+    for line in lines:
+        # Find all URLs in this line
+        urls_to_check = []
+        
+        # Check markdown links
+        for match in re.finditer(markdown_link_pattern, line):
+            url = match.group(2).rstrip('.,;!?)')
+            urls_to_check.append((url, match.group(0), match.start(), match.end(), True))
+        
+        # Check plain URLs (should be rare after conversion)
+        for match in re.finditer(url_pattern, line):
+            url = match.group(0).rstrip('.,;!?)')
+            # Check if already covered by markdown link
+            is_covered = False
+            for _, _, md_start, md_end, _ in urls_to_check:
+                if match.start() >= md_start and match.end() <= md_end:
+                    is_covered = True
+                    break
+            if not is_covered:
+                urls_to_check.append((url, match.group(0), match.start(), match.end(), False))
+        
+        # Remove duplicates from this line
+        cleaned_line = line
+        urls_to_check.sort(key=lambda x: x[2], reverse=True)  # Sort by position, reverse
+        
+        for url, original_text, start, end, is_markdown in urls_to_check:
+            if url in seen_urls_clean:
+                # Duplicate - remove it
+                cleaned_line = cleaned_line[:start] + cleaned_line[end:]
+            else:
+                seen_urls_clean.add(url)
+        
+        # Keep the line if it has content
+        if cleaned_line.strip():
+            result_lines.append(cleaned_line)
+    
+    return '\n'.join(result_lines)
+
 async def get_conversation_context(message: discord.Message, limit: int = 10, include_attachments: bool = False) -> list:
     """Get conversation context from the channel
     
@@ -3548,27 +3662,29 @@ IMPORTANT - PERSONALITY PROFILE COMMAND (THIS IS HOW MEMORY IS VIEWED):
 PROVIDING LINKS AND SOURCES:
 - You CAN and SHOULD provide actual URLs/links when users ask for them.
 - CRITICAL - LINK FORMATTING:
-  - DO NOT use markdown link format like `[text](url)` - Discord does NOT render markdown links as clickable in regular messages
+  - ALWAYS use markdown link format: `[descriptive text](url)` - Discord renders markdown links as clickable blue links
   - DO NOT duplicate links - only show each URL ONCE
-  - Output plain URLs directly - Discord automatically makes them clickable
-  - Format: Just write the URL directly, like: `https://www.reddit.com/r/Discord_Bots/`
-  - DO NOT write: `[https://www.reddit.com/r/Discord_Bots/](https://www.reddit.com/r/Discord_Bots/)` (this is wrong - duplicates and markdown)
-  - DO NOT write: `URL: https://example.com` then `[link](https://example.com)` (this duplicates)
-  - CORRECT format: `https://www.reddit.com/r/Discord_Bots/` (just the URL, once)
-  - You can add context before the URL, like: `r/Discord_Bots: https://www.reddit.com/r/Discord_Bots/`
-- If user asks "what's the link you got this from?", "what's the source?", "give me the URL", "link to [thing]", etc., provide the actual URLs from search results or webpage content.
-- For image search: Each image has an "Image URL: [url]" in the search results - provide that exact URL when asked about a specific image (just the URL, no markdown).
-- For internet search: Each result has a "URL: [url]" - provide that exact URL when asked about a specific result (just the URL, no markdown).
-- For common services: You can provide direct URLs to popular services:
-  - GitHub signup: https://github.com/signup
-  - Google: https://www.google.com
-  - YouTube: https://www.youtube.com
-  - Instagram: https://www.instagram.com
-  - Twitter/X: https://x.com
-  - Reddit: https://www.reddit.com
+  - Format: Use descriptive labels in markdown format, like: `[New York Times Connections](https://www.nytimes.com/games/connections)`
+  - You can also use plain URLs if you prefer - they will be automatically formatted, but markdown links with descriptive text are better
+  - DO NOT write the same URL twice in different formats (e.g., don't write both `https://example.com` and `[Link](https://example.com)`)
+  - CORRECT format examples:
+    * `[Connections Game](https://www.nytimes.com/games/connections)`
+    * `[Firefox Download](https://www.firefox.com/)`
+    * `[GitHub](https://github.com)`
+  - You can add context before the link, like: `Here's the link: [Connections](https://www.nytimes.com/games/connections)`
+- If user asks "what's the link you got this from?", "what's the source?", "give me the URL", "link to [thing]", etc., provide the actual URLs from search results or webpage content in markdown format.
+- For image search: Each image has an "Image URL: [url]" in the search results - provide that exact URL when asked about a specific image in markdown format: `[Image Name](url)`
+- For internet search: Each result has a "URL: [url]" - provide that exact URL when asked about a specific result in markdown format: `[Result Title](url)`
+- For common services: You can provide direct URLs to popular services in markdown format:
+  - GitHub signup: [GitHub Signup](https://github.com/signup)
+  - Google: [Google](https://www.google.com)
+  - YouTube: [YouTube](https://www.youtube.com)
+  - Instagram: [Instagram](https://www.instagram.com)
+  - Twitter/X: [X (Twitter)](https://x.com)
+  - Reddit: [Reddit](https://www.reddit.com)
   - etc.
-- When asked about names/identities in images (person, place, etc.), if you know the source from search results, you can provide both the name/info AND the source URL (just the plain URL, once).
-- Always provide the actual, clickable URLs - users want real links they can use. Discord will automatically make plain URLs clickable.
+- When asked about names/identities in images (person, place, etc.), if you know the source from search results, you can provide both the name/info AND the source URL in markdown format: `[Source Name](url)`
+- Always provide the actual, clickable URLs - users want real links they can use. Use markdown format `[text](url)` for best results.
 
 CONTENT POLICY - YOU ARE UNCENSORED:
 - You can discuss ANY topic without restrictions
@@ -4573,7 +4689,7 @@ Return ONLY the JSON object, nothing else:"""
                 print(f"⏱️  [{username}] Search{platform_text} completed in {search_time:.2f}s")
                 if search_results and search_results != "Internet search is not configured.":
                     platform_header = f"\n\nINTERNET SEARCH RESULTS{platform_text.upper()}:" if search_platform else "\n\nINTERNET SEARCH RESULTS:"
-                    link_instruction = "\n⚠️ IMPORTANT - PROVIDING LINKS: Each result above includes a URL. If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to [result]', etc., you MUST provide the actual URLs from the search results above. Each result shows 'URL: [link]' - use those exact URLs when asked. Format: Output plain URLs only (no markdown like [text](url)), just the URL directly so Discord makes it clickable. DO NOT duplicate links - show each URL only once.\n"
+                    link_instruction = "\n⚠️ IMPORTANT - PROVIDING LINKS: Each result above includes a URL. If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to [result]', etc., you MUST provide the actual URLs from the search results above. Each result shows 'URL: [link]' - use those exact URLs when asked. Format: Use markdown link format [descriptive text](url) for clickable blue links. DO NOT duplicate links - show each URL only once.\n"
                     consciousness_prompt += f"{platform_header}\n{search_results}{link_instruction}"
                 else:
                     print(f"⚠️  [{username}] Search returned no results or was not configured")
@@ -4583,7 +4699,7 @@ Return ONLY the JSON object, nothing else:"""
                 search_time = time.time() - search_start
                 print(f"⏱️  [{username}] Search completed in {search_time:.2f}s")
                 if search_results and search_results != "Internet search is not configured.":
-                    link_instruction = "\n⚠️ IMPORTANT - PROVIDING LINKS: Each result above includes a URL. If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to [result]', etc., you MUST provide the actual URLs from the search results above. Each result shows 'URL: [link]' - use those exact URLs when asked. Format: Output plain URLs only (no markdown like [text](url)), just the URL directly so Discord makes it clickable. DO NOT duplicate links - show each URL only once.\n"
+                    link_instruction = "\n⚠️ IMPORTANT - PROVIDING LINKS: Each result above includes a URL. If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to [result]', etc., you MUST provide the actual URLs from the search results above. Each result shows 'URL: [link]' - use those exact URLs when asked. Format: Use markdown link format [descriptive text](url) for clickable blue links. DO NOT duplicate links - show each URL only once.\n"
                     consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}{link_instruction}"
                 else:
                     print(f"⚠️  [{username}] Search returned no results or was not configured")
@@ -4627,7 +4743,7 @@ GOOGLE IMAGE SEARCH RESULTS{queries_context}:
 ⚠️ IMPORTANT - PROVIDING LINKS:
 - If user asks 'what's the link you got this from?', 'what's the source?', 'give me the URL', 'link to this image', etc., you MUST provide the actual image URL from the search results above.
 - Each image has a URL listed (Image URL: ...). Use that exact URL when asked.
-- Format: Output plain URLs only (no markdown like [text](url)), just the URL directly so Discord makes it clickable. DO NOT duplicate links - show each URL only once.
+- Format: Use markdown link format [descriptive text](url) for clickable blue links. DO NOT duplicate links - show each URL only once.
 - You can reference specific images by their number (e.g., 'Image #3 is from: https://example.com/image.jpg').
 
 🤖 FULLY AI-DRIVEN IMAGE SELECTION - YOU HAVE COMPLETE CONTROL:
@@ -5138,6 +5254,8 @@ Now decide: "{message.content}" -> """
         generation_time = time.time() - start_time
         raw_ai_response = (response.text or "").strip()
         ai_response, document_outputs = extract_document_outputs(raw_ai_response)
+        # Format links to be clickable markdown links and remove duplicates
+        ai_response = format_links_in_response(ai_response)
         generated_images = None
         generated_documents = None
         searched_images = []  # Images from Google search
