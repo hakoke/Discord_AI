@@ -2661,6 +2661,28 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Read, compare, and summarize PDF/Word documents shared in the chat (including replies)
 - ✅ Create or redraft professional PDF/Word documents on demand without breaking existing structure
 - ✅ **Personality Profiles**: Use `/profile` to view detailed personality assessments for yourself or others
+- ✅ **Image Search**: Search Google Images and attach relevant images to responses
+- ✅ **Code Generation**: Write, debug, and explain code in any programming language
+- ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
+- ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
+
+YOUR CAPABILITIES - HOW TO RESPOND:
+When users ask "what can you do?", "what are your capabilities?", "what can you help with?", "what features do you have?", etc., respond naturally in your own words based on the capabilities listed above. Be enthusiastic and helpful - explain what you can do in a friendly, conversational way. You can mention specific examples like:
+- "I can generate images from text descriptions using AI"
+- "I can search the internet for current information"
+- "I can analyze images you share with me"
+- "I can create PDF documents with code or content"
+- "I remember our conversations and build personality profiles"
+- "I can help with coding, debugging, and technical questions"
+- "I can search specific platforms like Reddit, YouTube, Instagram, etc."
+- "I can read and summarize web pages and documents"
+Feel free to be creative and enthusiastic when describing your capabilities!
+
+SLASH COMMANDS AVAILABLE:
+- `/profile [user]` - View detailed personality profile for yourself or another user. If no user is specified, shows your own profile. Example: `/profile` or `/profile @username`
+- `/help` - Get help and information about how to use the bot, its capabilities, and available commands
+
+When users ask about commands or how to use the bot, mention these slash commands naturally. For example: "You can use `/profile` to see your detailed personality profile!" or "Try `/help` to see all available commands and how to use me!"
 
 If someone asks "can you make images?" or "generate an image" - say yes and help them shape the prompt.
 If someone asks for a PDF/Word document (new or edited) - say yes, read any provided materials, and deliver a polished document.
@@ -4857,6 +4879,76 @@ async def profile_command(interaction: discord.Interaction, user: discord.Member
         import traceback
         print(f"❌ [PROFILE] Traceback: {traceback.format_exc()}")
         await interaction.followup.send(f"Error retrieving profile: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name='help', description='Get help and information about how to use the bot')
+async def help_command(interaction: discord.Interaction):
+    """Slash command to show help information"""
+    await interaction.response.defer()
+    
+    bot_name = os.getenv('BOT_NAME', 'ServerMate').title()
+    
+    embed = discord.Embed(
+        title=f"🤖 {bot_name} Help",
+        description=f"Hi! I'm {bot_name}, your AI assistant. Here's how to use me:",
+        color=0x5865F2
+    )
+    
+    # How to interact
+    embed.add_field(
+        name="💬 How to Use Me",
+        value=(
+            "**Mention me:** `@{bot_name} your message`\n"
+            "**Reply to my messages:** Just reply to any message I sent\n"
+            "**Say my name:** `hey {bot_name}, what's up?` (works with typos too!)\n"
+            "I'll respond when you mention me, reply to me, or say my name!"
+        ).format(bot_name=bot_name),
+        inline=False
+    )
+    
+    # Capabilities
+    embed.add_field(
+        name="✨ What I Can Do",
+        value=(
+            "• **Chat & Answer Questions** - Ask me anything!\n"
+            "• **Generate Images** - Create images from text descriptions\n"
+            "• **Analyze Images** - Share images and I'll analyze them\n"
+            "• **Search the Internet** - Get current information from the web\n"
+            "• **Platform-Specific Search** - Search Reddit, YouTube, Instagram, etc.\n"
+            "• **Code Help** - Write, debug, and explain code\n"
+            "• **Create Documents** - Generate PDF/Word files from code or content\n"
+            "• **Read Web Pages** - Share links and I'll read the content\n"
+            "• **Remember Conversations** - I build personality profiles over time\n"
+            "• **Multi-modal** - Process text, images, and documents together"
+        ),
+        inline=False
+    )
+    
+    # Slash Commands
+    embed.add_field(
+        name="⚡ Slash Commands",
+        value=(
+            "`/profile [user]` - View detailed personality profile\n"
+            "`/help` - Show this help message"
+        ),
+        inline=False
+    )
+    
+    # Examples
+    embed.add_field(
+        name="📝 Examples",
+        value=(
+            "`@{bot_name} what can you do?`\n"
+            "`@{bot_name} generate an image of a sunset`\n"
+            "`@{bot_name} debug this python code`\n"
+            "`@{bot_name} search reddit for python tips`\n"
+            "`@{bot_name} create a PDF with this code`"
+        ).format(bot_name=bot_name),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Use /profile to see your personality profile!")
+    
+    await interaction.followup.send(embed=embed)
 
 @bot.command(name='memory')
 async def show_memory(ctx):
