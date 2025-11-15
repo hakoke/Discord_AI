@@ -3785,49 +3785,13 @@ Now decide: "{message.content}" -> """
             print(f"🤖 [{username}] AI decided action type: {action_type}")
             
             # If no URLs in current message but AI determined user wants screenshot/interaction
-            # Check replied message FIRST, then conversation context for URLs from recent messages
-            # BUT skip this if AI determined it's an image search OR if URLs were found in current message
+            # PRIORITY 1: Try AI extraction from current message first (most relevant - user's current intent)
+            # PRIORITY 2: Check replied message if AI extraction didn't work
+            # PRIORITY 3: Check context messages as last resort
             # IMPORTANT: Only use context URLs if NO URLs were found in the current message AND user wants screenshot
             if not urls_found_in_current_message and wants_screenshot:
-                    # PRIORITY 1: Check replied message first (most relevant)
-                    if message.reference:
-                        try:
-                            replied_msg = await message.channel.fetch_message(message.reference.message_id)
-                            replied_content = replied_msg.content or ''
-                            replied_urls = extract_urls(replied_content)
-                            if replied_urls:
-                                urls = replied_urls[:1]  # Use first URL from replied message
-                                print(f"🔗 [{username}] No URL in current message, but found URL in replied message: {urls[0][:80]}...")
-                            else:
-                                # Also check if the replied message had attachments (screenshots might have URLs in text)
-                                # Look at the replied message's text for URLs
-                                if not urls and context_messages:
-                                    # Find the replied message in context
-                                    replied_id = str(message.reference.message_id)
-                                    for msg in context_messages:
-                                        if str(msg.get('id', '')) == replied_id:
-                                            msg_content = msg.get('content', '') or ''
-                                            context_urls = extract_urls(msg_content)
-                                            if context_urls:
-                                                urls = context_urls[:1]
-                                                print(f"🔗 [{username}] Found URL in replied message context: {urls[0][:80]}...")
-                                                break
-                        except Exception as e:
-                            print(f"⚠️  [{username}] Error fetching replied message for URL: {e}")
-                    
-                    # PRIORITY 2: If still no URL, check recent context messages (last 5 messages, most recent first)
-                    if not urls and context_messages:
-                        # Check most recent messages first (they're more relevant)
-                        for msg in reversed(context_messages[-5:]):  # Reverse to check newest first
-                            msg_content = msg.get('content', '') or ''
-                            context_urls = extract_urls(msg_content)
-                            if context_urls:
-                                urls = context_urls[:1]  # Use first URL found
-                                print(f"🔗 [{username}] No URL in current/replied message, but found URL in context: {urls[0][:80]}...")
-                                break
-                    
-                    # PRIORITY 3: If still no URL but user wants screenshot, use AI to extract website name and convert to URL
-                    if not urls and wants_screenshot:
+                    # PRIORITY 1: Use AI to extract website name from current message and convert to URL (most relevant - current intent)
+                    if not urls:
                         async def ai_extract_website_url():
                             """AI extracts website name from message and converts it to a URL (two-tier: fast for known sites, search for unknown)"""
                             
@@ -3968,6 +3932,43 @@ URL: """
                         if extracted_url:
                             urls = [extracted_url]
                             print(f"🔗 [{username}] AI converted website name to URL: {urls[0][:80]}...")
+                    
+                    # PRIORITY 2: If AI extraction didn't work, check replied message
+                    if not urls and message.reference:
+                        try:
+                            replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                            replied_content = replied_msg.content or ''
+                            replied_urls = extract_urls(replied_content)
+                            if replied_urls:
+                                urls = replied_urls[:1]  # Use first URL from replied message
+                                print(f"🔗 [{username}] AI extraction failed, but found URL in replied message: {urls[0][:80]}...")
+                            else:
+                                # Also check if the replied message had attachments (screenshots might have URLs in text)
+                                # Look at the replied message's text for URLs
+                                if not urls and context_messages:
+                                    # Find the replied message in context
+                                    replied_id = str(message.reference.message_id)
+                                    for msg in context_messages:
+                                        if str(msg.get('id', '')) == replied_id:
+                                            msg_content = msg.get('content', '') or ''
+                                            context_urls = extract_urls(msg_content)
+                                            if context_urls:
+                                                urls = context_urls[:1]
+                                                print(f"🔗 [{username}] Found URL in replied message context: {urls[0][:80]}...")
+                                                break
+                        except Exception as e:
+                            print(f"⚠️  [{username}] Error fetching replied message for URL: {e}")
+                    
+                    # PRIORITY 3: If still no URL, check recent context messages (last resort - may be old/stale)
+                    if not urls and context_messages:
+                        # Check most recent messages first (they're more relevant)
+                        for msg in reversed(context_messages[-5:]):  # Reverse to check newest first
+                            msg_content = msg.get('content', '') or ''
+                            context_urls = extract_urls(msg_content)
+                            if context_urls:
+                                urls = context_urls[:1]  # Use first URL found
+                                print(f"🔗 [{username}] Using URL from context (last resort): {urls[0][:80]}...")
+                                break
             
             if urls:
                 print(f"🔗 [{username}] Found {len(urls)} URL(s) in message")
