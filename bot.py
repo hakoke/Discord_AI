@@ -2166,8 +2166,23 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
                         element_desc = action.replace('click', '').strip().strip("'\"")
                         clicked = False
                         
-                        # Use AI vision to identify the element from the screenshot
-                        print(f"🤖 [NAVIGATE] Using AI vision to identify: '{element_desc}'")
+                        # Parse flexible descriptions with "or" (e.g., "18' or 'age verification")
+                        # Split by "or" and clean each option
+                        element_options = []
+                        if " or " in element_desc.lower():
+                            # Split by "or" and clean each part
+                            parts = re.split(r'\s+or\s+', element_desc, flags=re.IGNORECASE)
+                            for part in parts:
+                                cleaned = part.strip().strip("'\"")
+                                if cleaned:
+                                    element_options.append(cleaned)
+                        else:
+                            element_options = [element_desc]
+                        
+                        # If description is generic (like "video", "post", "article"), use AI vision to find any matching element
+                        is_generic = element_desc.lower() in ['video', 'post', 'article', 'button', 'link', 'image', 'picture']
+                        
+                        print(f"🤖 [NAVIGATE] Using AI vision to identify: '{element_desc}' (options: {element_options})")
                         ai_identified_text = None
                         try:
                             # Take current screenshot for AI analysis
@@ -2176,7 +2191,20 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
                             
                             # Use vision model to identify the element
                             vision_model = get_vision_model()
-                            identification_prompt = f"""Look at this webpage screenshot. The user wants to click on an element described as: "{element_desc}"
+                            
+                            # Build flexible description text
+                            if len(element_options) > 1:
+                                options_text = " or ".join([f'"{opt}"' for opt in element_options])
+                                description_text = f"an element matching any of these descriptions: {options_text}"
+                            elif is_generic:
+                                description_text = f"any {element_desc} element (the user wants to click on any {element_desc}, not a specific one)"
+                            else:
+                                description_text = f'an element described as: "{element_desc}"'
+                            
+                            identification_prompt = f"""Look at this webpage screenshot. The user wants to click on {description_text}
+
+THINK DYNAMICALLY: If the user asks for "video", "post", "article", etc., find ANY matching element of that type, not a specific one.
+If the user asks for "18" or "age verification", find the age verification button (it might say "I am 18", "18+", "Enter", "Continue", etc.).
 
 Identify the exact element they want to click:
 1. What is the EXACT text displayed on the button/link? (e.g., if user says "login", but button says "Log In", return "Log In")
@@ -2191,10 +2219,11 @@ If you cannot find the element, return:
 
 Examples:
 - User says "login", button shows "Log In" -> {{"exact_text": "Log In", "location": "top-right", "element_type": "button"}}
-- User says "sign up", link shows "Sign Up" -> {{"exact_text": "Sign Up", "location": "header", "element_type": "link"}}
-- User says "hello sign in", button shows "Hello, Sign in" -> {{"exact_text": "Hello, Sign in", "location": "top-right", "element_type": "button"}}
+- User says "video", page has multiple videos -> {{"exact_text": "Play" or first video title, "location": "center", "element_type": "button/link"}}
+- User says "18' or 'age verification", button shows "I am 18 or older" -> {{"exact_text": "I am 18 or older", "location": "center", "element_type": "button"}}
+- User says "post", page has multiple posts -> {{"exact_text": first post title or "Read more", "location": "center", "element_type": "link/button"}}
 
-Now identify: "{element_desc}" -> """
+Now identify: {description_text} -> """
                             
                             # Prepare image for vision model
                             screenshot_bytes_io = BytesIO()
@@ -2233,34 +2262,42 @@ Now identify: "{element_desc}" -> """
                         except Exception as ai_error:
                             print(f"⚠️  [NAVIGATE] AI vision identification failed: {ai_error}, falling back to text matching")
                         
-                        # Use AI-identified text if available, otherwise use original description
-                        search_text = ai_identified_text if ai_identified_text else element_desc
+                        # Use AI-identified text if available, otherwise try all element options
+                        search_texts = []
+                        if ai_identified_text:
+                            search_texts = [ai_identified_text]
+                        else:
+                            # Try all options from flexible description
+                            search_texts = element_options.copy()
                         
-                        # Try multiple strategies with timeouts (now with AI-identified text)
-                        strategies = [
+                        # Try multiple strategies with timeouts (now with AI-identified text or all options)
+                        strategies = []
+                        for search_text in search_texts:
+                            if not search_text:
+                                continue
                             # Try AI-identified exact text first (case-insensitive)
-                            lambda: page.get_by_text(search_text, exact=False).first.click(timeout=10000) if search_text else None,
+                            strategies.append(lambda st=search_text: page.get_by_text(st, exact=False).first.click(timeout=10000))
                             # Try case variations
-                            lambda: page.get_by_text(search_text.lower(), exact=False).first.click(timeout=10000) if search_text else None,
-                            lambda: page.get_by_text(search_text.title(), exact=False).first.click(timeout=10000) if search_text else None,
+                            strategies.append(lambda st=search_text: page.get_by_text(st.lower(), exact=False).first.click(timeout=10000))
+                            strategies.append(lambda st=search_text: page.get_by_text(st.title(), exact=False).first.click(timeout=10000))
                             # Try as button
-                            lambda: page.get_by_role('button', name=search_text, exact=False).first.click(timeout=10000) if search_text else None,
+                            strategies.append(lambda st=search_text: page.get_by_role('button', name=st, exact=False).first.click(timeout=10000))
                             # Try as link
-                            lambda: page.get_by_role('link', name=search_text, exact=False).first.click(timeout=10000) if search_text else None,
-                            # Try with original description as fallback
-                            lambda: page.get_by_text(element_desc, exact=False).first.click(timeout=10000),
-                            lambda: page.locator(f'text="{search_text}"').first.click(timeout=10000) if search_text else None,
-                            lambda: page.locator(f'[aria-label*="{search_text}"]').first.click(timeout=10000) if search_text else None,
-                        ]
+                            strategies.append(lambda st=search_text: page.get_by_role('link', name=st, exact=False).first.click(timeout=10000))
+                            # Try with locator
+                            strategies.append(lambda st=search_text: page.locator(f'text="{st}"').first.click(timeout=10000))
+                            strategies.append(lambda st=search_text: page.locator(f'[aria-label*="{st}"]').first.click(timeout=10000))
+                        
+                        # Also try original description as final fallback
+                        strategies.append(lambda: page.get_by_text(element_desc, exact=False).first.click(timeout=10000))
                         
                         for idx, strategy in enumerate(strategies):
-                            if strategy is None:
-                                continue
                             try:
-                                print(f"🔄 [NAVIGATE] Trying click strategy {idx+1} for: '{search_text}'")
+                                current_text = search_texts[0] if search_texts else element_desc
+                                print(f"🔄 [NAVIGATE] Trying click strategy {idx+1} for: '{current_text}'")
                                 await asyncio.wait_for(strategy(), timeout=8.0)  # Max 8 seconds per strategy
                                 clicked = True
-                                print(f"✅ [NAVIGATE] Clicked: '{search_text}' (strategy {idx+1})")
+                                print(f"✅ [NAVIGATE] Clicked: '{current_text}' (strategy {idx+1})")
                                 break
                             except asyncio.TimeoutError:
                                 print(f"⏱️  [NAVIGATE] Click strategy {idx+1} timed out")
@@ -2457,23 +2494,52 @@ URL: {url}
 
 Extract ALL browser actions the user wants to perform in sequence. Actions should be performed in the order mentioned.
 
+CRITICAL: THINK DYNAMICALLY AND UNDERSTAND USER INTENT - DON'T TAKE REQUESTS LITERALLY!
+
+You must interpret what the user MEANS, not what they literally say. Be flexible and smart like a human would be.
+
 Action types:
 - Click actions: "click 'Button Name'", "click 'Accept all'", "click 'Play'"
 - Scroll actions: "scroll to bottom", "scroll to top"
 - Wait actions: "wait 3 seconds"
 
-CRITICAL: Extract ALL actions, not just the first one!
-- If user says "click X then click Y" -> extract BOTH: ["click 'X'", "click 'Y'"]
-- If user says "click accept all then click play" -> extract BOTH: ["click 'accept all'", "click 'play'"]
-- Actions should be in the order they appear in the message
+INTELLIGENT INTERPRETATION RULES:
+1. "first video", "a video", "any video", "random video" → ALL mean "click on a video" (use generic description)
+   - User says "click on the first video" → Extract: "click 'video'" (not "click 'the first video'")
+   - User says "click on a random post" → Extract: "click 'post'" (not "click 'a random post'")
+   - User says "click on any video" → Extract: "click 'video'" (not "click 'any video'")
 
-Examples:
-"click 'Sign In' then screenshot" -> ["click 'Sign In'"]
-"click 'accept all' then click 'play' and show me" -> ["click 'accept all'", "click 'play'"]
-"go to site.com, click 'Login', then click 'Submit', then screenshot" -> ["click 'Login'", "click 'Submit'"]
-"scroll to bottom then click 'Load More'" -> ["scroll to bottom", "click 'Load More'"]
-"click button then wait 2 seconds then click next" -> ["click 'button'", "wait 2 seconds", "click 'next'"]
-"just screenshot" -> []
+2. Age verification / 18+ buttons → Use flexible descriptions
+   - User says "click i am 18 or older" → Extract: "click '18' or 'age verification' or 'i am 18'"
+   - User says "verify that you're 18" → Extract: "click '18' or 'verify' or 'age'"
+   - User says "click 18+" → Extract: "click '18' or '18+'"
+
+3. Generic items → Use the item type, not specific position
+   - User says "click on the first post" → Extract: "click 'post'" (not "click 'the first post'")
+   - User says "click on a random article" → Extract: "click 'article'" (not "click 'a random article'")
+   - User says "click on any button" → Extract: "click 'button'" (not "click 'any button'")
+
+4. Keep specific button names when they're actually specific
+   - User says "click 'Sign In'" → Extract: "click 'Sign In'" (this is specific, keep it)
+   - User says "click accept all" → Extract: "click 'accept all'" (this is specific, keep it)
+
+5. Extract ALL actions in sequence
+   - If user says "click X then click Y" → extract BOTH: ["click 'X'", "click 'Y'"]
+   - Actions should be in the order they appear in the message
+
+EXAMPLES OF SMART INTERPRETATION:
+"click on the first video" → ["click 'video'"]  ✅ (not ["click 'the first video'"])
+"click i am 18 or older" → ["click '18' or 'age verification'"]  ✅ (flexible matching)
+"click on a random post" → ["click 'post'"]  ✅ (not ["click 'a random post'"])
+"click on the first video then click play" → ["click 'video'", "click 'play'"]  ✅
+"go to site.com, click 'Login', then click 'Submit'" → ["click 'Login'", "click 'Submit'"]  ✅ (specific names kept)
+"verify that you're 18 then click on a video" → ["click '18' or 'verify' or 'age'", "click 'video'"]  ✅
+"click accept all then click on the first post" → ["click 'accept all'", "click 'post'"]  ✅
+
+WRONG (LITERAL - DON'T DO THIS):
+"click on the first video" → ["click 'the first video'"]  ❌ (too literal, won't work)
+"click i am 18 or older" → ["click 'i am 18 or older'"]  ❌ (too literal, won't match button)
+"click on a random post" → ["click 'a random post'"]  ❌ (too literal, won't work)
 
 Respond with ONLY a JSON array of action strings. Format: ["action1", "action2", "action3"]
 If no actions, return: []
