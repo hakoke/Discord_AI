@@ -5694,7 +5694,10 @@ Now decide: "{message.content}" -> """
         else:
             try:
                 # Use queued generate_content for rate limiting
+                print(f"🔍 [{username}] About to call queued_generate_content with model: {active_model}")
+                print(f"🔍 [{username}] Response prompt length: {len(response_prompt) if response_prompt else 0}")
                 response = await queued_generate_content(active_model, response_prompt)
+                print(f"🔍 [{username}] queued_generate_content returned: type={type(response)}, has_text={hasattr(response, 'text') if response else False}")
             except Exception as e:
                 # Handle rate limits on text generation
                 if handle_rate_limit_error(e):
@@ -5706,6 +5709,7 @@ Now decide: "{message.content}" -> """
                     raise  # Re-raise if not a rate limit error
         
         generation_time = time.time() - start_time
+        print(f"🔍 [{username}] After model call, generation_time={generation_time:.2f}s")
         
         # Safely extract response text - handle cases where response might be blocked
         if not hasattr(response, 'text') or response.text is None:
