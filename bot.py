@@ -1286,15 +1286,7 @@ def is_small_talk_message(content: str, has_question: bool, wants_image: bool, w
     if len(lowered) > 200:
         return False
     
-    small_talk_keywords = [
-        'hey', 'hi', 'hello', 'yo', 'sup', 'nice', 'thanks', 'thank you',
-        'lol', 'haha', 'good job', 'looks good', 'appreciate it', 'awesome',
-        'great work', 'that was cool', 'fire', 'lit', 'dope', 'sick', 'love it',
-        'good stuff', 'nice work', 'good looking', 'amazing', 'perfect'
-    ]
-    if any(phrase in lowered for phrase in small_talk_keywords):
-        return True
-    
+    # Removed keyword check - AI decides everything in ai_decide_reply_style()
     # If it's a single short sentence without actionable verbs, treat as small talk
     if len(lowered.split()) <= 12 and not re.search(r'\b(can|should|how|what|why|when|where|explain|help|fix|generate|make)\b', lowered):
         return True
@@ -2202,26 +2194,9 @@ async def ai_decide_screenshot_needed(message: discord.Message, urls: List[str])
     if not urls or not PLAYWRIGHT_AVAILABLE:
         return False
     
-    content = (message.content or "").lower()
+    content = message.content or ""
     
-    # Check for explicit screenshot requests
-    screenshot_keywords = [
-        'screenshot', 'screenshot', 'take a screenshot', 'take screenshot',
-        'show me', 'what does', 'how does', 'what does this look like',
-        'how does this look', 'show me this', 'capture', 'snapshot',
-        'take a pic', 'take pic', 'screenshot this', 'screenshot that'
-    ]
-    
-    # Check for interaction requests that imply screenshot (click, scroll, etc.)
-    interaction_keywords = ['click', 'scroll', 'after you', 'then show', 'and show']
-    has_interaction_request = any(keyword in content for keyword in interaction_keywords)
-    
-    has_explicit_request = any(keyword in content for keyword in screenshot_keywords) or has_interaction_request
-    
-    if has_explicit_request:
-        return True
-    
-    # AI decision prompt
+    # AI decision prompt (fully AI-driven, no keyword checks)
     decision_prompt = f"""User message: "{message.content}"
 
 URLs found in message: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}
@@ -2250,11 +2225,11 @@ Decision: """
         decision_model = get_fast_model()
         decision_response = await queued_generate_content(decision_model, decision_prompt)
         decision = decision_response.text.strip().upper()
-        return 'YES' in decision or has_explicit_request
+        return 'YES' in decision
     except Exception as e:
         handle_rate_limit_error(e)
-        # Fallback: use explicit keywords
-        return has_explicit_request
+        # Fallback: return False (conservative - let AI decide, don't assume)
+        return False
 
 async def ai_decide_screenshot_count(message: discord.Message, url: str) -> int:
     """AI decides how many screenshots to take
@@ -2268,19 +2243,7 @@ async def ai_decide_screenshot_count(message: discord.Message, url: str) -> int:
     """
     content = (message.content or "").lower()
     
-    # Check for explicit count in message
-    count_keywords = {
-        '1': ['one screenshot', 'take 1', 'single screenshot', 'one pic', 'take one'],
-        '2': ['two screenshots', 'take 2', 'two pics', 'couple screenshots'],
-        '3': ['three screenshots', 'take 3', 'three pics', 'few screenshots'],
-        '4': ['four screenshots', 'take 4', 'four pics'],
-    }
-    
-    for count, keywords in count_keywords.items():
-        if any(keyword in content for keyword in keywords):
-            return int(count)
-    
-    # Check for numeric patterns
+    # Check for explicit numeric patterns (parsing explicit numbers, not a decision - e.g., "take 3 screenshots")
     count_match = re.search(r'take\s+(\d+)\s+(?:screenshot|pic|image)', content)
     if count_match:
         count = int(count_match.group(1))
@@ -2325,18 +2288,11 @@ Decision: """
             count = int(number_match.group(1))
             return max(1, min(10, count))
         
-        # Default to 2-3 based on context
-        if 'different' in content or 'parts' in content or 'sections' in content:
-            return 3
-        elif 'look like' in content or 'show me' in content:
-            return 2
-        else:
-            return 1
+        # If AI didn't return a number, default to 2 (conservative - let AI decide, don't assume)
+        return 2
     except Exception as e:
         handle_rate_limit_error(e)
-        # Fallback: default to 2
-        if 'different' in content or 'parts' in content:
-            return 3
+        # Fallback: default to 2 (conservative - let AI decide, don't assume)
         return 2
 
 async def ai_decide_browser_actions(message: discord.Message, url: str) -> Tuple[List[str], bool]:
