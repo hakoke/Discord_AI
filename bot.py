@@ -2180,7 +2180,6 @@ Now identify: "{element_desc}" -> """
                         search_text = ai_identified_text if ai_identified_text else element_desc
                         
                         # Try multiple strategies with timeouts (now with AI-identified text)
-                        import asyncio
                         strategies = [
                             # Try AI-identified exact text first (case-insensitive)
                             lambda: page.get_by_text(search_text, exact=False).first.click(timeout=10000) if search_text else None,
@@ -3275,7 +3274,7 @@ async def get_conversation_context(message: discord.Message, limit: int = 10, in
     return list(reversed(context_messages))
 
 async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyncio.Event):
-    """Manage typing indicator with periodic refresh to avoid rate limits
+    """Manage typing indicator with continuous refresh to avoid rate limits
     
     Args:
         channel: The Discord channel to show typing in
@@ -3285,21 +3284,29 @@ async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyn
     consecutive_failures = 0
     max_failures = 3  # Stop trying after 3 consecutive failures
     
+    # Keep typing indicator continuously active
     while not stop_event.is_set():
         try:
-            # Try to trigger typing indicator
+            # Start typing indicator - keep it active continuously
             async with channel.typing():
                 # Wait for refresh interval or until stop event is set
-                elapsed = 0.0
+                # Check stop event frequently to respond quickly
                 check_interval = 0.5  # Check stop event every 0.5 seconds
+                elapsed = 0.0
                 while elapsed < refresh_interval and not stop_event.is_set():
-                    await asyncio.sleep(min(check_interval, refresh_interval - elapsed))
-                    elapsed += check_interval
+                    sleep_time = min(check_interval, refresh_interval - elapsed)
+                    await asyncio.sleep(sleep_time)
+                    elapsed += sleep_time
                 
-                # If stop event was set, break out of the loop
+                # If stop event was set, break immediately
                 if stop_event.is_set():
                     break
+                
+                # Immediately start next typing context (no gap)
+                # The context manager will exit and we'll loop back to start a new one
             consecutive_failures = 0  # Reset on success
+            # No delay - immediately start next typing context for continuous visibility
+                
         except discord.errors.HTTPException as e:
             status = getattr(e, 'status', getattr(e, 'code', None))
             if status == 429:  # Rate limited
@@ -3314,6 +3321,8 @@ async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyn
                 if consecutive_failures >= max_failures:
                     print(f"⚠️  Typing indicator failed {consecutive_failures} times, stopping...")
                     break
+                # Brief delay before retry
+                await asyncio.sleep(1)
         except Exception as e:
             # Other errors - log but continue
             consecutive_failures += 1
@@ -5932,7 +5941,6 @@ async def on_message(message: discord.Message):
                                                 raise
                                     elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
                                         print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
-                                        import asyncio
                                         await asyncio.sleep(2)  # Wait 2 seconds
                                         try:
                                             # Retry once
@@ -5980,7 +5988,6 @@ async def on_message(message: discord.Message):
                                         raise
                             elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
                                 print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
-                                import asyncio
                                 await asyncio.sleep(2)  # Wait 2 seconds
                                 try:
                                     # Retry once
