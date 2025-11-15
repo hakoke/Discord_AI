@@ -3576,14 +3576,18 @@ YOUR CONVERSATION HISTORY WITH {username}:
 {conversation_history}{other_memories_text}
 
 CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
+- The user's CURRENT message is: "{message.content}"
+- You MUST respond ONLY to what the user asked for in their CURRENT message
 - You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something OR you think you should use it
 - If user replies to a message, @mentions someone, or says "that", "this", "the image", "the document", etc. - USE the context to understand what they mean
 - If user shares images/documents in the current message - ANALYZE them and respond to them
 - BUT: If the current message is simple and doesn't reference anything (like "hello", "what's the link to X"), give a simple direct answer - don't randomly bring up unrelated things from history
 - DO NOT continue, complete, or reference your own previous responses unless the user explicitly asks about them
 - DO NOT mix responses from different conversation turns - each message gets its own independent response
+- DO NOT combine or mention previous requests (like "Christmas card") when the user asks for something new (like "Georgia countryside") - treat each request independently
 - If you see your own previous response in the history, IGNORE IT unless the user is explicitly asking about it - it's already been sent
 - Each response should be a fresh, independent answer to what the user just asked RIGHT NOW, but use context when they explicitly reference something
+- When showing images from search, ONLY describe those images - DO NOT mention or combine with previous requests
 
 
 YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
@@ -4601,10 +4605,15 @@ Now decide: "{message.content}" -> """
 
 Does this message request images of MULTIPLE different topics? (e.g., "georgia countryside 2 photos and canada 2 photos and dubai downtown 2 photos")
 
-If YES, return a JSON array with separate search queries for each topic:
+CRITICAL - DO NOT split questions or follow-ups into separate queries:
+- Questions like "what's his name", "who is he", "what is it" are NOT separate image topics
+- Follow-up questions should be part of the main query, not separate searches
+- Only split if the user explicitly asks for images of MULTIPLE different subjects/places/things
+
+If YES (multiple distinct image topics), return a JSON array with separate search queries for each topic:
 {{"queries": ["topic1", "topic2", "topic3"], "multiple": true}}
 
-If NO (single topic), return:
+If NO (single topic or question about a topic), return:
 {{"queries": ["single topic"], "multiple": false}}
 
 Extract clean search queries - remove:
@@ -4612,11 +4621,14 @@ Extract clean search queries - remove:
 - Command words like "search for", "show me", "get me", "find", "images of", "pictures of", "photos of"
 - Numbers like "2 photos", "3 images" (keep the topic, not the count)
 - Phrases like "from google", "from the internet"
-- Words like "and", "also" (separate topics should be separate queries)
+- Questions like "what's his name", "who is he", "what is it" (these are questions, not image topics)
+- Words like "and", "also" (separate topics should be separate queries, but questions are NOT topics)
 
 Examples:
 "show me georgia countryside 2 photos and canada 2 photos" -> {{"queries": ["georgia countryside", "canada countryside"], "multiple": true}}
 "show me pictures of dubai" -> {{"queries": ["dubai"], "multiple": false}}
+"find me the UFC fighter people keep calling john pork show me him and whats his name" -> {{"queries": ["UFC fighter john pork"], "multiple": false}}
+"UFC fighter john pork and whats his name" -> {{"queries": ["UFC fighter john pork"], "multiple": false}}
 "georgia countryside 2 photos and canada 2 photos countryside and 2 photos dubai downtown" -> {{"queries": ["georgia countryside", "canada countryside", "dubai downtown"], "multiple": true}}
 "show me MUST egypt" -> {{"queries": ["MUST egypt"], "multiple": false}}
 
@@ -5040,7 +5052,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         
         if image_search_results and len(image_search_results) > 0:
             # Add reminder about proper image labeling when images are available
-            response_prompt += f"\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
+            response_prompt += f"\n\n🤖 CRITICAL - FOCUS ON CURRENT REQUEST:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request ONLY\n- IGNORE previous messages in the conversation - ONLY respond to what the user asked for NOW\n- DO NOT mention or combine previous requests (like Christmas cards, etc.) with the current request\n- Your response should be ONLY about the CURRENT user request\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
@@ -5434,7 +5446,7 @@ Now decide: "{message.content}" -> """
                         if other_images > 0:
                             image_metadata = f"\n\n📸 IMAGES VISIBLE:\n- You can now see {total_images} total image(s): {len(searched_image_parts)} from Google image search + {other_images} other image(s) (screenshots/attachments)\n- The searched images are now attached and visible - you can see what they actually show\n- Label all images correctly by their POSITION in the attached set (first, second, third, etc.)\n- Describe them accurately based on what you actually see in the images\n"
                         else:
-                            image_metadata = f"\n\n📸 SELECTED IMAGES FROM SEARCH:\n- You selected {len(searched_image_parts)} image(s) from the Google image search results\n- These images are now attached and visible to you - you can see what they actually show\n- Label them correctly: 'the first image', 'the second image', etc. based on the ORDER they were selected\n- The first image you selected = 'the first image', second = 'the second image', etc.\n- Describe them accurately based on what you actually see in the images\n"
+                            image_metadata = f"\n\n📸 CRITICAL - FOCUS ON CURRENT REQUEST ONLY:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request\n- These {len(searched_image_parts)} image(s) are now attached and visible to you - you can see what they actually show\n- IGNORE any previous messages in the conversation - ONLY respond to the CURRENT user request\n- DO NOT mention or reference previous requests (like Christmas cards, etc.) - ONLY focus on what the user asked for NOW\n- Label them correctly: 'the first image', 'the second image', etc. based on the ORDER they were selected\n- The first image you selected = 'the first image', second = 'the second image', etc.\n- Describe them accurately based on what you actually see in the images\n- Your response should ONLY be about the CURRENT request, not previous ones\n"
                         
                         # Prepare content with images visible
                         if image_parts:
