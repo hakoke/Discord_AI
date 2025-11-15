@@ -5705,24 +5705,24 @@ Now decide: "{message.content}" -> """
                             # Handle rate limits
                             handle_rate_limit_error(e)
                             return False
-                        
-                        print(f"🔍 [{username}] DEBUG: About to await decide_image_model")
-                        try:
-                            needs_deep_vision = await decide_image_model()
-                            print(f"🔍 [{username}] DEBUG: decide_image_model returned: {needs_deep_vision}")
-                        except Exception as img_model_error:
-                            print(f"🔍 [{username}] DEBUG: Exception in await decide_image_model: {img_model_error}")
-                            import traceback
-                            print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
-                            # Use default and continue - don't return!
-                            needs_deep_vision = False
-                            print(f"🔍 [{username}] DEBUG: Using default needs_deep_vision=False due to exception")
-                        # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
-                        image_model = get_smart_model() if needs_deep_vision else get_vision_model()
-                        
-                        # Log vision model selection
-                        vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
-                        print(f"🔍 [{username}] DEBUG: After decide_image_model, needs_deep_vision={needs_deep_vision}, vision_model_name={vision_model_name}")
+                    
+                    print(f"🔍 [{username}] DEBUG: About to await decide_image_model")
+                    try:
+                        needs_deep_vision = await decide_image_model()
+                        print(f"🔍 [{username}] DEBUG: decide_image_model returned: {needs_deep_vision}")
+                    except Exception as img_model_error:
+                        print(f"🔍 [{username}] DEBUG: Exception in await decide_image_model: {img_model_error}")
+                        import traceback
+                        print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
+                        # Use default and continue - don't return!
+                        needs_deep_vision = False
+                        print(f"🔍 [{username}] DEBUG: Using default needs_deep_vision=False due to exception")
+                    # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
+                    image_model = get_smart_model() if needs_deep_vision else get_vision_model()
+                    
+                    # Log vision model selection
+                    vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
+                    print(f"🔍 [{username}] DEBUG: After decide_image_model, needs_deep_vision={needs_deep_vision}, vision_model_name={vision_model_name}")
                 else:
                     # Images from other sources (not screenshots) - default to vision model
                     print(f"🔍 [{username}] DEBUG: No screenshots, using default vision model")
