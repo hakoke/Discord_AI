@@ -5679,7 +5679,18 @@ async def on_message(message: discord.Message):
     
     if should_respond:
         try:
-            async with message.channel.typing():
+            # Try to show typing indicator, but don't let it block the response if it fails
+            try:
+                async with message.channel.typing():
+                    result = await generate_response(message, force_response)
+            except (discord.errors.HTTPException, discord.errors.DiscordServerError) as typing_error:
+                # Typing indicator rate limited or failed - continue without it
+                status = getattr(typing_error, 'status', getattr(typing_error, 'code', None))
+                if status == 429:  # Rate limited
+                    print(f"⚠️  [{message.author.display_name}] Typing indicator rate limited, continuing without it...")
+                else:
+                    print(f"⚠️  [{message.author.display_name}] Typing indicator failed (status {status}), continuing without it...")
+                # Continue without typing indicator
                 result = await generate_response(message, force_response)
         except Exception as e:
             print(f"❌ Error in on_message handler: {e}")
