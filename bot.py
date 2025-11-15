@@ -1766,11 +1766,22 @@ async def take_screenshot(url: str, scroll_position: float = 0.0, wait_time: int
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        # Navigate to URL
-        await page.goto(url, wait_until='networkidle', timeout=30000)
-        
-        # Wait for page to fully load
-        await page.wait_for_timeout(wait_time)
+        # Navigate to URL with timeout handling for slow sites
+        try:
+            # First try domcontentloaded (faster, works for most sites)
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(wait_time)  # Wait for dynamic content
+        except Exception as nav_error:
+            # If that fails, try networkidle with shorter timeout
+            print(f"⚠️  [SCREENSHOT] domcontentloaded failed, trying networkidle: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)  # Short wait
+            except Exception as final_error:
+                # Last resort: just load the page without waiting
+                print(f"⚠️  [SCREENSHOT] networkidle also failed, using load: {final_error}")
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)  # Wait a bit for content
         
         # Get page height
         if scroll_position > 0:
@@ -1833,9 +1844,22 @@ async def take_multiple_screenshots(url: str, count: int = 3, wait_time: int = 2
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        # Navigate to URL
-        await page.goto(url, wait_until='networkidle', timeout=30000)
-        await page.wait_for_timeout(wait_time)
+        # Navigate to URL with timeout handling for slow sites
+        try:
+            # First try domcontentloaded (faster, works for most sites)
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(wait_time)  # Wait for dynamic content
+        except Exception as nav_error:
+            # If that fails, try networkidle with shorter timeout
+            print(f"⚠️  [SCREENSHOT] domcontentloaded failed, trying networkidle: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)  # Short wait
+            except Exception as final_error:
+                # Last resort: just load the page without waiting
+                print(f"⚠️  [SCREENSHOT] networkidle also failed, using load: {final_error}")
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)  # Wait a bit for content
         
         # Get page dimensions
         page_height = await page.evaluate('document.body.scrollHeight')
@@ -1926,9 +1950,22 @@ async def click_element_and_screenshot(url: str, element_description: str, wait_
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        # Navigate to URL
-        await page.goto(url, wait_until='networkidle', timeout=30000)
-        await page.wait_for_timeout(2000)
+        # Navigate to URL with timeout handling for slow sites
+        try:
+            # First try domcontentloaded (faster, works for most sites)
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(2000)  # Wait for dynamic content
+        except Exception as nav_error:
+            # If that fails, try networkidle with shorter timeout
+            print(f"⚠️  [CLICK] domcontentloaded failed, trying networkidle: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)  # Short wait
+            except Exception as final_error:
+                # Last resort: just load the page without waiting
+                print(f"⚠️  [CLICK] networkidle also failed, using load: {final_error}")
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)  # Wait a bit for content
         
         # Try to find and click element
         clicked = False
@@ -2007,9 +2044,22 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        # Navigate to URL
-        await page.goto(url, wait_until='networkidle', timeout=30000)
-        await page.wait_for_timeout(2000)
+        # Navigate to URL with timeout handling for slow sites
+        try:
+            # First try domcontentloaded (faster, works for most sites)
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(2000)  # Wait for dynamic content
+        except Exception as nav_error:
+            # If that fails, try networkidle with shorter timeout
+            print(f"⚠️  [NAVIGATE] domcontentloaded failed, trying networkidle: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)  # Short wait
+            except Exception as final_error:
+                # Last resort: just load the page without waiting
+                print(f"⚠️  [NAVIGATE] networkidle also failed, using load: {final_error}")
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)  # Wait a bit for content
         
         # Take initial screenshot
         screenshot_bytes = await page.screenshot(type='png')
