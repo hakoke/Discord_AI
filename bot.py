@@ -5639,6 +5639,8 @@ Now decide: "{message.content}" -> """
                         print(f"🔍 [{username}] DEBUG: About to await decide_screenshot_vision_complexity")
                         is_simple_vision = await decide_screenshot_vision_complexity()
                         print(f"🔍 [{username}] DEBUG: decide_screenshot_vision_complexity returned: {is_simple_vision}")
+                        print(f"🔍 [{username}] DEBUG: Type of is_simple_vision: {type(is_simple_vision)}")
+                        print(f"🔍 [{username}] DEBUG: About to exit try block, is_simple_vision={is_simple_vision}")
                     except Exception as vision_decision_error:
                         print(f"🔍 [{username}] DEBUG: Exception in await decide_screenshot_vision_complexity: {vision_decision_error}")
                         import traceback
@@ -5647,13 +5649,18 @@ Now decide: "{message.content}" -> """
                         # Instead, use a default value
                         is_simple_vision = False
                         print(f"🔍 [{username}] DEBUG: Using default is_simple_vision=False due to exception")
+                    print(f"🔍 [{username}] DEBUG: Exited try/except block, is_simple_vision={is_simple_vision}")
+                    print(f"🔍 [{username}] DEBUG: About to print 'entering if/else'")
+                    print(f"🔍 [{username}] DEBUG: is_simple_vision={is_simple_vision}, entering if/else")
                     if is_simple_vision:
+                        print(f"🔍 [{username}] DEBUG: Entering is_simple_vision=True branch")
                         # Skip decision for simple screenshot requests - use fast vision model directly
                         needs_deep_vision = False
                         image_model = get_vision_model()
                         vision_model_name = VISION_MODEL
                         print(f"⚡ [{username}] AI decided: simple screenshot vision - using fast vision model (skipping deep vision decision)")
                     else:
+                        print(f"🔍 [{username}] DEBUG: Entering is_simple_vision=False branch, about to define decide_image_model")
                         # Decide if images need deep analysis or simple analysis
                         async def decide_image_model():
                             """Decide if images need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
@@ -5699,12 +5706,23 @@ Now decide: "{message.content}" -> """
                             handle_rate_limit_error(e)
                             return False
                         
-                        needs_deep_vision = await decide_image_model()
+                        print(f"🔍 [{username}] DEBUG: About to await decide_image_model")
+                        try:
+                            needs_deep_vision = await decide_image_model()
+                            print(f"🔍 [{username}] DEBUG: decide_image_model returned: {needs_deep_vision}")
+                        except Exception as img_model_error:
+                            print(f"🔍 [{username}] DEBUG: Exception in await decide_image_model: {img_model_error}")
+                            import traceback
+                            print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
+                            # Use default and continue - don't return!
+                            needs_deep_vision = False
+                            print(f"🔍 [{username}] DEBUG: Using default needs_deep_vision=False due to exception")
                         # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
                         image_model = get_smart_model() if needs_deep_vision else get_vision_model()
                         
                         # Log vision model selection
                         vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
+                        print(f"🔍 [{username}] DEBUG: After decide_image_model, needs_deep_vision={needs_deep_vision}, vision_model_name={vision_model_name}")
                 else:
                     # Images from other sources (not screenshots) - default to vision model
                     print(f"🔍 [{username}] DEBUG: No screenshots, using default vision model")
@@ -5712,7 +5730,9 @@ Now decide: "{message.content}" -> """
                     vision_model_name = VISION_MODEL
                     print(f"👁️  [{username}] Using default vision model for non-screenshot images: {vision_model_name}")
                 
+                print(f"🔍 [{username}] DEBUG: About to print vision model selection")
                 print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
+                print(f"🔍 [{username}] DEBUG: After vision model selection, about to enter try block for queued_generate_content")
             
             try:
                 # Use queued generate_content for rate limiting
