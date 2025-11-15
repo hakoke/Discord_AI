@@ -3927,8 +3927,12 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} slash command(s)')
+        for cmd in synced:
+            print(f'  - /{cmd.name}: {cmd.description}')
     except Exception as e:
         print(f'Failed to sync slash commands: {e}')
+        import traceback
+        print(traceback.format_exc())
     
     # Store server structure for all existing servers (background, no latency)
     for guild in bot.guilds:
