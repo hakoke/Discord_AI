@@ -3643,6 +3643,10 @@ CURRENT CONVERSATION CONTEXT:
         
         # Extract URLs from message and fetch content if relevant
         webpage_contents = []
+        # Initialize action type variables (used later in image search check)
+        wants_image_search = False
+        wants_screenshot = False
+        
         if message.content:
             # Extract URLs from current message first - this has highest priority
             urls = extract_urls(message.content)
@@ -3651,21 +3655,62 @@ CURRENT CONVERSATION CONTEXT:
             if urls_found_in_current_message:
                 print(f"🔗 [{username}] Found {len(urls)} URL(s) in CURRENT message: {', '.join([url[:50] for url in urls[:3]])}")
             
-            # CRITICAL: Check if user wants image search BEFORE looking for URLs in context
-            # If they're asking for "images of X", don't use URLs from context - they want image search, not screenshots
-            content_lower = (message.content or "").lower()
-            image_search_keywords = ['images of', 'pictures of', 'photos of', 'image search', 'search for images', 'show me images', 'get images', 'find images']
-            wants_image_search = any(keyword in content_lower for keyword in image_search_keywords)
-            
-            # If no URLs in current message but user wants to interact with a page (click, scroll, etc.)
-            # Check replied message FIRST, then conversation context for URLs from recent messages
-            # BUT skip this if user explicitly wants image search OR if URLs were found in current message
-            # IMPORTANT: Only use context URLs if NO URLs were found in the current message
-            if not urls_found_in_current_message and not wants_image_search:
-                interaction_keywords = ['click', 'scroll', 'show me', 'screenshot', 'take a screenshot', 'after you', 'then']
-                has_interaction_request = any(keyword in content_lower for keyword in interaction_keywords)
+            # AI decides: Should we look for URLs in context for screenshots, or is this an image search request?
+            # This decision happens BEFORE looking for URLs to avoid taking screenshots when user wants image search
+            async def decide_action_type():
+                """AI decides if user wants image search or screenshots/URL interaction"""
+                decision_prompt = f"""User message: "{message.content}"
+
+What does the user want?
+
+1. IMAGE_SEARCH: User wants to search for images from Google (e.g., "show me images of X", "pictures of Y", "georgia countryside 4 images")
+2. SCREENSHOT: User wants to take screenshots of a website/URL (e.g., "show me this website", "take screenshot of X.com", "go to Y.com")
+3. NONE: Neither - just a regular text request
+
+CRITICAL: Distinguish between:
+- "show me georgia countryside 4 images" -> IMAGE_SEARCH (user wants Google image search)
+- "show me this website" -> SCREENSHOT (user wants website screenshot)
+- "go to X.com and show me" -> SCREENSHOT (user wants website screenshot)
+
+Respond with ONLY: "IMAGE_SEARCH" or "SCREENSHOT" or "NONE"
+
+Examples:
+"show me georgia countryside 4 images" -> IMAGE_SEARCH
+"pictures of egypt" -> IMAGE_SEARCH
+"images of must egypt" -> IMAGE_SEARCH
+"show me this website" -> SCREENSHOT
+"go to bespoke-ae.com and show me" -> SCREENSHOT
+"take screenshot of amazon" -> SCREENSHOT
+"click login and show me" -> SCREENSHOT
+"what's the weather?" -> NONE
+
+Now decide: "{message.content}" -> """
                 
-                if has_interaction_request:
+                try:
+                    decision_model = get_fast_model()
+                    decision_response = await queued_generate_content(decision_model, decision_prompt)
+                    decision = decision_response.text.strip().upper()
+                    if 'IMAGE_SEARCH' in decision:
+                        return 'image_search'
+                    elif 'SCREENSHOT' in decision:
+                        return 'screenshot'
+                    else:
+                        return 'none'
+                except Exception as e:
+                    handle_rate_limit_error(e)
+                    return 'none'
+            
+            # Get AI decision on action type
+            action_type = await decide_action_type()
+            wants_image_search = (action_type == 'image_search')
+            wants_screenshot = (action_type == 'screenshot')
+            print(f"🤖 [{username}] AI decided action type: {action_type}")
+            
+            # If no URLs in current message but AI determined user wants screenshot/interaction
+            # Check replied message FIRST, then conversation context for URLs from recent messages
+            # BUT skip this if AI determined it's an image search OR if URLs were found in current message
+            # IMPORTANT: Only use context URLs if NO URLs were found in the current message AND user wants screenshot
+            if not urls_found_in_current_message and wants_screenshot:
                     # PRIORITY 1: Check replied message first (most relevant)
                     if message.reference:
                         try:
@@ -3716,26 +3761,23 @@ CURRENT CONVERSATION CONTEXT:
                         print(f"⚠️  [{username}] BeautifulSoup not available - skipping URL fetching")
                         return False
                     
-                    # Check if user explicitly references the links
-                    content_lower = message.content.lower()
-                    url_keywords = ['link', 'reel', 'video', 'post', 'article', 'website', 'page', 'check this', 'look at this', 'here\'s a', 'heres a']
-                    has_url_reference = any(keyword in content_lower for keyword in url_keywords)
-                    
-                    # Check if links are mentioned in context
-                    link_mentions = ['instagram.com', 'youtube.com', 'youtu.be', 'reddit.com', 'twitter.com', 'x.com', 'tiktok.com']
-                    has_social_media_link = any(domain in ' '.join(urls).lower() for domain in link_mentions)
-                    
+                    # AI decides: Should we fetch these URLs?
                     decision_prompt = f"""User message: "{message.content}"
 
 URLs found in message: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}
 
 Does the user want you to OPEN/VIEW/READ these URLs?
-- If user says "here's a link", "check this reel", "watch this video", "read this article", etc. -> YES
-- If user asks questions about content in a link ("what's in this reel?", "summarize this video") -> YES
-- If user just mentions a link in passing without asking you to view it -> NO
-- If the link seems like spam/useless (e.g., just random link in conversation) -> NO
-- If URLs are Instagram, YouTube, Reddit, Twitter, TikTok links AND mentioned in context -> YES
-- If user is sharing something and asks you to look at it -> YES
+
+YES when:
+- User explicitly asks you to check/view/read/open the link
+- User asks questions about content in a link
+- User is sharing something and wants you to see it
+- User wants you to interact with the URL (screenshot, analyze, etc.)
+
+NO when:
+- User just mentions a link in passing without asking you to view it
+- The link seems like spam/useless
+- It's just context information, not an action request
 
 Examples:
 "here's a link to an instagram reel https://..." -> YES
@@ -3755,11 +3797,11 @@ Decision: """
                         decision_model = get_fast_model()
                         decision_response = await queued_generate_content(decision_model, decision_prompt)
                         decision = decision_response.text.strip().upper()
-                        return 'YES' in decision or has_url_reference or has_social_media_link
+                        return 'YES' in decision
                     except Exception as e:
                         handle_rate_limit_error(e)
-                        # Fallback: fetch if social media link or has keywords
-                        return has_url_reference or has_social_media_link
+                        # Fallback: let AI decide again or return False (conservative)
+                        return False
                 
                 should_fetch_urls = await decide_if_urls_relevant()
                 
@@ -4086,15 +4128,49 @@ Query: """
             if not SERPER_API_KEY:
                 return False
             
-            # Skip search if we already took screenshots and it's a simple screenshot request
+            # If screenshots were taken, let AI decide if search is still needed
+            # Sometimes user wants both screenshots AND additional info from search
             if screenshot_attachments and len(screenshot_attachments) > 0:
-                content_lower = (message.content or "").lower()
-                # Only skip if it's clearly just a screenshot request (not asking for additional info)
-                simple_screenshot_keywords = ['screenshot', 'show me', 'what does', 'how does', 'look like']
-                if any(keyword in content_lower for keyword in simple_screenshot_keywords) and \
-                   not any(word in content_lower for word in ['search', 'find', 'what is', 'tell me about', 'explain']):
-                    print(f"⏭️  [{username}] Skipping internet search - simple screenshot request, user has visual")
-                    return False
+                # Include context that screenshots were taken in the decision prompt
+                search_decision_prompt = f"""User message: "{message.content}"
+
+NOTE: Screenshots were already taken of a website.
+
+Does the user still want internet search for additional information, or is the screenshot enough?
+
+SEARCH still needed when:
+- User asks for additional info beyond what's in the screenshot
+- User wants to know more about something shown in the screenshot
+- User asks questions like "what is", "explain", "tell me about", "search for", etc.
+- User wants information that might not be in the screenshot
+
+DON'T search when:
+- User just wanted to see the website (screenshot is enough)
+- Simple screenshot request like "show me this website" (no additional questions)
+- User already has the visual they need
+
+Respond with ONLY: "SEARCH" or "NO"
+
+Examples:
+"show me this website" (screenshot taken) -> NO
+"go to amazon and show me" (screenshot taken) -> NO
+"take screenshot of X.com and tell me about it" -> SEARCH
+"show me this website, what is it?" -> SEARCH
+"go to X.com and search for more info about Y" -> SEARCH
+
+Now decide: "{message.content}" -> """
+                
+                try:
+                    decision_model = get_fast_model()
+                    decision_response = await queued_generate_content(decision_model, search_decision_prompt)
+                    decision = decision_response.text.strip().upper()
+                    if 'NO' in decision and 'SEARCH' not in decision:
+                        print(f"⏭️  [{username}] AI decided: skipping internet search - screenshot is enough")
+                        return False
+                    # Otherwise continue with normal search decision
+                except Exception as e:
+                    handle_rate_limit_error(e)
+                    # Fallback: continue with normal search decision
             
             # Skip search for image editing requests - user already provided the image
             if wants_image_edit:
@@ -4166,98 +4242,17 @@ Now decide: "{message.content}" -> """
                 handle_rate_limit_error(e)
                 return False
         
-        # Let AI decide if image search is needed
+        # Use the action_type decision we already made (line 3700) - no need for duplicate check
+        # wants_image_search is already set from decide_action_type()
         image_search_results = []
         image_search_query = None
         
-        async def decide_if_image_search_needed():
-            """AI decides if this question needs Google image search"""
-            if not SERPER_API_KEY:
-                return False
-            
-            # CRITICAL: If user explicitly asks for image search ("images of", "pictures of"), ALWAYS do image search
-            # Don't skip even if screenshots were taken - user wants Google images, not website screenshots
-            content_lower = (message.content or "").lower()
-            image_search_keywords = ['images of', 'pictures of', 'photos of', 'image search', 'search for images', 'show me images', 'get images', 'find images']
-            explicit_image_search_request = any(keyword in content_lower for keyword in image_search_keywords)
-            
-            if explicit_image_search_request:
-                print(f"🖼️  [{username}] User explicitly requested image search - proceeding despite screenshots")
-                return True
-            
-            # Skip image search if we already took screenshots - user has the visual they need
-            # (Only skip if it wasn't an explicit image search request)
-            if screenshot_attachments and len(screenshot_attachments) > 0:
-                print(f"⏭️  [{username}] Skipping image search - screenshot already taken")
-                return False
-            
-            # Skip image search for image editing requests - user already provided the image
-            if wants_image_edit:
-                print(f"⏭️  [{username}] Skipping image search - image edit request detected")
-                return False
-            
-            image_search_decision_prompt = f"""User message: "{message.content}"
-
-Does answering this question require VISUAL IMAGES from Google image search?
-
-CRITICAL: You must distinguish between:
-1. SEARCHING for existing images from Google (set IMAGES)
-2. GENERATING/CREATING new images with AI (set NO - this uses image generation, not search)
-
-NEEDS IMAGE SEARCH (set IMAGES):
-- "Search for [topic]" or "search google about [topic]" or "search for images of [topic]"
-- "Show me [place/thing]" or "show us [place/thing]" (when asking to see existing real images)
-- "Get me images of [topic]" or "get images of [topic]"
-- "Find images of [topic]" or "find pictures of [topic]"
-- "What does [thing] look like?" (when asking about real things/places)
-- "How does [place/thing] look?" (when asking about real places/things)
-- "Photos of [topic]" or "pictures of [topic]" (when asking for real photos)
-- Any request mentioning "google", "search", "show", "get images", "find images", "photos", "pictures" (when referring to existing images)
-- Visual descriptions of real places, objects, people, events (when asking to see real examples)
-
-DOESN'T NEED IMAGE SEARCH (set NO - these should GENERATE images instead):
-- "Make me an image of [thing]" or "make me a picture"
-- "Create a picture of [thing]" or "create an image"
-- "Generate an image of [thing]" or "generate a picture"
-- "Draw me [thing]" or "draw a [thing]"
-- Any request to CREATE/GENERATE/MAKE/DRAW new images (not search for existing ones)
-- Requests that don't mention searching, showing, getting, or finding existing images
-
-ALSO DOESN'T NEED IMAGE SEARCH (set NO):
-- Text-only questions without visual component
-- Coding help
-- General knowledge without visual component
-- Math problems
-- Creative writing
-- Questions already answered with text
-
-Respond with ONLY: "IMAGES" or "NO"
-
-Examples:
-"search for georgia countryside how does it look" -> IMAGES
-"search google about university of wollongong" -> IMAGES
-"show me pictures of the Eiffel Tower" -> IMAGES
-"get me 3 images of MUST egypt from google" -> IMAGES
-"show us photos of mushrif mall" -> IMAGES
-"what does the Grand Canyon look like?" -> IMAGES
-"make me an image of countryside" -> NO (this is generation, not search)
-"create a picture of a dog" -> NO (this is generation, not search)
-"generate an image of a sunset" -> NO (this is generation, not search)
-"draw me a cat" -> NO (this is generation, not search)
-"tell me a joke" -> NO
-
-Now decide: "{message.content}" -> """
-            
-            try:
-                decision_model = get_fast_model()
-                decision_response = await queued_generate_content(decision_model, image_search_decision_prompt)
-                decision = decision_response.text.strip().upper()
-                return 'IMAGES' in decision
-            except Exception as e:
-                handle_rate_limit_error(e)
-                return False
+        # Skip image search for image editing requests - user already provided the image
+        if wants_image_edit:
+            print(f"⏭️  [{username}] Skipping image search - image edit request detected")
+            wants_image_search = False
         
-        if await decide_if_image_search_needed():
+        if wants_image_search and SERPER_API_KEY:
             # Extract clean search query using AI
             async def extract_image_search_query():
                 """AI extracts the actual search query from the user message"""
@@ -4420,17 +4415,50 @@ Now decide: "{message.content}" -> """
         if wants_summary:
             needs_smart_model = False
             decision_time = 0  # Skip decision for summaries
-        # For simple screenshot requests (just taking screenshots, not asking complex questions), use fast model
+        # If screenshots were taken, let AI decide if it's a simple request or needs complex analysis
         elif screenshot_attachments and len(screenshot_attachments) > 0:
-            content_lower = (message.content or "").lower()
-            # Check if it's a simple screenshot request (not asking for analysis or additional info)
-            simple_screenshot_keywords = ['screenshot', 'show me', 'what does', 'how does', 'look like']
-            complex_keywords = ['analyze', 'explain', 'tell me about', 'what is', 'describe in detail', 'research']
-            if any(keyword in content_lower for keyword in simple_screenshot_keywords) and \
-               not any(word in content_lower for word in complex_keywords):
+            async def decide_screenshot_complexity():
+                """AI decides if screenshot request is simple or needs complex analysis"""
+                decision_prompt = f"""User message: "{message.content}"
+
+Screenshots were taken. Is this a simple request or does it need complex analysis?
+
+SIMPLE (use fast model):
+- Just showing a website ("show me this website", "go to X.com and show me")
+- Simple description request ("what does this look like")
+- No additional questions or analysis needed
+
+COMPLEX (use smart model):
+- User asks to analyze the screenshots ("analyze this", "explain what you see")
+- User asks questions about the content ("what is this", "tell me about this", "research")
+- User wants detailed information or interpretation
+- Multiple questions or follow-ups
+
+Respond with ONLY: "SIMPLE" or "COMPLEX"
+
+Examples:
+"show me this website" -> SIMPLE
+"go to amazon and show me" -> SIMPLE
+"take screenshot and analyze it" -> COMPLEX
+"show me this website, what is it about?" -> COMPLEX
+"go to X.com and explain the design" -> COMPLEX
+
+Now decide: "{message.content}" -> """
+                
+                try:
+                    decision_model = get_fast_model()
+                    decision_response = await queued_generate_content(decision_model, decision_prompt)
+                    decision = decision_response.text.strip().upper()
+                    return 'SIMPLE' in decision
+                except Exception as e:
+                    handle_rate_limit_error(e)
+                    return False  # Fallback to smart model if uncertain
+            
+            is_simple = await decide_screenshot_complexity()
+            if is_simple:
                 needs_smart_model = False
                 decision_time = 0  # Skip decision for simple screenshots
-                print(f"⚡ [{username}] Simple screenshot request - using fast model")
+                print(f"⚡ [{username}] AI decided: simple screenshot request - using fast model")
             else:
                 needs_smart_model = await decide_model()
                 decision_time = time.time() - decision_start
@@ -4607,10 +4635,57 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 # Already using smart model for complex reasoning - use it for images too (2.5 Pro is multimodal)
                 image_model = active_model
             else:
-                # Decide if images need deep analysis or simple analysis
-                async def decide_image_model():
-                    """Decide if images need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
-                    decision_prompt = f"""User message with images: "{message.content}"
+                # If screenshots were taken, let AI decide if deep vision analysis is needed
+                if screenshot_attachments and len(screenshot_attachments) > 0:
+                    async def decide_screenshot_vision_complexity():
+                        """AI decides if screenshot needs deep vision analysis"""
+                        decision_prompt = f"""User message: "{message.content}"
+
+Screenshots were taken. Do these screenshots need deep vision analysis or simple analysis?
+
+SIMPLE (use fast vision model):
+- Just showing a website ("show me this website", "go to X.com and show me")
+- Simple description of what's visible
+- No complex analysis needed
+
+DEEP (use smart vision model):
+- User wants detailed analysis ("analyze this screenshot", "explain the design")
+- User asks complex questions ("what is this system", "describe in detail")
+- Technical content that needs understanding (code, diagrams, etc.)
+- Multiple aspects to analyze
+
+Respond with ONLY: "SIMPLE" or "DEEP"
+
+Examples:
+"show me this website" -> SIMPLE
+"go to amazon and show me" -> SIMPLE
+"analyze this screenshot" -> DEEP
+"explain what you see in detail" -> DEEP
+"what does this code do?" (code screenshot) -> DEEP
+
+Now decide: "{message.content}" -> """
+                        
+                        try:
+                            decision_model = get_fast_model()
+                            decision_response = await queued_generate_content(decision_model, decision_prompt)
+                            decision = decision_response.text.strip().upper()
+                            return 'SIMPLE' in decision
+                        except Exception as e:
+                            handle_rate_limit_error(e)
+                            return False  # Fallback to deep vision if uncertain
+                    
+                    is_simple_vision = await decide_screenshot_vision_complexity()
+                    if is_simple_vision:
+                        # Skip decision for simple screenshot requests - use fast vision model directly
+                        needs_deep_vision = False
+                        image_model = get_vision_model()
+                        vision_model_name = VISION_MODEL
+                        print(f"⚡ [{username}] AI decided: simple screenshot vision - using fast vision model (skipping deep vision decision)")
+                    else:
+                        # Decide if images need deep analysis or simple analysis
+                        async def decide_image_model():
+                            """Decide if images need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
+                            decision_prompt = f"""User message with images: "{message.content}"
 
 Does analyzing these images require DEEP REASONING or just SIMPLE ANALYSIS?
 
@@ -4641,23 +4716,24 @@ Examples:
 "look at this funny meme" -> SIMPLE
 
 Now decide: "{message.content}" -> """
-                    
-                    try:
-                        decision_model = get_fast_model()
-                        decision_response = await queued_generate_content(decision_model, decision_prompt)
-                        decision = decision_response.text.strip().upper()
-                        return 'DEEP' in decision
-                    except Exception as e:
-                        # Handle rate limits
-                        handle_rate_limit_error(e)
-                        return False
+                        
+                        try:
+                            decision_model = get_fast_model()
+                            decision_response = await queued_generate_content(decision_model, decision_prompt)
+                            decision = decision_response.text.strip().upper()
+                            return 'DEEP' in decision
+                        except Exception as e:
+                            # Handle rate limits
+                            handle_rate_limit_error(e)
+                            return False
+                        
+                        needs_deep_vision = await decide_image_model()
+                        # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
+                        image_model = get_smart_model() if needs_deep_vision else get_vision_model()
+                        
+                        # Log vision model selection
+                        vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
                 
-                needs_deep_vision = await decide_image_model()
-                # Use smart model (2.5 Pro) for deep analysis, or regular vision model (Flash) for simple
-                image_model = get_smart_model() if needs_deep_vision else get_vision_model()
-                
-                # Log vision model selection
-                vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
                 print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
             
             try:
@@ -5596,8 +5672,9 @@ async def on_message(message: discord.Message):
                             if i == 0 and files_to_attach:
                                 try:
                                     await message.channel.send(chunk, files=files_to_attach, reference=message)
-                                except discord.errors.HTTPException as e:
-                                    if e.status == 413:  # Payload Too Large
+                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
+                                    status = getattr(e, 'status', getattr(e, 'code', None))
+                                    if status == 413:  # Payload Too Large
                                         print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
                                         # Compress all images and retry
                                         compressed_files = []
@@ -5608,8 +5685,9 @@ async def on_message(message: discord.Message):
                                         
                                         try:
                                             await message.channel.send(chunk, files=compressed_files, reference=message)
-                                        except discord.errors.HTTPException as e2:
-                                            if e2.status == 413:  # Still too large even after compression
+                                        except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
+                                            status2 = getattr(e2, 'status', getattr(e2, 'code', None))
+                                            if status2 == 413:  # Still too large even after compression
                                                 print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
                                                 # Send text first
                                                 await message.channel.send(chunk, reference=message)
@@ -5619,6 +5697,21 @@ async def on_message(message: discord.Message):
                                                     await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
                                             else:
                                                 raise
+                                    elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
+                                        print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
+                                        import asyncio
+                                        await asyncio.sleep(2)  # Wait 2 seconds
+                                        try:
+                                            # Retry once
+                                            await message.channel.send(chunk, files=files_to_attach, reference=message)
+                                            print(f"✅ [{message.author.display_name}] Successfully sent after retry")
+                                        except Exception as retry_error:
+                                            print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
+                                            # Try sending without files as last resort
+                                            try:
+                                                await message.channel.send(f"{chunk}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
+                                            except:
+                                                raise
                                     else:
                                         raise
                             else:
@@ -5626,8 +5719,9 @@ async def on_message(message: discord.Message):
                     else:
                         try:
                             await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
-                        except discord.errors.HTTPException as e:
-                            if e.status == 413:  # Payload Too Large
+                        except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
+                            status = getattr(e, 'status', getattr(e, 'code', None))
+                            if status == 413:  # Payload Too Large
                                 print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
                                 # Compress all images and retry
                                 compressed_files = []
@@ -5638,8 +5732,9 @@ async def on_message(message: discord.Message):
                                 
                                 try:
                                     await message.channel.send(response, files=compressed_files, reference=message)
-                                except discord.errors.HTTPException as e2:
-                                    if e2.status == 413:  # Still too large even after compression
+                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
+                                    status2 = getattr(e2, 'status', getattr(e2, 'code', None))
+                                    if status2 == 413:  # Still too large even after compression
                                         print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
                                         # Send text first
                                         await message.channel.send(response, reference=message)
@@ -5649,6 +5744,21 @@ async def on_message(message: discord.Message):
                                                 batch = compressed_files[batch_start:batch_start + 2]
                                                 await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
                                     else:
+                                        raise
+                            elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
+                                print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
+                                import asyncio
+                                await asyncio.sleep(2)  # Wait 2 seconds
+                                try:
+                                    # Retry once
+                                    await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
+                                    print(f"✅ [{message.author.display_name}] Successfully sent after retry")
+                                except Exception as retry_error:
+                                    print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
+                                    # Try sending without files as last resort
+                                    try:
+                                        await message.channel.send(f"{response}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
+                                    except:
                                         raise
                             else:
                                 raise
