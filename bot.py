@@ -3819,6 +3819,18 @@ CURRENT CONVERSATION CONTEXT:
                                         'is_current': False  # Mark as OLD image from previous message
                                     })
                                     print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
+                                    
+                                    # If this is a screenshot from a previous message, also add it to screenshot_attachments
+                                    # so it gets attached to the response when user asks about it
+                                    if 'screenshot' in attachment.filename.lower():
+                                        try:
+                                            from io import BytesIO
+                                            screenshot_bytes = BytesIO(image_data)
+                                            screenshot_bytes.seek(0)
+                                            screenshot_attachments.append(screenshot_bytes)
+                                            print(f"📎 [{username}] Added screenshot from replied message to attachments: {attachment.filename}")
+                                        except Exception as screenshot_error:
+                                            print(f"⚠️  [{username}] Failed to add screenshot from replied message: {screenshot_error}")
                             except Exception as e:
                                 print(f"Error downloading replied image: {e}")
             except Exception as e:
