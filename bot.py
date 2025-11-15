@@ -5542,21 +5542,40 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         print(f"🔍 [{username}] DEBUG: Checking image_parts, count={len(image_parts) if 'image_parts' in locals() and image_parts else 0}")
         if image_parts:
             print(f"🔍 [{username}] DEBUG: Entering image_parts branch, count={len(image_parts)}")
-            # Count NEW screenshots vs OLD images from previous messages
-            new_screenshots = [img for img in image_parts if img.get('source') == 'screenshot' and img.get('is_current', False)]
-            old_images = [img for img in image_parts if not img.get('is_current', True)]
-            total_images = len(image_parts)
-            
-            if new_screenshots and len(new_screenshots) > 0:
-                # User took NEW screenshots in this request - only reference those!
-                response_prompt += f"\n\n📸 CRITICAL - NEW SCREENSHOTS TAKEN IN THIS REQUEST:\n- You just took {len(new_screenshots)} NEW screenshot(s) in response to the user's current request\n- There are {total_images} total images attached: {len(new_screenshots)} NEW screenshots + {len(old_images)} old images from previous messages\n\n⚠️  IMPORTANT - ONLY REFERENCE NEW SCREENSHOTS:\n- You MUST ONLY describe and reference the {len(new_screenshots)} NEW screenshot(s) you just took\n- DO NOT describe or reference old images from previous messages - the user only asked about the NEW screenshots\n- When labeling NEW screenshots, count ONLY from the NEW ones:\n  * The FIRST NEW screenshot = 'the first image' or 'the first screenshot'\n  * The SECOND NEW screenshot = 'the second image' or 'the second screenshot'\n  * And so on...\n- IGNORE old images from previous messages - they're only there for context, not to describe\n- The user asked you to take screenshots and show them - only show what you just captured, not old screenshots\n\nExample: If you took 2 new screenshots and there are 4 total images (2 old + 2 new), you should say:\n- 'The first image shows...' (referring to the FIRST NEW screenshot)\n- 'The second image shows...' (referring to the SECOND NEW screenshot)\n- DO NOT mention the old images unless the user explicitly asks about them"
-            else:
-                # No new screenshots, just regular image analysis
-                response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+            try:
+                # Count NEW screenshots vs OLD images from previous messages
+                print(f"🔍 [{username}] DEBUG: Counting new screenshots vs old images")
+                new_screenshots = [img for img in image_parts if img.get('source') == 'screenshot' and img.get('is_current', False)]
+                old_images = [img for img in image_parts if not img.get('is_current', True)]
+                total_images = len(image_parts)
+                print(f"🔍 [{username}] DEBUG: new_screenshots={len(new_screenshots)}, old_images={len(old_images)}, total={total_images}")
+                
+                if new_screenshots and len(new_screenshots) > 0:
+                    print(f"🔍 [{username}] DEBUG: Adding new screenshots prompt")
+                    # User took NEW screenshots in this request - only reference those!
+                    response_prompt += f"\n\n📸 CRITICAL - NEW SCREENSHOTS TAKEN IN THIS REQUEST:\n- You just took {len(new_screenshots)} NEW screenshot(s) in response to the user's current request\n- There are {total_images} total images attached: {len(new_screenshots)} NEW screenshots + {len(old_images)} old images from previous messages\n\n⚠️  IMPORTANT - ONLY REFERENCE NEW SCREENSHOTS:\n- You MUST ONLY describe and reference the {len(new_screenshots)} NEW screenshot(s) you just took\n- DO NOT describe or reference old images from previous messages - the user only asked about the NEW screenshots\n- When labeling NEW screenshots, count ONLY from the NEW ones:\n  * The FIRST NEW screenshot = 'the first image' or 'the first screenshot'\n  * The SECOND NEW screenshot = 'the second image' or 'the second screenshot'\n  * And so on...\n- IGNORE old images from previous messages - they're only there for context, not to describe\n- The user asked you to take screenshots and show them - only show what you just captured, not old screenshots\n\nExample: If you took 2 new screenshots and there are 4 total images (2 old + 2 new), you should say:\n- 'The first image shows...' (referring to the FIRST NEW screenshot)\n- 'The second image shows...' (referring to the SECOND NEW screenshot)\n- DO NOT mention the old images unless the user explicitly asks about them"
+                else:
+                    # No new screenshots, just regular image analysis
+                    print(f"🔍 [{username}] DEBUG: No new screenshots, adding regular image analysis prompt")
+                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+                print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
+            except Exception as prompt_error:
+                print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
+                import traceback
+                print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
+                raise
             uploaded_files = []
             try:
+                print(f"🔍 [{username}] DEBUG: About to call build_gemini_content_with_images")
+                print(f"🔍 [{username}] DEBUG: response_prompt length: {len(response_prompt) if response_prompt else 0}")
+                print(f"🔍 [{username}] DEBUG: image_parts count: {len(image_parts)}")
                 content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts)
+                print(f"🔍 [{username}] DEBUG: build_gemini_content_with_images returned successfully")
+                print(f"🔍 [{username}] DEBUG: content_parts type: {type(content_parts)}, uploaded_files count: {len(uploaded_files)}")
             except Exception as prep_error:
+                print(f"🔍 [{username}] DEBUG: Exception in build_gemini_content_with_images: {prep_error}")
+                import traceback
+                print(f"🔍 [{username}] DEBUG: Traceback: {traceback.format_exc()}")
                 for uploaded in uploaded_files:
                     try:
                         genai.delete_file(uploaded.name)
@@ -5567,13 +5586,18 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             # Decide which model to use for images
             # If we already decided on smart model (complex reasoning), use it for images too (2.5 Pro has vision!)
             # Otherwise, check if images need deep analysis
+            print(f"🔍 [{username}] DEBUG: Deciding which model to use for images, needs_smart_model={needs_smart_model}")
             if needs_smart_model:
+                print(f"🔍 [{username}] DEBUG: Using smart model for images (already decided)")
                 # Already using smart model for complex reasoning - use it for images too (2.5 Pro is multimodal)
                 image_model = active_model
                 vision_model_name = SMART_MODEL
             else:
+                print(f"🔍 [{username}] DEBUG: Not using smart model, checking screenshot_attachments")
+                print(f"🔍 [{username}] DEBUG: screenshot_attachments count: {len(screenshot_attachments) if 'screenshot_attachments' in locals() and screenshot_attachments else 0}")
                 # If screenshots were taken, let AI decide if deep vision analysis is needed
                 if screenshot_attachments and len(screenshot_attachments) > 0:
+                    print(f"🔍 [{username}] DEBUG: Screenshots detected, calling decide_screenshot_vision_complexity")
                     async def decide_screenshot_vision_complexity():
                         """AI decides if screenshot needs deep vision analysis"""
                         decision_prompt = f"""User message: "{message.content}"
@@ -5612,6 +5636,7 @@ Now decide: "{message.content}" -> """
                             return False  # Fallback to deep vision if uncertain
                     
                     is_simple_vision = await decide_screenshot_vision_complexity()
+                    print(f"🔍 [{username}] DEBUG: decide_screenshot_vision_complexity returned: {is_simple_vision}")
                     if is_simple_vision:
                         # Skip decision for simple screenshot requests - use fast vision model directly
                         needs_deep_vision = False
@@ -5672,6 +5697,7 @@ Now decide: "{message.content}" -> """
                         vision_model_name = SMART_MODEL if needs_deep_vision else VISION_MODEL
                 else:
                     # Images from other sources (not screenshots) - default to vision model
+                    print(f"🔍 [{username}] DEBUG: No screenshots, using default vision model")
                     image_model = get_vision_model()
                     vision_model_name = VISION_MODEL
                     print(f"👁️  [{username}] Using default vision model for non-screenshot images: {vision_model_name}")
