@@ -4639,28 +4639,45 @@ async def on_ready():
     # Initialize Playwright if available
     if PLAYWRIGHT_AVAILABLE:
         print('🌐 Browser automation ready (Playwright)')
-        # Try to install browsers in background (for Railway/deployment)
+        # Try to install browsers and deps in background (for Railway/deployment)
         async def install_playwright_browsers():
-            """Install Playwright browsers in background"""
+            """Install Playwright browsers and system dependencies in background"""
             try:
                 import subprocess
                 import sys
-                print('📦 Installing Playwright browsers (this may take a minute)...')
-                result = subprocess.run(
+                
+                # First install system dependencies
+                print('📦 Installing Playwright system dependencies (this may take a minute)...')
+                deps_result = subprocess.run(
+                    [sys.executable, '-m', 'playwright', 'install-deps'],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                if deps_result.returncode == 0:
+                    print('✅ Playwright system dependencies installed successfully')
+                else:
+                    print(f'⚠️  Playwright deps installation returned code {deps_result.returncode}')
+                    if deps_result.stderr:
+                        print(f'   Error: {deps_result.stderr[:200]}')
+                
+                # Then install browsers
+                print('📦 Installing Playwright browsers...')
+                browser_result = subprocess.run(
                     [sys.executable, '-m', 'playwright', 'install', 'chromium'],
                     capture_output=True,
                     text=True,
                     timeout=300  # 5 minute timeout
                 )
-                if result.returncode == 0:
+                if browser_result.returncode == 0:
                     print('✅ Playwright browsers installed successfully')
                 else:
-                    print(f'⚠️  Playwright browser installation returned code {result.returncode}')
-                    if result.stderr:
-                        print(f'   Error: {result.stderr[:200]}')
+                    print(f'⚠️  Playwright browser installation returned code {browser_result.returncode}')
+                    if browser_result.stderr:
+                        print(f'   Error: {browser_result.stderr[:200]}')
             except Exception as e:
-                print(f'⚠️  Could not auto-install Playwright browsers: {e}')
-                print('   You may need to run: playwright install chromium')
+                print(f'⚠️  Could not auto-install Playwright: {e}')
+                print('   Note: For Railway, system deps should be installed during build via nixpacks.toml')
         
         # Run browser installation in background (non-blocking)
         asyncio.create_task(install_playwright_browsers())
