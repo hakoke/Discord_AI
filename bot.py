@@ -2109,37 +2109,119 @@ async def navigate_and_screenshot(url: str, actions: List[str] = None) -> List[B
                         element_desc = action.replace('click', '').strip().strip("'\"")
                         clicked = False
                         
-                        # Try multiple strategies with timeouts
+                        # Use AI vision to identify the element from the screenshot
+                        print(f"🤖 [NAVIGATE] Using AI vision to identify: '{element_desc}'")
+                        ai_identified_text = None
+                        try:
+                            # Take current screenshot for AI analysis
+                            current_screenshot = await page.screenshot(type='png')
+                            screenshot_img = Image.open(BytesIO(current_screenshot))
+                            
+                            # Use vision model to identify the element
+                            vision_model = get_vision_model()
+                            identification_prompt = f"""Look at this webpage screenshot. The user wants to click on an element described as: "{element_desc}"
+
+Identify the exact element they want to click:
+1. What is the EXACT text displayed on the button/link? (e.g., if user says "login", but button says "Log In", return "Log In")
+2. Where is it located? (e.g., "top-right", "bottom-left", "center", "navigation bar")
+3. What type of element is it? (button, link, menu item, etc.)
+
+CRITICAL: Return ONLY a JSON object with this exact format:
+{{"exact_text": "The exact text as displayed on the page", "location": "where it is", "element_type": "button/link/etc"}}
+
+If you cannot find the element, return:
+{{"exact_text": null, "location": null, "element_type": null}}
+
+Examples:
+- User says "login", button shows "Log In" -> {{"exact_text": "Log In", "location": "top-right", "element_type": "button"}}
+- User says "sign up", link shows "Sign Up" -> {{"exact_text": "Sign Up", "location": "header", "element_type": "link"}}
+- User says "hello sign in", button shows "Hello, Sign in" -> {{"exact_text": "Hello, Sign in", "location": "top-right", "element_type": "button"}}
+
+Now identify: "{element_desc}" -> """
+                            
+                            # Prepare image for vision model
+                            screenshot_bytes_io = BytesIO()
+                            screenshot_img.save(screenshot_bytes_io, format='PNG')
+                            screenshot_bytes_io.seek(0)
+                            
+                            content_parts = [
+                                identification_prompt,
+                                {'mime_type': 'image/png', 'data': screenshot_bytes_io.read()}
+                            ]
+                            
+                            # Get AI response using the queued function (defined in this module)
+                            identification_response = await queued_generate_content(vision_model, content_parts)
+                            identification_text = identification_response.text.strip()
+                            
+                            # Parse JSON response
+                            try:
+                                if '```json' in identification_text:
+                                    json_start = identification_text.find('```json') + 7
+                                    json_end = identification_text.find('```', json_start)
+                                    identification_text = identification_text[json_start:json_end].strip()
+                                elif '```' in identification_text:
+                                    json_start = identification_text.find('```') + 3
+                                    json_end = identification_text.find('```', json_start)
+                                    identification_text = identification_text[json_start:json_end].strip()
+                                
+                                identification_data = json.loads(identification_text)
+                                ai_identified_text = identification_data.get('exact_text')
+                                
+                                if ai_identified_text:
+                                    print(f"✅ [NAVIGATE] AI identified element: '{ai_identified_text}' (location: {identification_data.get('location', 'unknown')})")
+                                else:
+                                    print(f"⚠️  [NAVIGATE] AI could not identify element '{element_desc}', falling back to text matching")
+                            except Exception as parse_error:
+                                print(f"⚠️  [NAVIGATE] Error parsing AI response: {parse_error}, falling back to text matching")
+                        except Exception as ai_error:
+                            print(f"⚠️  [NAVIGATE] AI vision identification failed: {ai_error}, falling back to text matching")
+                        
+                        # Use AI-identified text if available, otherwise use original description
+                        search_text = ai_identified_text if ai_identified_text else element_desc
+                        
+                        # Try multiple strategies with timeouts (now with AI-identified text)
                         import asyncio
                         strategies = [
+                            # Try AI-identified exact text first (case-insensitive)
+                            lambda: page.get_by_text(search_text, exact=False).first.click(timeout=10000) if search_text else None,
+                            # Try case variations
+                            lambda: page.get_by_text(search_text.lower(), exact=False).first.click(timeout=10000) if search_text else None,
+                            lambda: page.get_by_text(search_text.title(), exact=False).first.click(timeout=10000) if search_text else None,
+                            # Try as button
+                            lambda: page.get_by_role('button', name=search_text, exact=False).first.click(timeout=10000) if search_text else None,
+                            # Try as link
+                            lambda: page.get_by_role('link', name=search_text, exact=False).first.click(timeout=10000) if search_text else None,
+                            # Try with original description as fallback
                             lambda: page.get_by_text(element_desc, exact=False).first.click(timeout=10000),
-                            lambda: page.get_by_role('button', name=element_desc, exact=False).first.click(timeout=10000),
-                            lambda: page.get_by_role('link', name=element_desc, exact=False).first.click(timeout=10000),
-                            lambda: page.locator(f'text="{element_desc}"').first.click(timeout=10000),
-                            lambda: page.locator(f'[aria-label*="{element_desc}"]').first.click(timeout=10000),
+                            lambda: page.locator(f'text="{search_text}"').first.click(timeout=10000) if search_text else None,
+                            lambda: page.locator(f'[aria-label*="{search_text}"]').first.click(timeout=10000) if search_text else None,
                         ]
                         
                         for idx, strategy in enumerate(strategies):
+                            if strategy is None:
+                                continue
                             try:
-                                print(f"🔄 [NAVIGATE] Trying click strategy {idx+1}/{len(strategies)} for: '{element_desc}'")
-                                await asyncio.wait_for(strategy(), timeout=12.0)  # Max 12 seconds per strategy
+                                print(f"🔄 [NAVIGATE] Trying click strategy {idx+1} for: '{search_text}'")
+                                await asyncio.wait_for(strategy(), timeout=8.0)  # Max 8 seconds per strategy
                                 clicked = True
-                                print(f"✅ [NAVIGATE] Clicked: '{element_desc}' (strategy {idx+1})")
+                                print(f"✅ [NAVIGATE] Clicked: '{search_text}' (strategy {idx+1})")
                                 break
                             except asyncio.TimeoutError:
-                                print(f"⏱️  [NAVIGATE] Click strategy {idx+1} timed out for: '{element_desc}'")
+                                print(f"⏱️  [NAVIGATE] Click strategy {idx+1} timed out")
                                 continue
                             except Exception as e:
                                 print(f"⚠️  [NAVIGATE] Click strategy {idx+1} failed: {e}")
                                 continue
                         
                         if clicked:
+                            # Wait for JavaScript effects (modals, overlays, etc.) to appear
+                            await page.wait_for_timeout(1500)  # Give time for modals/overlays to appear
                             # Wait for page to load after click (but not too long)
                             try:
                                 await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=15000), timeout=16.0)
                             except:
-                                # If load state wait fails, just wait a bit
-                                await page.wait_for_timeout(2000)
+                                # If load state wait fails, just wait a bit more
+                                await page.wait_for_timeout(500)
                         else:
                             print(f"❌ [NAVIGATE] Failed to click: '{element_desc}' - element not found")
                     
