@@ -1,10 +1,9 @@
 [phases.install]
 cmds = [
-  "python3 -m pip install -r requirements.txt",
-  "python3 -m playwright install chromium",
-  "python3 -m playwright install-deps"
+  "/opt/venv/bin/python -m playwright install chromium",
+  "/opt/venv/bin/python -m playwright install-deps"
 ]
 
 [start]
-cmd = "python3 bot.py"
+cmd = "python bot.py"
 
