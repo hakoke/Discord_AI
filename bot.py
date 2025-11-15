@@ -3274,6 +3274,54 @@ async def get_conversation_context(message: discord.Message, limit: int = 10, in
     
     return list(reversed(context_messages))
 
+async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyncio.Event):
+    """Manage typing indicator with periodic refresh to avoid rate limits
+    
+    Args:
+        channel: The Discord channel to show typing in
+        stop_event: Event to signal when to stop typing
+    """
+    refresh_interval = 8.0  # Refresh every 8 seconds (before 10s expiration)
+    consecutive_failures = 0
+    max_failures = 3  # Stop trying after 3 consecutive failures
+    
+    while not stop_event.is_set():
+        try:
+            # Try to trigger typing indicator
+            async with channel.typing():
+                # Wait for refresh interval or until stop event is set
+                elapsed = 0.0
+                check_interval = 0.5  # Check stop event every 0.5 seconds
+                while elapsed < refresh_interval and not stop_event.is_set():
+                    await asyncio.sleep(min(check_interval, refresh_interval - elapsed))
+                    elapsed += check_interval
+                
+                # If stop event was set, break out of the loop
+                if stop_event.is_set():
+                    break
+            consecutive_failures = 0  # Reset on success
+        except discord.errors.HTTPException as e:
+            status = getattr(e, 'status', getattr(e, 'code', None))
+            if status == 429:  # Rate limited
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    print(f"⚠️  Typing indicator rate limited {consecutive_failures} times, stopping...")
+                    break
+                # Wait longer before retry when rate limited
+                await asyncio.sleep(5)
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    print(f"⚠️  Typing indicator failed {consecutive_failures} times, stopping...")
+                    break
+        except Exception as e:
+            # Other errors - log but continue
+            consecutive_failures += 1
+            if consecutive_failures >= max_failures:
+                print(f"⚠️  Typing indicator error: {e}, stopping...")
+                break
+            await asyncio.sleep(1)
+
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
     import time
@@ -5727,19 +5775,35 @@ async def on_message(message: discord.Message):
     
     if should_respond:
         try:
-            # Try to show typing indicator, but don't let it block the response if it fails
+            # Start typing indicator manager in background
+            typing_stop_event = asyncio.Event()
+            typing_task = None
             try:
-                async with message.channel.typing():
-                    result = await generate_response(message, force_response)
-            except (discord.errors.HTTPException, discord.errors.DiscordServerError) as typing_error:
-                # Typing indicator rate limited or failed - continue without it
-                status = getattr(typing_error, 'status', getattr(typing_error, 'code', None))
-                if status == 429:  # Rate limited
-                    print(f"⚠️  [{message.author.display_name}] Typing indicator rate limited, continuing without it...")
-                else:
-                    print(f"⚠️  [{message.author.display_name}] Typing indicator failed (status {status}), continuing without it...")
-                # Continue without typing indicator
+                typing_task = asyncio.create_task(
+                    manage_typing_indicator(message.channel, typing_stop_event)
+                )
+                print(f"⌨️  [{message.author.display_name}] Typing indicator started")
+            except Exception as typing_start_error:
+                print(f"⚠️  [{message.author.display_name}] Failed to start typing indicator: {typing_start_error}")
+                typing_task = None
+            
+            try:
+                # Generate response (typing indicator runs in background)
                 result = await generate_response(message, force_response)
+            finally:
+                # Stop typing indicator
+                typing_stop_event.set()
+                if typing_task:
+                    try:
+                        await asyncio.wait_for(typing_task, timeout=1.0)
+                    except asyncio.TimeoutError:
+                        typing_task.cancel()
+                        try:
+                            await typing_task
+                        except asyncio.CancelledError:
+                            pass
+                    except Exception as e:
+                        print(f"⚠️  Error stopping typing indicator: {e}")
         except Exception as e:
             print(f"❌ Error in on_message handler: {e}")
             import traceback
