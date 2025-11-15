@@ -2159,7 +2159,11 @@ async def ai_decide_screenshot_needed(message: discord.Message, urls: List[str])
         'take a pic', 'take pic', 'screenshot this', 'screenshot that'
     ]
     
-    has_explicit_request = any(keyword in content for keyword in screenshot_keywords)
+    # Check for interaction requests that imply screenshot (click, scroll, etc.)
+    interaction_keywords = ['click', 'scroll', 'after you', 'then show', 'and show']
+    has_interaction_request = any(keyword in content for keyword in interaction_keywords)
+    
+    has_explicit_request = any(keyword in content for keyword in screenshot_keywords) or has_interaction_request
     
     if has_explicit_request:
         return True
@@ -3583,6 +3587,24 @@ CURRENT CONVERSATION CONTEXT:
         webpage_contents = []
         if message.content:
             urls = extract_urls(message.content)
+            
+            # If no URLs in current message but user wants to interact with a page (click, scroll, etc.)
+            # Check conversation context for URLs from recent messages
+            if not urls:
+                content_lower = (message.content or "").lower()
+                interaction_keywords = ['click', 'scroll', 'show me', 'screenshot', 'take a screenshot', 'after you', 'then']
+                has_interaction_request = any(keyword in content_lower for keyword in interaction_keywords)
+                
+                if has_interaction_request and context_messages:
+                    # Look for URLs in recent messages (last 5 messages)
+                    for msg in context_messages[-5:]:
+                        msg_content = msg.get('content', '') or ''
+                        context_urls = extract_urls(msg_content)
+                        if context_urls:
+                            urls = context_urls[:1]  # Use first URL found
+                            print(f"🔗 [{username}] No URL in current message, but found URL in context: {urls[0][:80]}...")
+                            break
+            
             if urls:
                 print(f"🔗 [{username}] Found {len(urls)} URL(s) in message")
                 
@@ -3754,7 +3776,6 @@ Screenshot {idx + 1}:"""
                                     analysis_text = analysis_response.text.strip()
                                     
                                     # Try to parse JSON from response
-                                    import json
                                     try:
                                         # Extract JSON from markdown code blocks if present
                                         if '```json' in analysis_text:
@@ -4607,6 +4628,20 @@ Now decide: "{message.content}" -> """
                                         img = img.convert('RGB')
                                     
                                     searched_images.append(img)
+                                    
+                                    # Add to image_parts so AI can see the selected images (same logic as screenshots)
+                                    img_bytes_io = BytesIO()
+                                    img.save(img_bytes_io, format='PNG')
+                                    img_bytes_io.seek(0)
+                                    image_parts.append({
+                                        'mime_type': 'image/png',
+                                        'data': img_bytes_io.read(),
+                                        'source': 'image_search',
+                                        'index': len(searched_images),  # Position in selection order (1, 2, 3...)
+                                        'search_index': num  # Original search result number
+                                    })
+                                    img_bytes_io.seek(0)
+                                    
                                     print(f"✅ [{username}] Successfully downloaded and processed image {num}: {img_data.get('title', 'Unknown')[:50]}")
                                 except Exception as img_error:
                                     print(f"⚠️  [{username}] Failed to process image {num} after download: {img_error}")
@@ -4656,6 +4691,20 @@ Now decide: "{message.content}" -> """
                                         img = img.convert('RGB')
                                     
                                     searched_images.append(img)
+                                    
+                                    # Add to image_parts so AI can see the selected images (same logic as screenshots)
+                                    img_bytes_io = BytesIO()
+                                    img.save(img_bytes_io, format='PNG')
+                                    img_bytes_io.seek(0)
+                                    image_parts.append({
+                                        'mime_type': 'image/png',
+                                        'data': img_bytes_io.read(),
+                                        'source': 'image_search',
+                                        'index': len(searched_images),  # Position in selection order (1, 2, 3...)
+                                        'search_index': alt_num  # Original search result number
+                                    })
+                                    img_bytes_io.seek(0)
+                                    
                                     print(f"✅ [{username}] Successfully downloaded fallback image {alt_num}: {alt_img_data.get('title', 'Unknown')[:50]}")
                                 except Exception as img_error:
                                     print(f"⚠️  [{username}] Failed to process fallback image {alt_num}: {img_error}")
@@ -4667,6 +4716,71 @@ Now decide: "{message.content}" -> """
                 
                 # Remove the [IMAGE_NUMBERS: ...] marker from response if present
                 ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
+                
+                # If we successfully downloaded images and added them to image_parts, regenerate response so AI can see them
+                # (Same logic as screenshots - AI needs to see the images to label them correctly)
+                if searched_images and len(searched_images) > 0:
+                    # Count how many images we just added to image_parts (only from image_search source)
+                    searched_image_parts = [img for img in image_parts if img.get('source') == 'image_search']
+                    if searched_image_parts:
+                        print(f"👁️  [{username}] Regenerating response with {len(searched_image_parts)} searched image(s) visible so AI can see and label them correctly")
+                        
+                        # Update response prompt to include metadata about selected images
+                        # Count total images vs searched images to give accurate instructions
+                        total_images = len(image_parts)
+                        other_images = total_images - len(searched_image_parts)
+                        
+                        if other_images > 0:
+                            image_metadata = f"\n\n📸 IMAGES VISIBLE:\n- You can now see {total_images} total image(s): {len(searched_image_parts)} from Google image search + {other_images} other image(s) (screenshots/attachments)\n- The searched images are now attached and visible - you can see what they actually show\n- Label all images correctly by their POSITION in the attached set (first, second, third, etc.)\n- Describe them accurately based on what you actually see in the images\n"
+                        else:
+                            image_metadata = f"\n\n📸 SELECTED IMAGES FROM SEARCH:\n- You selected {len(searched_image_parts)} image(s) from the Google image search results\n- These images are now attached and visible to you - you can see what they actually show\n- Label them correctly: 'the first image', 'the second image', etc. based on the ORDER they were selected\n- The first image you selected = 'the first image', second = 'the second image', etc.\n- Describe them accurately based on what you actually see in the images\n"
+                        
+                        # Prepare content with images visible
+                        if image_parts:
+                            try:
+                                # Use the same model as before, add metadata about images
+                                updated_prompt = response_prompt + image_metadata
+                                
+                                # Use build_gemini_content_with_images for consistency (handles file uploads)
+                                uploaded_files = []
+                                try:
+                                    content_parts, uploaded_files = build_gemini_content_with_images(updated_prompt, image_parts)
+                                except Exception as prep_error:
+                                    # Cleanup on error
+                                    for uploaded in uploaded_files:
+                                        try:
+                                            genai.delete_file(uploaded.name)
+                                        except Exception:
+                                            pass
+                                    raise
+                                
+                                # Regenerate response with images visible
+                                response_with_images = await queued_generate_content(active_model, content_parts)
+                                new_ai_response = (response_with_images.text or "").strip()
+                                
+                                # Clean up uploaded files
+                                for uploaded in uploaded_files:
+                                    try:
+                                        genai.delete_file(uploaded.name)
+                                        print(f"🗑️  [GEMINI] Deleted temporary upload: {uploaded.name}")
+                                    except Exception as cleanup_error:
+                                        print(f"⚠️  [GEMINI] Could not delete upload {getattr(uploaded, 'name', '?')}: {cleanup_error}")
+                                
+                                # Extract document outputs if any
+                                new_ai_response, new_document_outputs = extract_document_outputs(new_ai_response)
+                                
+                                # Update response
+                                ai_response = new_ai_response
+                                if new_document_outputs:
+                                    document_outputs = new_document_outputs
+                                
+                                print(f"✅ [{username}] Response regenerated with {len(searched_image_parts)} searched image(s) visible - AI can now see and label them")
+                            except Exception as regen_error:
+                                print(f"⚠️  [{username}] Error regenerating response with images: {regen_error}")
+                                # Continue with original response if regeneration fails
+                        else:
+                            # If no image_parts somehow, just add metadata to prompt
+                            ai_response = ai_response + image_metadata
             else:
                 print(f"🖼️  [{username}] AI did not select any images from search results")
         
