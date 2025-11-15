@@ -13,7 +13,6 @@ import re
 import io
 import json
 import unicodedata
-import random
 from PIL import Image
 from io import BytesIO
 from functools import lru_cache
@@ -3275,47 +3274,40 @@ async def get_conversation_context(message: discord.Message, limit: int = 10, in
     return list(reversed(context_messages))
 
 async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyncio.Event):
-    """Manage typing indicator while respecting Discord typing rate limits.
-    
-    Args:
-        channel: The Discord channel to show typing in.
-        stop_event: Event to signal when to stop typing.
-    """
-    base_interval = 8.0  # Seconds before the typing indicator naturally expires.
-    jitter = 2.0         # Spread requests to avoid synchronized bursts.
-    min_interval = 5.0   # Discord typing indicator lasts 10s; stay well within limit.
+    """Show typing indicator until stop_event is signaled."""
     max_failures = 5
     consecutive_failures = 0
     
     while not stop_event.is_set():
-        wait_time = base_interval + random.uniform(0, jitter)
         try:
-            await channel.trigger_typing()
-            consecutive_failures = 0
+            print(f"⌨️  Typing manager: entering typing context for channel {channel.id}")
+            async with channel.typing():
+                print(f"⌨️  Typing manager: typing context active for channel {channel.id}")
+                await stop_event.wait()
+                break
         except discord.errors.HTTPException as e:
+            print(f"⚠️  Typing manager HTTPException in channel {channel.id}: {e}")
             status = getattr(e, "status", getattr(e, "code", None))
             retry_after = getattr(e, "retry_after", None)
             consecutive_failures += 1
             
-            if status == 429:
-                # Respect retry-after header when available.
-                wait_time = max(retry_after if retry_after is not None else base_interval * 1.5, min_interval)
-            else:
-                wait_time = max(min_interval, retry_after if retry_after else min_interval)
-            
             if consecutive_failures >= max_failures:
                 print(f"⚠️  Typing indicator HTTP error {status}: stopping after {consecutive_failures} failures.")
                 break
+            
+            wait_time = retry_after if retry_after is not None else 5.0
         except Exception as e:
+            print(f"⚠️  Typing manager unexpected error in channel {channel.id}: {e}")
             consecutive_failures += 1
-            wait_time = min_interval
             if consecutive_failures >= max_failures:
                 print(f"⚠️  Typing indicator error: {e}, stopping after {consecutive_failures} failures.")
                 break
+            wait_time = 2.0
         else:
-            wait_time = max(min_interval, wait_time)
+            print(f"⌨️  Typing manager: typing context exited cleanly for channel {channel.id}")
+            # Completed normally
+            break
         
-        # Exit promptly if the stop event fires while waiting.
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=wait_time)
             break
