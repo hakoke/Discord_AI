@@ -5402,9 +5402,11 @@ Now decide: "{message.content}" -> """
         
         # Log model selection
         print(f"📝 [{username}] Using model: {model_name} | Decision time: {decision_time:.2f}s | Message: {message.content[:50]}...")
+        print(f"🔍 [{username}] DEBUG: force_response={force_response}, image_parts count={len(image_parts) if 'image_parts' in locals() else 'N/A'}")
         
         # Decide if should respond (if not forced)
         if not force_response:
+            print(f"🔍 [{username}] DEBUG: Checking if should respond (force_response=False)")
             decision_prompt = f"""{consciousness_prompt}
 
 Should you respond to this message? Consider:
@@ -5417,9 +5419,11 @@ Respond with ONLY 'YES' or 'NO'."""
             
             decision_response = await queued_generate_content(model_fast, decision_prompt)
             decision = decision_response.text.strip().upper()
+            print(f"🔍 [{username}] DEBUG: Should respond decision: {decision}")
             
             if 'NO' in decision and not force_response:
                 # Return empty tuple instead of None to maintain consistent return type
+                print(f"🔍 [{username}] DEBUG: Returning early - AI decided not to respond")
                 return ("", None, None, [], [])
         
         # Generate response
@@ -5535,7 +5539,9 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 response_prompt += f"\n\nREFERENCE DOCUMENTS AVAILABLE: {json.dumps([doc['filename'] for doc in document_assets])}\nUse the extracts provided earlier as your source material."
         
         # Add images to prompt if present
+        print(f"🔍 [{username}] DEBUG: Checking image_parts, count={len(image_parts) if 'image_parts' in locals() and image_parts else 0}")
         if image_parts:
+            print(f"🔍 [{username}] DEBUG: Entering image_parts branch, count={len(image_parts)}")
             # Count NEW screenshots vs OLD images from previous messages
             new_screenshots = [img for img in image_parts if img.get('source') == 'screenshot' and img.get('is_current', False)]
             old_images = [img for img in image_parts if not img.get('is_current', True)]
@@ -5674,8 +5680,12 @@ Now decide: "{message.content}" -> """
             
             try:
                 # Use queued generate_content for rate limiting
+                print(f"🔍 [{username}] DEBUG: About to call queued_generate_content with image_model: {image_model}")
+                print(f"🔍 [{username}] DEBUG: content_parts type: {type(content_parts)}, length: {len(content_parts) if isinstance(content_parts, (list, tuple)) else 'N/A'}")
                 response = await queued_generate_content(image_model, content_parts)
+                print(f"🔍 [{username}] DEBUG: queued_generate_content (image) returned: type={type(response)}, has_text={hasattr(response, 'text') if response else False}")
             except Exception as e:
+                print(f"🔍 [{username}] DEBUG: Exception in image model call: {e}")
                 # Handle rate limits on image generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
@@ -5692,6 +5702,7 @@ Now decide: "{message.content}" -> """
                     except Exception as cleanup_error:
                         print(f"⚠️  [GEMINI] Could not delete upload {getattr(uploaded, 'name', '?')}: {cleanup_error}")
         else:
+            print(f"🔍 [{username}] DEBUG: Entering else branch (no images), about to call queued_generate_content")
             try:
                 # Use queued generate_content for rate limiting
                 print(f"🔍 [{username}] About to call queued_generate_content with model: {active_model}")
@@ -5699,6 +5710,7 @@ Now decide: "{message.content}" -> """
                 response = await queued_generate_content(active_model, response_prompt)
                 print(f"🔍 [{username}] queued_generate_content returned: type={type(response)}, has_text={hasattr(response, 'text') if response else False}")
             except Exception as e:
+                print(f"🔍 [{username}] DEBUG: Exception in text model call: {e}")
                 # Handle rate limits on text generation
                 if handle_rate_limit_error(e):
                     # Retry with fallback model
