@@ -2706,7 +2706,16 @@ CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
 - Be smart about identifying elements - use visual cues, text, buttons, links
-- If the goal is achieved (e.g., "show me sign up" and sign up page is visible) → mark as achieved
+- GOAL ACHIEVEMENT: Mark goal_achieved as TRUE when you reach the page/form the user asked for:
+  * If goal is "show me sign up" or "sign up" → goal_achieved = true when you see:
+    - Sign-up page/form
+    - Create account page/form
+    - Registration page/form
+    - Account creation page/form
+    - Any page with fields to create a new account (email, password, name, etc.)
+  * If goal is "show me login" → goal_achieved = true when you see login page/form
+  * If goal is "show me [specific page]" → goal_achieved = true when that page is visible
+- IMPORTANT: "Create account", "Sign up", "Register", "Create your account" all mean the same thing - if you see any account creation form, the goal is achieved!
 
 Return a JSON object with this exact format:
 {{
@@ -2724,8 +2733,8 @@ Return a JSON object with this exact format:
 Examples:
 - Cookie banner visible → {{"next_action": {{"type": "click", "description": "Accept Cookies or Accept All", "reason": "Cookie banner is blocking the page"}}}}
 - Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
-- Goal element visible → {{"next_action": {{"type": "click", "description": "Sign Up button", "reason": "This is the goal element"}}, "goal_achieved": true}}
-- No obstacles, goal not visible → {{"next_action": {{"type": "scroll", "description": "scroll down to find goal element", "reason": "Need to search for the goal"}}}}
+- Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible"}}}}
+- Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign in or Create Account", "reason": "Need to navigate to sign-up page"}}}}
 
 Analyze the screenshot now: """
             
