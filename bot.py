@@ -2779,17 +2779,17 @@ Analyze the screenshot now: """
                 # Ask AI if this screenshot is worth showing to the user based on their goal
                 should_save_screenshot = False
                 if goal_achieved:
-                    should_save_screenshot = True  # Always save when goal achieved
-                else:
-                    # Ask AI if this screenshot shows progress toward the user's goal
-                    screenshot_decision_prompt = f"""Look at this webpage screenshot. The user's goal is: "{goal}"
+                    # Check if we already have a screenshot of this page (avoid showing same page multiple times)
+                    if screenshots:
+                        # Ask AI if this is a DIFFERENT part of the same page (e.g., scrolled to show bottom)
+                        duplicate_check_prompt = f"""You have already captured {len(screenshots)} screenshot(s). Look at this NEW screenshot.
 
-Does this screenshot show something the user would want to see? Consider:
-- Does it show progress toward the goal?
-- Does it show the final result the user asked for?
-- Is it just an intermediate step (like dismissing a banner) that doesn't show the goal?
+CRITICAL RULES:
+- If this screenshot shows the EXACT SAME page/content as previous screenshots → return false (don't show duplicates!)
+- If this screenshot shows a DIFFERENT part of the same page (e.g., you scrolled to show the bottom, or a different section) → return true
+- If this screenshot shows a completely different page → return true
 
-User asked for: "{goal}"
+The user's goal is: "{goal}"
 
 Return JSON:
 {{
@@ -2798,20 +2798,85 @@ Return JSON:
 }}
 
 Examples:
-- Goal: "show me sign up", screenshot shows sign-up page → {{"worth_showing": true, "reason": "This shows the sign-up page the user asked for"}}
+- Previous screenshots show sign-up page (top), new screenshot shows same sign-up page (top) → {{"worth_showing": false, "reason": "Same page already shown"}}
+- Previous screenshots show sign-up page (top), new screenshot shows sign-up page (bottom/form fields) → {{"worth_showing": true, "reason": "This shows the bottom part of the sign-up page with form fields"}}
+- Previous screenshots show homepage, new screenshot shows sign-up page → {{"worth_showing": true, "reason": "This shows the sign-up page the user asked for"}}
+
+Decision: """
+                        
+                        # Prepare bytes for duplicate check
+                        duplicate_check_bytes = BytesIO(current_screenshot)
+                        duplicate_check_bytes.seek(0)
+                        
+                        duplicate_check_content = [
+                            duplicate_check_prompt,
+                            {'mime_type': 'image/png', 'data': duplicate_check_bytes.read()}
+                        ]
+                        
+                        try:
+                            duplicate_check_response = await queued_generate_content(vision_model, duplicate_check_content)
+                            duplicate_check_text = duplicate_check_response.text.strip()
+                            
+                            # Parse JSON
+                            if '```json' in duplicate_check_text:
+                                duplicate_check_text = duplicate_check_text.split('```json')[1].split('```')[0].strip()
+                            elif '```' in duplicate_check_text:
+                                duplicate_check_text = duplicate_check_text.split('```')[1].split('```')[0].strip()
+                            
+                            duplicate_check_data = json.loads(duplicate_check_text)
+                            should_save_screenshot = duplicate_check_data.get('worth_showing', False)
+                            reason = duplicate_check_data.get('reason', 'Unknown')
+                            
+                            if should_save_screenshot:
+                                print(f"📸 [AUTONOMOUS] AI decided to save screenshot (different part of page): {reason}")
+                            else:
+                                print(f"⏭️  [AUTONOMOUS] AI decided to skip screenshot (duplicate): {reason}")
+                        except Exception as duplicate_check_error:
+                            # Fallback: don't save if we already have screenshots (avoid duplicates)
+                            print(f"⚠️  [AUTONOMOUS] Error in duplicate check, skipping to avoid duplicates: {duplicate_check_error}")
+                            should_save_screenshot = False
+                    else:
+                        # First screenshot when goal achieved - always save
+                        should_save_screenshot = True
+                        print(f"📸 [AUTONOMOUS] Saving first screenshot of achieved goal")
+                else:
+                    # Ask AI if this screenshot shows progress toward the user's goal
+                    screenshot_decision_prompt = f"""Look at this webpage screenshot. The user's goal is: "{goal}"
+
+You have already captured {len(screenshots)} screenshot(s).
+
+Does this NEW screenshot show something the user would want to see that is DIFFERENT from previous screenshots? Consider:
+- Does it show NEW progress toward the goal that wasn't shown before?
+- Does it show the final result the user asked for (and we haven't shown it yet)?
+- Is it just the SAME page/content already shown (don't show duplicates!)?
+- Is it just an intermediate step (like dismissing a banner) that doesn't show the goal?
+
+CRITICAL: Only return true if this screenshot shows something NEW/DIFFERENT. If it's the same page or content as previous screenshots, return false.
+
+User asked for: "{goal}"
+
+Return JSON:
+{{
+    "worth_showing": true/false,
+    "reason": "why this screenshot is or isn't worth showing (is it new/different?)"
+}}
+
+Examples:
+- Goal: "show me sign up", previous screenshots show homepage, new screenshot shows sign-up page → {{"worth_showing": true, "reason": "This shows the sign-up page the user asked for, different from homepage"}}
+- Goal: "show me sign up", previous screenshots show sign-up page, new screenshot shows same sign-up page → {{"worth_showing": false, "reason": "This is the same sign-up page already shown"}}
 - Goal: "show me sign up", screenshot shows homepage → {{"worth_showing": false, "reason": "This is just the homepage, not the sign-up page"}}
 - Goal: "show me sign up", screenshot shows dismissing a banner → {{"worth_showing": false, "reason": "This is just dismissing a banner, not showing the goal"}}
-- Goal: "show me sign up", screenshot shows clicking sign in button → {{"worth_showing": true, "reason": "This shows progress toward the sign-up page"}}
 
 Decision: """
                     
                     # Prepare screenshot bytes for AI decision
                     screenshot_bytes_for_decision = BytesIO(current_screenshot)
                     screenshot_bytes_for_decision.seek(0)
+                    screenshot_decision_data = screenshot_bytes_for_decision.read()
                     
                     screenshot_decision_content = [
                         screenshot_decision_prompt,
-                        {'mime_type': 'image/png', 'data': screenshot_bytes_for_decision.read()}
+                        {'mime_type': 'image/png', 'data': screenshot_decision_data}
                     ]
                     
                     try:
