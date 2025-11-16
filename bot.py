@@ -2679,6 +2679,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         last_significant_state = None
         action_history = []  # Track actions to detect loops
         consecutive_failures = 0  # Track consecutive failed attempts
+        goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
@@ -2828,8 +2829,17 @@ Analyze the screenshot now: """
                 # Ask AI if this screenshot is worth showing to the user based on their goal
                 should_save_screenshot = False
                 if goal_achieved:
-                    # Check if we already have a screenshot of this page (avoid showing same page multiple times)
-                    if screenshots:
+                    # Always ensure we capture at least ONE screenshot of the final goal page,
+                    # even if the AI thinks it looks similar to something before. This prevents
+                    # cases where we reach the target (e.g., sign-up form) but only show
+                    # intermediate pages to the user.
+                    if not goal_screenshot_saved:
+                        should_save_screenshot = True
+                        goal_screenshot_saved = True
+                        print(f"📸 [AUTONOMOUS] Saving goal screenshot (first time goal achieved)")
+                    # If we've already saved at least one goal screenshot, we can optionally
+                    # use the AI to decide whether additional goal screenshots are worth it.
+                    elif screenshots:
                         # Ask AI if this is a DIFFERENT part of the same page (e.g., scrolled to show bottom)
                         duplicate_check_prompt = f"""You have already captured {len(screenshots)} screenshot(s). Look at this NEW screenshot.
 
@@ -3160,8 +3170,10 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             try:
                                 new_page = None
                                 try:
+                                    # New page events are emitted on the browser context, not on
+                                    # the Browser object itself, so listen on page.context.
                                     new_page = await asyncio.wait_for(
-                                        browser.wait_for_event("page"),
+                                        page.context.wait_for_event("page"),
                                         timeout=1.0
                                     )
                                 except asyncio.TimeoutError:
