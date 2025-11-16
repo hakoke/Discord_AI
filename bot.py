@@ -7363,8 +7363,8 @@ async def on_message(message: discord.Message):
                 result = await generate_response(message, force_response)
 
                 print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
-                # Handle both tuple and bool/None returns (for backward compatibility)
-                if result and isinstance(result, tuple):
+                # Handle both tuple and non-tuple returns (for backward compatibility)
+                if isinstance(result, tuple):
                     # Check if result includes generated images
                     print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                     if isinstance(result, tuple):
@@ -7394,6 +7394,16 @@ async def on_message(message: discord.Message):
                         generated_images = None
                         generated_documents = None
                         searched_images = []
+                        screenshots = []
+                else:
+                    # Handle case where generate_response returned False, None, or non-tuple
+                    print(f"⚠️  [{message.author.display_name}] generate_response returned non-tuple: {type(result)} = {result}")
+                    error_msg = "Sorry, I encountered an issue generating a response. Please try again."
+                    try:
+                        await message.channel.send(error_msg, reference=message)
+                    except Exception as send_error:
+                        print(f"❌ [{message.author.display_name}] Failed to send error message: {send_error}")
+                    return
                 
                 # Prepare files to attach (searched images + generated images + screenshots - these go with the text response)
                 # Try without compression first (original quality)
@@ -7573,14 +7583,6 @@ async def on_message(message: discord.Message):
                         doc_bytes.seek(0)
                         file = discord.File(fp=doc_bytes, filename=doc["filename"])
                         await message.channel.send(file=file, reference=message)
-                else:
-                    # Handle case where generate_response returned False, None, or non-tuple
-                    print(f"⚠️  [{message.author.display_name}] generate_response returned non-tuple: {type(result)} = {result}")
-                    error_msg = "Sorry, I encountered an issue generating a response. Please try again."
-                    try:
-                        await message.channel.send(error_msg, reference=message)
-                    except Exception as send_error:
-                        print(f"❌ [{message.author.display_name}] Failed to send error message: {send_error}")
             except asyncio.CancelledError:
                 # Task was cancelled (e.g., via /stop). Just stop gracefully.
                 print(f"⏹️  [{message.author.display_name}] Response task cancelled by user")
