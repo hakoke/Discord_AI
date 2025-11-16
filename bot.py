@@ -1774,6 +1774,9 @@ def clean_url(url: str) -> str:
 _playwright_instance = None
 _browser: Optional[Any] = None  # Using Any instead of Browser to avoid import issues
 
+# Track active AI response tasks per user so they can be cancelled with /stop
+ACTIVE_USER_TASKS: Dict[int, List[asyncio.Task]] = {}
+
 async def get_browser() -> Optional[Any]:
     """Get or create a browser instance (reused across requests)"""
     global _playwright_instance, _browser
@@ -4766,7 +4769,7 @@ When users ask "what can you do?", "what are your capabilities?", "what can you 
 - "I can visit websites, click buttons, scroll pages, and take screenshots of what I see"
 Feel free to be creative and enthusiastic when describing your capabilities!
 
-SLASH COMMANDS AVAILABLE (ONLY THESE TWO EXIST):
+SLASH COMMANDS AVAILABLE:
 - `/profile [user]` - View detailed personality profile for yourself or another user. This shows your memory/profile including summary, request history, topics of interest, communication style, honest impressions, and patterns/predictions. If no user is specified, shows your own profile. Example: `/profile` or `/profile @username`
   - What it does: Displays an organized embed with all personality data I've collected about the user, including interaction history, interests, communication patterns, and my honest assessment
   - When to use: When someone wants to see what I remember about them or another user, view their personality profile, or check their interaction history
@@ -4775,16 +4778,21 @@ SLASH COMMANDS AVAILABLE (ONLY THESE TWO EXIST):
   - What it does: Displays a help embed showing how to interact with me (mention, reply, say name), what I can do (all capabilities), available slash commands, and usage examples
   - When to use: When someone asks "how do I use you?", "what can you do?", "what commands are available?", or needs general help getting started
 
+- `/stop` - Stop my current response or automation for YOU (it won't affect anyone else's messages)
+  - What it does: Cancels any active AI response, screenshot run, or browser automation that I'm currently doing for your latest message
+  - When to use: When I'm taking too long, stuck on a website, or you simply changed your mind and want me to stop what I'm doing for you
+
 CRITICAL - COMMAND ACCURACY:
-- ONLY `/profile` and `/help` exist as slash commands. DO NOT mention any other slash commands that don't exist.
+- The slash commands that exist are: `/profile`, `/help`, and `/stop`. DO NOT invent or mention any others.
 - You MUST know what each command does:
   - `/profile` = Shows personality profile/memory data (summary, history, interests, communication style, impressions, patterns)
   - `/help` = Shows help embed with how to use the bot, capabilities list, commands, and examples
+  - `/stop` = Stops your current in-progress response or automation (ONLY for your prompts)
 - If someone asks "how do I view my memory?", "how can I see what you remember about me?", "what do you know about me?", tell them to use `/profile` to view their memory/profile.
 - If someone asks "how do I get help?", "how do I use you?", "what commands are available?", "what can you do?", tell them to use `/help` to see the help information.
-- If someone asks "what commands do you have?", mention BOTH `/profile` and `/help` and explain what each does.
+- If someone asks "how do I stop you" or "cancel this" or "you're stuck", tell them to use `/stop` to cancel their current request.
+- If someone asks "what commands do you have?", mention `/profile`, `/help`, and `/stop` and explain what each does.
 - DO NOT invent or mention commands like `/memory`, `/remember`, `/forget`, `/stats`, `/imagine`, or any other commands that don't exist.
-- When users ask about commands or how to use the bot, mention ONLY these two slash commands: `/profile` and `/help`, and explain what each one does.
 
 Examples of correct responses:
 - "You can use `/profile` to see your detailed personality profile and what I remember about you!"
@@ -7336,23 +7344,25 @@ async def on_message(message: discord.Message):
     # (Removed the "let AI decide for all messages" section)
     
     if should_respond:
-        # Start typing indicator manager in background
-        typing_stop_event = asyncio.Event()
-        typing_task = None
-        try:
-            typing_task = asyncio.create_task(
-                manage_typing_indicator(message.channel, typing_stop_event)
-            )
-            print(f"⌨️  [{message.author.display_name}] Typing indicator started")
-        except Exception as typing_start_error:
-            print(f"⚠️  [{message.author.display_name}] Failed to start typing indicator: {typing_start_error}")
+        # Delegate heavy work to a per-user task so it can be cancelled via /stop
+        async def process_message_response(message: discord.Message, force_response: bool):
+            typing_stop_event = asyncio.Event()
             typing_task = None
-        
-        try:
-            # Generate response (typing indicator runs in background)
-            result = await generate_response(message, force_response)
-            
-            print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
+            try:
+                # Start typing indicator manager in background
+                try:
+                    typing_task = asyncio.create_task(
+                        manage_typing_indicator(message.channel, typing_stop_event)
+                    )
+                    print(f"⌨️  [{message.author.display_name}] Typing indicator started")
+                except Exception as typing_start_error:
+                    print(f"⚠️  [{message.author.display_name}] Failed to start typing indicator: {typing_start_error}")
+                    typing_task = None
+
+                # Generate response (typing indicator runs in background)
+                result = await generate_response(message, force_response)
+
+                print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
             # Handle both tuple and bool/None returns (for backward compatibility)
             if result and isinstance(result, tuple):
                 # Check if result includes generated images
@@ -7571,38 +7581,59 @@ async def on_message(message: discord.Message):
                     await message.channel.send(error_msg, reference=message)
                 except Exception as send_error:
                     print(f"❌ [{message.author.display_name}] Failed to send error message: {send_error}")
-        except Exception as e:
-            print(f"❌ Error in on_message handler: {e}")
-            import traceback
-            print(f"❌ Traceback:\n{traceback.format_exc()}")
-            # Try to send a user-friendly error message
-            try:
-                error_str = str(e).lower()
-                if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy']):
-                    await message.channel.send(
-                        "I can't fulfill that request as it violates content safety policies. "
-                        "Please try rephrasing your request."
-                    )
-                else:
-                    await message.channel.send(
-                        "Sorry, I encountered an error processing your request. Please try again."
-                    )
-            except:
-                pass  # If we can't send error message, just log it
-        finally:
-            # Stop typing indicator after all messages are sent
-            typing_stop_event.set()
-            if typing_task:
+            except asyncio.CancelledError:
+                # Task was cancelled (e.g., via /stop). Just stop gracefully.
+                print(f"⏹️  [{message.author.display_name}] Response task cancelled by user")
+            except Exception as e:
+                print(f"❌ Error in on_message handler: {e}")
+                import traceback
+                print(f"❌ Traceback:\n{traceback.format_exc()}")
+                # Try to send a user-friendly error message
                 try:
-                    await asyncio.wait_for(typing_task, timeout=1.0)
-                except asyncio.TimeoutError:
-                    typing_task.cancel()
+                    error_str = str(e).lower()
+                    if any(keyword in error_str for keyword in ['safety', 'blocked', 'inappropriate', 'content policy']):
+                        await message.channel.send(
+                            "I can't fulfill that request as it violates content safety policies. "
+                            "Please try rephrasing your request."
+                        )
+                    else:
+                        await message.channel.send(
+                            "Sorry, I encountered an error processing your request. Please try again."
+                        )
+                except:
+                    pass  # If we can't send error message, just log it
+            finally:
+                # Stop typing indicator after all messages are sent or on cancellation
+                typing_stop_event.set()
+                if typing_task:
                     try:
-                        await typing_task
-                    except asyncio.CancelledError:
-                        pass
-                except Exception as e:
-                    print(f"⚠️  Error stopping typing indicator: {e}")
+                        await asyncio.wait_for(typing_task, timeout=1.0)
+                    except asyncio.TimeoutError:
+                        typing_task.cancel()
+                        try:
+                            await typing_task
+                        except asyncio.CancelledError:
+                            pass
+                    except Exception as e:
+                        print(f"⚠️  Error stopping typing indicator: {e}")
+
+        # Create and register a per-user task for this response
+        user_id_int = message.author.id
+        response_task = asyncio.create_task(process_message_response(message, force_response))
+        ACTIVE_USER_TASKS.setdefault(user_id_int, []).append(response_task)
+
+        # Ensure we clean up the task entry when it completes
+        def _task_done_callback(task: asyncio.Task):
+            tasks = ACTIVE_USER_TASKS.get(user_id_int)
+            if tasks is not None:
+                try:
+                    tasks.remove(task)
+                except ValueError:
+                    pass
+                if not tasks:
+                    ACTIVE_USER_TASKS.pop(user_id_int, None)
+
+        response_task.add_done_callback(_task_done_callback)
     
     await bot.process_commands(message)
 
@@ -8146,7 +8177,8 @@ async def help_command(interaction: discord.Interaction):
         name="⚡ Slash Commands",
         value=(
             "`/profile [user]` - View detailed personality profile\n"
-            "`/help` - Show this help message"
+            "`/help` - Show this help message\n"
+            "`/stop` - Stop my current response or automation for you"
         ),
         inline=False
     )
@@ -8170,6 +8202,38 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text=f"Use /profile to see your personality profile!")
     
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name='stop', description='Stop my current response or automation for you')
+async def stop_command(interaction: discord.Interaction):
+    """Slash command to cancel the calling user's active AI task(s)"""
+    user_id_int = interaction.user.id
+    tasks = ACTIVE_USER_TASKS.get(user_id_int, [])
+
+    if not tasks:
+        await interaction.response.send_message(
+            "I don't have any active responses or automations running for you right now.", ephemeral=True
+        )
+        return
+
+    # Cancel all active tasks for this user
+    cancelled_count = 0
+    for task in list(tasks):
+        if not task.done():
+            task.cancel()
+            cancelled_count += 1
+
+    # Let the user know
+    if cancelled_count > 0:
+        await interaction.response.send_message(
+            f"⏹️ Stopped {cancelled_count} active response(s) or automation(s) for you. "
+            f"You can send a new message whenever you're ready.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Your responses already finished – there's nothing left to stop.", ephemeral=True
+        )
 
 @bot.command(name='memory')
 async def show_memory(ctx):
