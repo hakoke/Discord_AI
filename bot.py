@@ -2678,6 +2678,31 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
                 await page.goto(url, wait_until='load', timeout=30000)
                 await page.wait_for_timeout(2000)
         
+        # Best-effort: handle common blocking overlays generically (no site-specific logic)
+        # Attempt to dismiss cookie/consent/age verification prompts using generic labels.
+        try:
+            # Try common consent buttons by role/name (case-insensitive)
+            candidates = [
+                ('button', 'accept'),
+                ('button', 'accept all'),
+                ('button', 'i agree'),
+                ('button', 'agree'),
+                ('button', 'consent'),
+                ('button', 'continue'),
+                ('button', 'enter'),
+                ('link', 'accept'),
+                ('link', 'agree'),
+            ]
+            for role_name, text_part in candidates:
+                try:
+                    await page.get_by_role(role_name, name=re.compile(text_part, re.IGNORECASE)).first.click(timeout=1500)
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    continue
+        except Exception:
+            # Non-fatal: continue autonomous loop which also handles obstacles
+            pass
+        
         # Main autonomous loop
         last_significant_state = None
         action_history = []  # Track actions to detect loops
@@ -3245,6 +3270,15 @@ If found, return the data. If not found, return {{"exact_text": null}}.
             final_img_bytes.seek(0)
             screenshots.append(final_img_bytes)
             print(f"📸 [AUTONOMOUS] Final screenshot captured")
+        
+        # If we never saved any screenshot (e.g., AI skipped intermediates),
+        # attach a final state screenshot so the user sees something.
+        if not screenshots:
+            fallback_shot = await page.screenshot(type='png')
+            fallback_io = BytesIO(fallback_shot)
+            fallback_io.seek(0)
+            screenshots.append(fallback_io)
+            print(f"📸 [AUTONOMOUS] Fallback screenshot captured (no prior screenshots saved)")
         
         if goal_achieved:
             print(f"✅ [AUTONOMOUS] Successfully achieved goal: '{goal}'")
@@ -5032,6 +5066,9 @@ Examples:
 "go to bespoke-ae.com and show me" -> SCREENSHOT
 "take screenshot of amazon" -> SCREENSHOT
 "click login and show me" -> SCREENSHOT
+                "show me connections page" -> SCREENSHOT
+                "show me the login page" -> SCREENSHOT
+                "show me reddit" -> SCREENSHOT
 "what's the weather?" -> NONE
 
 Now decide: "{message.content}" -> """
@@ -5055,6 +5092,16 @@ Now decide: "{message.content}" -> """
             wants_image_search = (action_type == 'image_search')
             wants_screenshot = (action_type == 'screenshot')
             print(f"🤖 [{username}] AI decided action type: {action_type}")
+
+            # Generic AI-friendly fallback: if the phrasing clearly asks to "show" a page,
+            # treat it as a screenshot/visual request. This is site-agnostic and does not
+            # hardcode destinations. It simply ensures we trigger the visual path.
+            if action_type == 'none':
+                content_lower = (message.content or "").lower()
+                if any(phrase in content_lower for phrase in ['show me', 'screenshot', 'show the', 'show page']):
+                    action_type = 'screenshot'
+                    wants_screenshot = True
+                    print(f"🤖 [{username}] Fallback: upgrading action to 'screenshot' based on phrasing")
             
             # If no URLs in current message but AI determined user wants screenshot/interaction
             # PRIORITY 1: Try AI extraction from current message first (most relevant - user's current intent)
