@@ -3352,13 +3352,17 @@ Decision: """
                     # Use AI to identify the exact element
                     click_prompt = f"""Look at this webpage screenshot. I need to click on: "{action_desc}"
 
+CRITICAL: Find the ACTUAL CLICKABLE BUTTON/LINK, not just text that appears elsewhere on the page.
+If there are multiple instances of the same text, find the one that is actually a clickable button/link.
+
 Find the exact clickable element. Return JSON:
 {{
     "exact_text": "exact text on the button/link",
-    "element_type": "button/link/etc",
-    "location": "where it is on page",
-    "suggested_selector": "CSS selector if possible, or null",
-    "coordinates": {{"x": center_x, "y": center_y}} or null
+    "element_type": "button" or "link" or "other" - IMPORTANT: specify if it's a button or link,
+    "location": "where it is on page (e.g., 'in the popup', 'top right', 'center')",
+    "suggested_selector": "CSS selector if possible (prioritize button selectors like 'button:has-text(...)'), or null",
+    "coordinates": {{"x": center_x, "y": center_y}} or null,
+    "is_in_popup": true/false - is this element inside a popup/modal?
 }}
 
 If found, return the data. If not found, return {{"exact_text": null}}.
@@ -3385,58 +3389,91 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         
                         click_data = json.loads(click_text)
                         exact_text = click_data.get('exact_text')
+                        element_type = click_data.get('element_type', '').lower()
                         suggested_selector = click_data.get('suggested_selector')
                         coordinates = click_data.get('coordinates')
+                        is_in_popup = click_data.get('is_in_popup', False)
                         
                         clicked = False
                         
-                        # Try multiple click strategies (reduced timeouts for speed)
+                        # PRIORITIZE BUTTONS/LINKS OVER PLAIN TEXT
+                        # Strategy order matters - try clickable elements FIRST
                         if exact_text:
-                            # Strategy 1: Click by text
-                            try:
-                                await page.get_by_text(exact_text, exact=False).first.click(timeout=5000)  # Reduced from 8000
-                                clicked = True
-                                print(f"✅ [AUTONOMOUS] Clicked by text: '{exact_text}'")
-                            except:
-                                pass
-                            
-                            # Strategy 2: Click by role
-                            if not clicked:
+                            # Strategy 1: If AI says it's a button, try button role FIRST
+                            if 'button' in element_type and not clicked:
                                 try:
-                                    await page.get_by_role('button', name=exact_text, exact=False).first.click(timeout=5000)
-                                    clicked = True
-                                    print(f"✅ [AUTONOMOUS] Clicked by role: '{exact_text}'")
+                                    # Try to find button with this text
+                                    button = page.get_by_role('button', name=exact_text, exact=False).first
+                                    if await button.count() > 0:
+                                        await button.click(timeout=5000)
+                                        clicked = True
+                                        print(f"✅ [AUTONOMOUS] Clicked button by role: '{exact_text}'")
                                 except:
                                     pass
                             
-                            # Strategy 3: Click by link
+                            # Strategy 2: If AI says it's a link, try link role
+                            if 'link' in element_type and not clicked:
+                                try:
+                                    link = page.get_by_role('link', name=exact_text, exact=False).first
+                                    if await link.count() > 0:
+                                        await link.click(timeout=5000)
+                                        clicked = True
+                                        print(f"✅ [AUTONOMOUS] Clicked link by role: '{exact_text}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 3: Try CSS selector (AI-provided, usually more specific)
+                            if not clicked and suggested_selector:
+                                try:
+                                    await page.locator(suggested_selector).first.click(timeout=5000)
+                                    clicked = True
+                                    print(f"✅ [AUTONOMOUS] Clicked by selector: '{suggested_selector}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 4: Try finding button/link elements that contain the text (more specific than plain text)
                             if not clicked:
                                 try:
-                                    await page.get_by_role('link', name=exact_text, exact=False).first.click(timeout=5000)
+                                    # Try button first
+                                    button_locator = page.locator(f'button:has-text("{exact_text}")').first
+                                    if await button_locator.count() > 0:
+                                        await button_locator.click(timeout=5000)
+                                        clicked = True
+                                        print(f"✅ [AUTONOMOUS] Clicked button containing text: '{exact_text}'")
+                                except:
+                                    pass
+                            
+                            if not clicked:
+                                try:
+                                    # Try link
+                                    link_locator = page.locator(f'a:has-text("{exact_text}")').first
+                                    if await link_locator.count() > 0:
+                                        await link_locator.click(timeout=5000)
+                                        clicked = True
+                                        print(f"✅ [AUTONOMOUS] Clicked link containing text: '{exact_text}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 5: Click by coordinates (if AI provided them)
+                            if not clicked and coordinates:
+                                try:
+                                    await page.mouse.click(coordinates['x'], coordinates['y'])
                                     clicked = True
-                                    print(f"✅ [AUTONOMOUS] Clicked by link: '{exact_text}'")
+                                    print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
+                                except:
+                                    pass
+                            
+                            # Strategy 6: LAST RESORT - Click by text (but only if nothing else worked)
+                            # This might click wrong element if text appears multiple times, but it's a fallback
+                            if not clicked:
+                                try:
+                                    await page.get_by_text(exact_text, exact=False).first.click(timeout=5000)
+                                    clicked = True
+                                    print(f"✅ [AUTONOMOUS] Clicked by text (fallback): '{exact_text}'")
                                 except:
                                     pass
                         
-                        # Strategy 4: Use CSS selector
-                        if not clicked and suggested_selector:
-                            try:
-                                await page.locator(suggested_selector).first.click(timeout=5000)
-                                clicked = True
-                                print(f"✅ [AUTONOMOUS] Clicked by selector: '{suggested_selector}'")
-                            except:
-                                pass
-                        
-                        # Strategy 5: Click at coordinates
-                        if not clicked and coordinates:
-                            try:
-                                await page.mouse.click(coordinates['x'], coordinates['y'])
-                                clicked = True
-                                print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
-                            except:
-                                pass
-                        
-                        # Strategy 6: Fallback - try flexible text matching (limit attempts for speed)
+                        # Strategy 7: Fallback - try flexible text matching (limit attempts for speed)
                         if not clicked:
                             # Try variations of the action description
                             text_variations = [
