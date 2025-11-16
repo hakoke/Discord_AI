@@ -1066,6 +1066,49 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         
         print(f"✅ [IMAGE EDIT] API call successful")
         print(f"🔍 [IMAGE EDIT] Response type: {type(response)}")
+        print(f"🔍 [IMAGE EDIT] Response attributes: {[attr for attr in dir(response) if not attr.startswith('_')]}")
+        
+        # Log raw response structure for debugging
+        try:
+            response_dict = {}
+            for attr in ['candidates', 'images', 'text', 'parts']:
+                if hasattr(response, attr):
+                    response_dict[attr] = f"<{type(getattr(response, attr)).__name__}>"
+            print(f"🔍 [IMAGE EDIT] Response structure: {json.dumps(response_dict, indent=2)}")
+        except:
+            pass
+        
+        # Check for response.images format (as ChatGPT suggested)
+        if hasattr(response, 'images') and response.images:
+            print(f"🔍 [IMAGE EDIT] Found response.images (format suggested by ChatGPT)")
+            try:
+                for i, img in enumerate(response.images):
+                    print(f"🔍 [IMAGE EDIT] Image {i} type: {type(img)}")
+                    if hasattr(img, 'data'):
+                        image_data = img.data
+                        print(f"🔍 [IMAGE EDIT] Image data type: {type(image_data)}")
+                        
+                        # Handle different data types
+                        if isinstance(image_data, str):
+                            image_bytes = base64.b64decode(image_data)
+                        elif isinstance(image_data, bytes):
+                            try:
+                                image_bytes = base64.b64decode(image_data)
+                            except:
+                                image_bytes = image_data
+                        else:
+                            print(f"⚠️  [IMAGE EDIT] Unexpected image_data type: {type(image_data)}")
+                            continue
+                        
+                        if isinstance(image_bytes, BytesIO):
+                            image_bytes = image_bytes.read()
+                        
+                        result_image = Image.open(BytesIO(image_bytes))
+                        print(f"🎉 [IMAGE EDIT] Successfully edited image from response.images! Size: {result_image.size[0]}x{result_image.size[1]}")
+                        return result_image
+            except Exception as images_error:
+                print(f"⚠️  [IMAGE EDIT] Error extracting from response.images: {images_error}")
+        
         print(f"🔍 [IMAGE EDIT] Response has candidates: {hasattr(response, 'candidates')}")
         
         # Check if response contains images
@@ -1174,16 +1217,61 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         except Exception as alt_error:
             print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
         
-        # If all else fails, return None
-        print(f"❌ [IMAGE EDIT] Could not extract edited image from response")
-        return None
+        # If all else fails, try fallback to Imagen editing
+        print(f"⚠️  [IMAGE EDIT] Gemini 2.5 Flash Image editing failed, trying Imagen fallback...")
+        return _edit_image_imagen_fallback(original_image_bytes, prompt)
         
     except Exception as e:
         print(f"❌ [IMAGE EDIT] Error occurred: {type(e).__name__}")
         print(f"❌ [IMAGE EDIT] Error message: {str(e)}")
         import traceback
         print(f"❌ [IMAGE EDIT] Full traceback:\n{traceback.format_exc()}")
-        raise
+        
+        # Try Imagen fallback even on error
+        print(f"⚠️  [IMAGE EDIT] Attempting Imagen fallback after error...")
+        try:
+            return _edit_image_imagen_fallback(original_image_bytes, prompt)
+        except Exception as fallback_error:
+            print(f"❌ [IMAGE EDIT] Imagen fallback also failed: {fallback_error}")
+            raise
+
+def _edit_image_imagen_fallback(original_image_bytes: bytes, prompt: str) -> Image:
+    """Fallback to Imagen editing if Gemini fails"""
+    if not IMAGEN_AVAILABLE:
+        print(f"❌ [IMAGE EDIT] Imagen not available for fallback")
+        return None
+    
+    try:
+        print(f"🔄 [IMAGE EDIT] Using Imagen editing as fallback (imagegeneration@002)")
+        import vertexai
+        from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
+        
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+        location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+        
+        vertexai.init(project=project_id, location=location)
+        
+        # Use Imagen editing model
+        model = ImageGenerationModel.from_pretrained('imagegeneration@002')
+        base_image = VertexImage(original_image_bytes)
+        
+        images_response = model.edit_image(
+            base_image=base_image,
+            prompt=prompt,
+            edit_mode="inpainting-insert",
+        )
+        
+        if hasattr(images_response, 'images') and images_response.images:
+            result = images_response.images[0]._pil_image if images_response.images and len(images_response.images) > 0 else None
+            if result:
+                print(f"✅ [IMAGE EDIT] Successfully edited image using Imagen fallback!")
+                return result
+        
+        print(f"❌ [IMAGE EDIT] Imagen fallback returned no images")
+        return None
+    except Exception as e:
+        print(f"❌ [IMAGE EDIT] Imagen fallback error: {e}")
+        return None
 
 def should_respond_to_name(content: str) -> bool:
     """Check if message mentions bot name with fuzzy matching"""
@@ -3521,7 +3609,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                         print(f"✅ [AUTONOMOUS] Clicked button containing text: '{exact_text}'")
                                 except:
                                     pass
-                            
+                        
                             if not clicked:
                                 try:
                                     # Try link
@@ -3532,15 +3620,15 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                         print(f"✅ [AUTONOMOUS] Clicked link containing text: '{exact_text}'")
                                 except:
                                     pass
-                            
+                        
                             # Strategy 5: Click by coordinates (if AI provided them)
-                            if not clicked and coordinates:
-                                try:
-                                    await page.mouse.click(coordinates['x'], coordinates['y'])
-                                    clicked = True
-                                    print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
-                                except:
-                                    pass
+                        if not clicked and coordinates:
+                            try:
+                                await page.mouse.click(coordinates['x'], coordinates['y'])
+                                clicked = True
+                                print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
+                            except:
+                                pass
                         
                             # Strategy 6: LAST RESORT - Click by text (but only if nothing else worked)
                             # This might click wrong element if text appears multiple times, but it's a fallback
@@ -5861,6 +5949,8 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **Personality Profiles**: Use `/profile` to view detailed personality assessments for yourself or others
 - ✅ **Image Search**: Search Google Images and attach relevant images to responses
 - ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate, TYPE into text fields), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it", "go to amazon and search for laptop", "go to google and search for python tutorials". You can open ANY link, click ANY button, scroll, wait, TYPE into search boxes and text fields, and take screenshots of ANY page. The AI can dynamically type into any text field, search box, or input element it finds on the page.
+
+- ✅ **Video Recording Capability**: Record screen videos of browser automation! You can record videos of websites, games, videos playing, or any browser interactions. The AI dynamically decides when to record videos vs take screenshots. Examples: "go to youtube, click on a video, record 30 seconds", "record 2 minutes of this game", "show me video of the entire process", "go to connections game and record me completing it", "record 10 seconds of the video". You can specify duration (e.g., "record 30 seconds", "record 2 minutes") or let the AI decide. Videos are automatically converted to MP4 and sent as attachments. The AI will navigate to the page, handle obstacles (cookie popups, etc.), get to the content, and then record for the specified duration. This works for ANY website - games, videos, interactive content, etc.
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
@@ -5888,6 +5978,8 @@ When users ask "what can you do?", "what are your capabilities?", "what can you 
 - "I can read and summarize web pages and documents"
 - "I can take screenshots of any website - just share a link and ask me to screenshot it!"
 - "I can visit websites, click buttons, scroll pages, and take screenshots of what I see"
+- "I can record screen videos of browser automation - just ask me to 'record X seconds' of any website, game, or video!"
+- "I can record videos of you playing games, watching videos, or any website interactions - just tell me how long to record!"
 Feel free to be creative and enthusiastic when describing your capabilities!
 
 SLASH COMMANDS AVAILABLE:
