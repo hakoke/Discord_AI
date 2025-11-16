@@ -1065,23 +1065,62 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         )
         
         print(f"✅ [IMAGE EDIT] API call successful")
+        print(f"🔍 [IMAGE EDIT] Response type: {type(response)}")
+        print(f"🔍 [IMAGE EDIT] Response has candidates: {hasattr(response, 'candidates')}")
         
         # Check if response contains images
         if hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
+            print(f"🔍 [IMAGE EDIT] Candidate type: {type(candidate)}")
+            print(f"🔍 [IMAGE EDIT] Candidate has content: {hasattr(candidate, 'content')}")
+            
             if hasattr(candidate, 'content') and candidate.content:
                 parts = candidate.content.parts
-                for part in parts:
+                print(f"🔍 [IMAGE EDIT] Number of parts: {len(parts)}")
+                
+                for i, part in enumerate(parts):
+                    print(f"🔍 [IMAGE EDIT] Part {i} type: {type(part)}")
+                    print(f"🔍 [IMAGE EDIT] Part {i} has inline_data: {hasattr(part, 'inline_data')}")
+                    
                     if hasattr(part, 'inline_data') and part.inline_data:
-                        # Extract image from response
-                        image_data = part.inline_data.data
-                        image_bytes = base64.b64decode(image_data)
-                        result_image = Image.open(BytesIO(image_bytes))
-                        print(f"🎉 [IMAGE EDIT] Successfully edited image! Size: {result_image.size[0]}x{result_image.size[1]}")
-                        return result_image
+                        print(f"🔍 [IMAGE EDIT] Found inline_data, extracting image...")
+                        try:
+                            # Extract image from response
+                            image_data = part.inline_data.data
+                            print(f"🔍 [IMAGE EDIT] Image data type: {type(image_data)}, length: {len(image_data) if isinstance(image_data, (str, bytes)) else 'N/A'}")
+                            
+                            # Decode base64 if it's a string
+                            if isinstance(image_data, str):
+                                image_bytes = base64.b64decode(image_data)
+                            elif isinstance(image_data, bytes):
+                                # Try to decode if it looks like base64
+                                try:
+                                    image_bytes = base64.b64decode(image_data)
+                                except:
+                                    # If it's already bytes, use directly
+                                    image_bytes = image_data
+                            else:
+                                print(f"⚠️  [IMAGE EDIT] Unexpected image_data type: {type(image_data)}")
+                                continue
+                            
+                            print(f"🔍 [IMAGE EDIT] Decoded image_bytes type: {type(image_bytes)}, length: {len(image_bytes)}")
+                            
+                            # Ensure we have raw bytes, not BytesIO
+                            if isinstance(image_bytes, BytesIO):
+                                image_bytes = image_bytes.read()
+                            
+                            # Open the image
+                            result_image = Image.open(BytesIO(image_bytes))
+                            print(f"🎉 [IMAGE EDIT] Successfully edited image! Size: {result_image.size[0]}x{result_image.size[1]}")
+                            return result_image
+                        except Exception as extract_error:
+                            print(f"⚠️  [IMAGE EDIT] Error extracting image from inline_data: {extract_error}")
+                            import traceback
+                            print(f"⚠️  [IMAGE EDIT] Traceback: {traceback.format_exc()}")
+                            continue
                     elif hasattr(part, 'text'):
-                        # If no image in response, try to extract from text or use original
-                        print(f"⚠️  [IMAGE EDIT] Response contains text but no image data")
+                        # If no image in response, log the text
+                        print(f"⚠️  [IMAGE EDIT] Response contains text part: {part.text[:200] if part.text else 'None'}...")
         
         # Fallback: if no image in response, return original (or try alternative method)
         print(f"⚠️  [IMAGE EDIT] No image found in response, trying alternative approach...")
@@ -1105,11 +1144,33 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
                     parts = candidate.content.parts
                     for part in parts:
                         if hasattr(part, 'inline_data') and part.inline_data:
-                            image_data = part.inline_data.data
-                            image_bytes = base64.b64decode(image_data)
-                            result_image = Image.open(BytesIO(image_bytes))
-                            print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method)!")
-                            return result_image
+                            try:
+                                image_data = part.inline_data.data
+                                
+                                # Handle different data types
+                                if isinstance(image_data, str):
+                                    image_bytes = base64.b64decode(image_data)
+                                elif isinstance(image_data, bytes):
+                                    try:
+                                        image_bytes = base64.b64decode(image_data)
+                                    except:
+                                        image_bytes = image_data
+                                elif isinstance(image_data, BytesIO):
+                                    image_bytes = image_data.read()
+                                else:
+                                    print(f"⚠️  [IMAGE EDIT] Unexpected image_data type in alternative: {type(image_data)}")
+                                    continue
+                                
+                                # Ensure we have raw bytes
+                                if isinstance(image_bytes, BytesIO):
+                                    image_bytes = image_bytes.read()
+                                
+                                result_image = Image.open(BytesIO(image_bytes))
+                                print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method)!")
+                                return result_image
+                            except Exception as alt_extract_error:
+                                print(f"⚠️  [IMAGE EDIT] Error extracting from alternative response: {alt_extract_error}")
+                                continue
         except Exception as alt_error:
             print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
         
