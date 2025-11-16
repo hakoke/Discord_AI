@@ -2676,19 +2676,17 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
                 await page.wait_for_timeout(2000)
         
         # Main autonomous loop
+        last_significant_state = None
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
             
-            # Take screenshot of current state
+            # Take screenshot of current state (but don't save it yet - only save significant ones)
             current_screenshot = await page.screenshot(type='png')
             screenshot_img = Image.open(BytesIO(current_screenshot))
-            screenshot_bytes_io = BytesIO(current_screenshot)
-            screenshot_bytes_io.seek(0)
-            screenshots.append(screenshot_bytes_io)
             
             # Use AI to analyze current state and decide next action
-            vision_model = get_smart_model()  # Use smart model for complex reasoning
+            vision_model = get_vision_model()  # Use faster vision model instead of smart model
             
             analysis_prompt = f"""You are an autonomous browser agent. Your goal is: "{goal}"
 
@@ -2769,6 +2767,75 @@ Analyze the screenshot now: """
                 print(f"   Goal achieved: {goal_achieved}")
                 print(f"   Confidence: {confidence:.2f}")
                 
+                # Ask AI if this screenshot is worth showing to the user based on their goal
+                should_save_screenshot = False
+                if goal_achieved:
+                    should_save_screenshot = True  # Always save when goal achieved
+                else:
+                    # Ask AI if this screenshot shows progress toward the user's goal
+                    screenshot_decision_prompt = f"""Look at this webpage screenshot. The user's goal is: "{goal}"
+
+Does this screenshot show something the user would want to see? Consider:
+- Does it show progress toward the goal?
+- Does it show the final result the user asked for?
+- Is it just an intermediate step (like dismissing a banner) that doesn't show the goal?
+
+User asked for: "{goal}"
+
+Return JSON:
+{{
+    "worth_showing": true/false,
+    "reason": "why this screenshot is or isn't worth showing"
+}}
+
+Examples:
+- Goal: "show me sign up", screenshot shows sign-up page → {{"worth_showing": true, "reason": "This shows the sign-up page the user asked for"}}
+- Goal: "show me sign up", screenshot shows homepage → {{"worth_showing": false, "reason": "This is just the homepage, not the sign-up page"}}
+- Goal: "show me sign up", screenshot shows dismissing a banner → {{"worth_showing": false, "reason": "This is just dismissing a banner, not showing the goal"}}
+- Goal: "show me sign up", screenshot shows clicking sign in button → {{"worth_showing": true, "reason": "This shows progress toward the sign-up page"}}
+
+Decision: """
+                    
+                    # Prepare screenshot bytes for AI decision
+                    screenshot_bytes_for_decision = BytesIO(current_screenshot)
+                    screenshot_bytes_for_decision.seek(0)
+                    
+                    screenshot_decision_content = [
+                        screenshot_decision_prompt,
+                        {'mime_type': 'image/png', 'data': screenshot_bytes_for_decision.read()}
+                    ]
+                    
+                    try:
+                        screenshot_decision_response = await queued_generate_content(vision_model, screenshot_decision_content)
+                        screenshot_decision_text = screenshot_decision_response.text.strip()
+                        
+                        # Parse JSON
+                        if '```json' in screenshot_decision_text:
+                            screenshot_decision_text = screenshot_decision_text.split('```json')[1].split('```')[0].strip()
+                        elif '```' in screenshot_decision_text:
+                            screenshot_decision_text = screenshot_decision_text.split('```')[1].split('```')[0].strip()
+                        
+                        screenshot_decision_data = json.loads(screenshot_decision_text)
+                        should_save_screenshot = screenshot_decision_data.get('worth_showing', False)
+                        reason = screenshot_decision_data.get('reason', 'Unknown')
+                        
+                        if should_save_screenshot:
+                            print(f"📸 [AUTONOMOUS] AI decided to save screenshot: {reason}")
+                        else:
+                            print(f"⏭️  [AUTONOMOUS] AI decided to skip screenshot: {reason}")
+                    except Exception as screenshot_decision_error:
+                        # Fallback: save if state changed significantly
+                        print(f"⚠️  [AUTONOMOUS] Error in screenshot decision, using fallback: {screenshot_decision_error}")
+                        should_save_screenshot = (current_state != last_significant_state)
+                
+                # Only save screenshot if AI says it's worth showing
+                if should_save_screenshot:
+                    screenshot_bytes_io = BytesIO(current_screenshot)
+                    screenshot_bytes_io.seek(0)
+                    screenshots.append(screenshot_bytes_io)
+                    last_significant_state = current_state
+                    print(f"📸 [AUTONOMOUS] Saved screenshot")
+                
                 # If goal is achieved, we're done
                 if goal_achieved:
                     print(f"✅ [AUTONOMOUS] Goal achieved!")
@@ -2831,11 +2898,11 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         
                         clicked = False
                         
-                        # Try multiple click strategies
+                        # Try multiple click strategies (reduced timeouts for speed)
                         if exact_text:
                             # Strategy 1: Click by text
                             try:
-                                await page.get_by_text(exact_text, exact=False).first.click(timeout=8000)
+                                await page.get_by_text(exact_text, exact=False).first.click(timeout=5000)  # Reduced from 8000
                                 clicked = True
                                 print(f"✅ [AUTONOMOUS] Clicked by text: '{exact_text}'")
                             except:
@@ -2844,7 +2911,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             # Strategy 2: Click by role
                             if not clicked:
                                 try:
-                                    await page.get_by_role('button', name=exact_text, exact=False).first.click(timeout=8000)
+                                    await page.get_by_role('button', name=exact_text, exact=False).first.click(timeout=5000)
                                     clicked = True
                                     print(f"✅ [AUTONOMOUS] Clicked by role: '{exact_text}'")
                                 except:
@@ -2853,7 +2920,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             # Strategy 3: Click by link
                             if not clicked:
                                 try:
-                                    await page.get_by_role('link', name=exact_text, exact=False).first.click(timeout=8000)
+                                    await page.get_by_role('link', name=exact_text, exact=False).first.click(timeout=5000)
                                     clicked = True
                                     print(f"✅ [AUTONOMOUS] Clicked by link: '{exact_text}'")
                                 except:
@@ -2862,7 +2929,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         # Strategy 4: Use CSS selector
                         if not clicked and suggested_selector:
                             try:
-                                await page.locator(suggested_selector).first.click(timeout=8000)
+                                await page.locator(suggested_selector).first.click(timeout=5000)
                                 clicked = True
                                 print(f"✅ [AUTONOMOUS] Clicked by selector: '{suggested_selector}'")
                             except:
@@ -2877,7 +2944,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             except:
                                 pass
                         
-                        # Strategy 6: Fallback - try flexible text matching
+                        # Strategy 6: Fallback - try flexible text matching (limit attempts for speed)
                         if not clicked:
                             # Try variations of the action description
                             text_variations = [
@@ -2896,9 +2963,10 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             if 'sign' in words and 'up' in words:
                                 text_variations.extend(['sign up', 'signup', 'create account', 'register'])
                             
-                            for variant in text_variations:
+                            # Limit to first 3 attempts for speed
+                            for variant in text_variations[:3]:
                                 try:
-                                    await page.get_by_text(variant, exact=False).first.click(timeout=5000)
+                                    await page.get_by_text(variant, exact=False).first.click(timeout=3000)  # Reduced timeout
                                     clicked = True
                                     print(f"✅ [AUTONOMOUS] Clicked by variant: '{variant}'")
                                     break
@@ -2906,12 +2974,12 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                     continue
                         
                         if clicked:
-                            # Wait for page to respond
-                            await page.wait_for_timeout(2000)
+                            # Wait for page to respond (reduced wait time for speed)
+                            await page.wait_for_timeout(1000)  # Reduced from 2000ms
                             try:
-                                await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=10000), timeout=11.0)
+                                await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=5000), timeout=6.0)  # Reduced timeouts
                             except:
-                                await page.wait_for_timeout(1000)
+                                await page.wait_for_timeout(500)  # Reduced from 1000ms
                         else:
                             print(f"⚠️  [AUTONOMOUS] Could not click: '{action_desc}' - will retry in next iteration")
                     
@@ -2947,8 +3015,8 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                 # Take screenshot and continue (might have made progress)
                 await page.wait_for_timeout(1000)
         
-        # Take final screenshot
-        if not goal_achieved or iteration >= max_iterations:
+        # Take final screenshot only if goal achieved and we don't already have it
+        if goal_achieved and (not screenshots or len(screenshots) == 0):
             final_screenshot = await page.screenshot(type='png')
             final_img_bytes = BytesIO(final_screenshot)
             final_img_bytes.seek(0)
