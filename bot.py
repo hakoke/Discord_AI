@@ -2806,6 +2806,12 @@ Analyze the screenshot now: """
                     if len(set(last_three)) == 1:  # All same action
                         is_stuck = True
                         print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{last_three[0]}' repeated 3+ times")
+
+                # If we have repeated technical failures, also treat as stuck
+                if consecutive_failures >= 3 and not is_stuck:
+                    is_stuck = True
+                    if not recovery_suggestion:
+                        recovery_suggestion = "Try a different type of action instead of repeating the same one."
                 
                 if is_stuck:
                     print(f"🔄 [AUTONOMOUS] AI detected stuck state: {recovery_suggestion}")
@@ -2961,6 +2967,39 @@ Decision: """
                 # Perform next action
                 action_type = next_action.get('type', 'none')
                 action_desc = next_action.get('description', '')
+
+                # If the AI reports being stuck, respect its recovery suggestion and
+                # change strategy instead of blindly repeating the same action.
+                if is_stuck:
+                    suggestion = (recovery_suggestion or "").lower()
+                    # Use the AI's suggestion text to choose a different high-level action,
+                    # without hardcoding any site-specific behavior.
+                    if 'go back' in suggestion or 'back' in suggestion:
+                        print("🔄 [AUTONOMOUS] Overriding stuck state with browser back navigation")
+                        action_type = 'go_back'
+                        action_desc = 'browser back button'
+                        action_history.clear()
+                    elif 'scroll' in suggestion:
+                        print("🔄 [AUTONOMOUS] Overriding stuck state with scroll action")
+                        action_type = 'scroll'
+                        # Let the AI implicitly decide direction via description; if none,
+                        # default to scrolling down to look for alternatives.
+                        if not action_desc:
+                            action_desc = 'scroll down to look for alternatives'
+                        action_history.clear()
+                    elif 'wait' in suggestion or 'pause' in suggestion:
+                        print("🔄 [AUTONOMOUS] Overriding stuck state with wait action")
+                        action_type = 'wait'
+                        if not action_desc:
+                            action_desc = 'wait a moment for the page to update'
+                        action_history.clear()
+                    elif action_type == 'click':
+                        # Generic fallback: if we are stuck repeatedly clicking something,
+                        # change to a non-click action so the AI sees a different state.
+                        print("🔄 [AUTONOMOUS] Stuck on click; switching to scroll to change context")
+                        action_type = 'scroll'
+                        action_desc = 'scroll down to explore other options'
+                        action_history.clear()
                 
                 if action_type == 'none':
                     print(f"⏸️  [AUTONOMOUS] No action needed, stopping")
@@ -3107,9 +3146,41 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             # Wait for page to respond (reduced wait time for speed)
                             await page.wait_for_timeout(1000)  # Reduced from 2000ms
                             try:
-                                await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=5000), timeout=6.0)  # Reduced timeouts
+                                await asyncio.wait_for(
+                                    page.wait_for_load_state('domcontentloaded', timeout=5000),
+                                    timeout=6.0
+                                )  # Reduced timeouts
                             except:
+                                # If load-state wait fails, still give the page a brief moment
                                 await page.wait_for_timeout(500)  # Reduced from 1000ms
+
+                            # Some sites open links in a NEW TAB or WINDOW. To keep everything
+                            # fully AI-driven while still making progress, detect any new page
+                            # that was created as a result of the click and switch context to it.
+                            try:
+                                new_page = None
+                                try:
+                                    new_page = await asyncio.wait_for(
+                                        browser.wait_for_event("page"),
+                                        timeout=1.0
+                                    )
+                                except asyncio.TimeoutError:
+                                    new_page = None
+
+                                if new_page is not None:
+                                    try:
+                                        await new_page.wait_for_load_state('domcontentloaded', timeout=10000)
+                                    except Exception:
+                                        # Even if load state times out, continue with whatever
+                                        # content is available so the AI can re-analyze.
+                                        pass
+                                    page = new_page
+                                    print("✅ [AUTONOMOUS] Switched to newly opened tab/page after click")
+                            except Exception as page_switch_error:
+                                # If anything goes wrong while switching pages, just continue
+                                # with the current page; the AI will see the state and decide.
+                                print(f"⚠️  [AUTONOMOUS] Error while checking for new page after click: {page_switch_error}")
+
                             consecutive_failures = 0  # Reset on success
                         else:
                             consecutive_failures += 1
