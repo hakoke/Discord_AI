@@ -13,6 +13,7 @@ import re
 import io
 import json
 import unicodedata
+import base64
 from PIL import Image
 from io import BytesIO
 from functools import lru_cache
@@ -211,6 +212,7 @@ except:
 
 SMART_MODEL = 'gemini-2.5-pro'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks (HAS VISION - multimodal)
 VISION_MODEL = 'gemini-2.0-flash'  # For everyday/simple image analysis
+IMAGE_EDIT_MODEL = 'gemini-2.5-flash-image'  # Latest model for image editing
 
 # Rate limit fallback system
 RATE_LIMIT_FALLBACK = 'gemini-2.0-flash'  # Fallback when exp model is rate limited
@@ -1009,15 +1011,11 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         return None
 
 async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Image:
-    """Edit an image based on a text prompt using Imagen (queued for rate limiting)"""
-    if not IMAGEN_AVAILABLE:
-        print(f"⚠️  [IMAGE EDIT] Imagen not available, skipping image editing")
-        return None
-    
+    """Edit an image based on a text prompt using Gemini 2.5 Flash Image (AI-driven, queued for rate limiting)"""
     try:
-        print(f"🚀 [IMAGE EDIT] Queuing image edit request...")
-        api_queue = _get_api_queue('gemini-2.0-flash')
-        result = await api_queue.execute(_edit_image_sync, original_image_bytes, prompt)
+        print(f"🚀 [IMAGE EDIT] Queuing image edit request with Gemini 2.5 Flash Image...")
+        api_queue = _get_api_queue(IMAGE_EDIT_MODEL)
+        result = await api_queue.execute(_edit_image_gemini_sync, original_image_bytes, prompt)
         print(f"🏁 [IMAGE EDIT] Image editing completed")
         return result
     except Exception as e:
@@ -1033,126 +1031,98 @@ async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Im
             )
         raise
 
-def _edit_image_sync(original_image_bytes: bytes, prompt: str) -> Image:
-    """Synchronous image editing using Imagen 3"""
+def _edit_image_gemini_sync(original_image_bytes: bytes, prompt: str) -> Image:
+    """Synchronous image editing using Gemini 2.5 Flash Image"""
     try:
-        print(f"✏️  [IMAGE EDIT] Starting image editing with prompt: '{prompt[:100]}...'")
+        print(f"✏️  [IMAGE EDIT] Starting image editing with Gemini 2.5 Flash Image")
+        print(f"   - Prompt: '{prompt[:100]}...'")
+        print(f"   - Image size: {len(original_image_bytes)} bytes")
         
-        import vertexai
-        from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
-        print(f"✅ [IMAGE EDIT] Vertex AI modules imported successfully")
+        # Load the image
+        image = Image.open(BytesIO(original_image_bytes))
+        print(f"✅ [IMAGE EDIT] Image loaded: {image.size[0]}x{image.size[1]}")
         
-        # Re-initialize vertexai in this thread context
-        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
-        location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
-        credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        # Get the Gemini model for image editing
+        model = genai.GenerativeModel(IMAGE_EDIT_MODEL)
+        print(f"✅ [IMAGE EDIT] Model loaded: {IMAGE_EDIT_MODEL}")
         
-        print(f"🔑 [IMAGE EDIT] Initializing Vertex AI...")
-        print(f"   - Project: {project_id}")
-        print(f"   - Location: {location}")
-        print(f"   - Credentials path: {credentials_path}")
+        # Create the edit prompt - Gemini 2.5 Flash Image can edit images with natural language
+        edit_prompt = f"""Edit this image according to the following request: {prompt}
+
+Apply the requested changes to the image. Make sure the edits are natural and match the style of the original image."""
         
-        # Verify credentials file exists
-        if credentials_path:
-            import pathlib
-            cred_file = pathlib.Path(credentials_path)
-            print(f"   - File exists: {cred_file.exists()}")
-            if cred_file.exists():
-                print(f"   - File size: {cred_file.stat().st_size} bytes")
-                print(f"   - File readable: {os.access(credentials_path, os.R_OK)}")
-        else:
-            print(f"   ⚠️  WARNING: No credentials path set!")
+        print(f"📡 [IMAGE EDIT] Calling Gemini 2.5 Flash Image API...")
         
-        vertexai.init(project=project_id, location=location)
-        print(f"✅ [IMAGE EDIT] Vertex AI initialized successfully")
+        # Use Gemini's image editing capability
+        # The model can take an image and a prompt to edit it
+        response = model.generate_content(
+            [edit_prompt, image],
+            generation_config={
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 40,
+            }
+        )
         
-        model = None
-        last_error = None
-        for model_name in IMAGEN_EDIT_MODELS:
-            try:
-                print(f"🔄 [IMAGE EDIT] Loading Imagen editing model: {model_name}")
-                model = ImageGenerationModel.from_pretrained(model_name)
-                print(f"✅ [IMAGE EDIT] Model loaded successfully: {model_name}")
-                break
-            except Exception as model_error:
-                last_error = model_error
-                print(f"   ⚠️  Model '{model_name}' not available: {model_error}")
+        print(f"✅ [IMAGE EDIT] API call successful")
         
-        if not model:
-            raise last_error or Exception("No Imagen editing model could be loaded.")
+        # Check if response contains images
+        if hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'content') and candidate.content:
+                parts = candidate.content.parts
+                for part in parts:
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        # Extract image from response
+                        image_data = part.inline_data.data
+                        image_bytes = base64.b64decode(image_data)
+                        result_image = Image.open(BytesIO(image_bytes))
+                        print(f"🎉 [IMAGE EDIT] Successfully edited image! Size: {result_image.size[0]}x{result_image.size[1]}")
+                        return result_image
+                    elif hasattr(part, 'text'):
+                        # If no image in response, try to extract from text or use original
+                        print(f"⚠️  [IMAGE EDIT] Response contains text but no image data")
         
-        # Convert bytes to Vertex AI Image
-        print(f"🖼️  [IMAGE EDIT] Converting base image ({len(original_image_bytes)} bytes)...")
-        base_image = VertexImage(original_image_bytes)
-        print(f"✅ [IMAGE EDIT] Base image converted")
+        # Fallback: if no image in response, return original (or try alternative method)
+        print(f"⚠️  [IMAGE EDIT] No image found in response, trying alternative approach...")
         
-        # Edit the image
-        print(f"📡 [IMAGE EDIT] Calling Imagen edit API...")
-        print(f"   - Prompt: {prompt[:100]}...")
-        print(f"   - Prompt length: {len(prompt)} chars")
-        print(f"   - Edit mode: inpainting-insert")
-        
+        # Alternative: Use the model's image generation with the original as reference
+        # This is a workaround if direct editing isn't available
         try:
-            images_response = model.edit_image(
-                base_image=base_image,
-                prompt=prompt,
-                edit_mode="inpainting-insert",  # Can also use "inpainting-remove" or "outpainting"
+            # Try using the model with image input and edit instruction
+            alternative_prompt = f"Edit the provided image: {prompt}"
+            alt_response = model.generate_content(
+                [alternative_prompt, image],
+                generation_config={
+                    "temperature": 0.8,
+                }
             )
-            print(f"✅ [IMAGE EDIT] API call successful")
-            print(f"   - Response type: {type(images_response)}")
-            print(f"   - Has images attribute: {hasattr(images_response, 'images')}")
             
-            if hasattr(images_response, 'images'):
-                print(f"   - Images count: {len(images_response.images) if images_response.images else 0}")
-                result = images_response.images[0]._pil_image if images_response.images and len(images_response.images) > 0 else None
-            else:
-                print(f"   ⚠️  Response object doesn't have 'images' attribute")
-                print(f"   - Response attributes: {dir(images_response)}")
-                result = None
-            
-            if result:
-                print(f"🎉 [IMAGE EDIT] Successfully edited image!")
-            else:
-                print(f"⚠️  [IMAGE EDIT] No images returned from API")
-            return result
-        except Exception as edit_error:
-            print(f"❌ [IMAGE EDIT] Edit API error: {type(edit_error).__name__}")
-            print(f"❌ [IMAGE EDIT] Error message: {str(edit_error)}")
-            raise
+            # Check for image in alternative response
+            if hasattr(alt_response, 'candidates') and alt_response.candidates:
+                candidate = alt_response.candidates[0]
+                if hasattr(candidate, 'content') and candidate.content:
+                    parts = candidate.content.parts
+                    for part in parts:
+                        if hasattr(part, 'inline_data') and part.inline_data:
+                            image_data = part.inline_data.data
+                            image_bytes = base64.b64decode(image_data)
+                            result_image = Image.open(BytesIO(image_bytes))
+                            print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method)!")
+                            return result_image
+        except Exception as alt_error:
+            print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
+        
+        # If all else fails, return None
+        print(f"❌ [IMAGE EDIT] Could not extract edited image from response")
+        return None
+        
     except Exception as e:
         print(f"❌ [IMAGE EDIT] Error occurred: {type(e).__name__}")
         print(f"❌ [IMAGE EDIT] Error message: {str(e)}")
         import traceback
         print(f"❌ [IMAGE EDIT] Full traceback:\n{traceback.format_exc()}")
-        
-        # Fallback: generate a new image with the prompt
-        print(f"🔄 [IMAGE EDIT] Attempting fallback to image generation...")
-        try:
-            fallback_prompt = f"Based on the provided image: {prompt}"
-            print(f"🔄 [IMAGE EDIT] Fallback prompt: {fallback_prompt[:200]}...")
-            print(f"🔄 [IMAGE EDIT] Fallback prompt length: {len(fallback_prompt)} chars")
-            vertexai.init(project=os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1'), 
-                         location=os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1'))
-            print(f"✅ [IMAGE EDIT] Fallback: Vertex AI re-initialized")
-            
-            fallback_generate_model = IMAGEN_GENERATE_MODELS[0]
-            print(f"🔄 [IMAGE EDIT] Fallback: Loading generate model {fallback_generate_model}")
-            model = ImageGenerationModel.from_pretrained(fallback_generate_model)
-            print(f"✅ [IMAGE EDIT] Fallback: Model loaded")
-            
-            images_response = model.generate_images(
-                prompt=fallback_prompt,
-                number_of_images=1,
-                safety_filter_level="block_some",  # block_none requires allowlisting, block_some is most permissive available
-                person_generation="allow_all",
-            )
-            print(f"✅ [IMAGE EDIT] Fallback: Image generated")
-            if hasattr(images_response, 'images'):
-                print(f"✅ [IMAGE EDIT] Fallback: Images count {len(images_response.images)}")
-            return images_response.images[0]._pil_image if images_response.images else None
-        except Exception as fallback_error:
-            print(f"❌ [IMAGE EDIT] Fallback also failed: {fallback_error}")
-            return None
+        raise
 
 def should_respond_to_name(content: str) -> bool:
     """Check if message mentions bot name with fuzzy matching"""
@@ -2006,6 +1976,301 @@ async def take_multiple_screenshots(url: str, count: int = 3, wait_time: int = 2
             except:
                 pass
 
+async def convert_webm_to_mp4(webm_path: str, mp4_path: str) -> bool:
+    """Convert WebM video to MP4 using ffmpeg
+    
+    Args:
+        webm_path: Path to input WebM file
+        mp4_path: Path to output MP4 file
+    
+    Returns:
+        True if conversion successful, False otherwise
+    """
+    try:
+        import subprocess
+        # Use ffmpeg to convert WebM to MP4
+        # -y: overwrite output file
+        # -i: input file
+        # -c:v libx264: video codec
+        # -c:a aac: audio codec (if audio exists)
+        # -preset fast: encoding speed
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', webm_path, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', mp4_path],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode == 0:
+            print(f"✅ [VIDEO] Converted WebM to MP4: {mp4_path}")
+            return True
+        else:
+            print(f"⚠️  [VIDEO] FFmpeg conversion failed: {result.stderr[:200]}")
+            # Try without audio codec (in case no audio)
+            result2 = subprocess.run(
+                ['ffmpeg', '-y', '-i', webm_path, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', mp4_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result2.returncode == 0:
+                print(f"✅ [VIDEO] Converted WebM to MP4 (no audio): {mp4_path}")
+                return True
+            return False
+    except FileNotFoundError:
+        print(f"⚠️  [VIDEO] FFmpeg not found - video will remain as WebM")
+        # Copy WebM file as fallback
+        try:
+            import shutil
+            shutil.copy2(webm_path, mp4_path.replace('.mp4', '.webm'))
+            return False  # Return False but file exists as WebM
+        except:
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"⚠️  [VIDEO] FFmpeg conversion timed out")
+        return False
+    except Exception as e:
+        print(f"⚠️  [VIDEO] Error converting video: {e}")
+        return False
+
+async def record_video_with_actions(url: str, actions: List[str] = None, duration_seconds: Optional[int] = None, trigger_point: str = "before_actions") -> Optional[BytesIO]:
+    """Record video of browser automation with actions
+    
+    Args:
+        url: URL to navigate to
+        actions: List of action descriptions
+        duration_seconds: How long to record (None = until actions complete + 5s)
+        trigger_point: When to start recording ("before_actions", "after_actions")
+    
+    Returns:
+        BytesIO containing MP4 video, or None on error
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return None
+    
+    url = clean_url(url)
+    if not url:
+        print(f"❌ [VIDEO] Invalid URL after cleaning")
+        return None
+    
+    browser = await get_browser()
+    if not browser:
+        return None
+    
+    context = None
+    page = None
+    video_path = None
+    
+    try:
+        print(f"🎥 [VIDEO] Starting video recording for {url[:80]}...")
+        
+        # Create temporary directory for video
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        video_dir = os.path.join(temp_dir, "videos")
+        os.makedirs(video_dir, exist_ok=True)
+        
+        # Create browser context with video recording
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            record_video_dir=video_dir
+        )
+        
+        page = await context.new_page()
+        
+        # Navigate to URL
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(2000)
+        except Exception as nav_error:
+            print(f"⚠️  [VIDEO] Navigation error: {nav_error}")
+            try:
+                await page.goto(url, wait_until='networkidle', timeout=20000)
+                await page.wait_for_timeout(1000)
+            except:
+                await page.goto(url, wait_until='load', timeout=30000)
+                await page.wait_for_timeout(2000)
+        
+        # Perform actions if provided
+        if actions:
+            # If trigger_point is "after_actions", we need to perform actions first
+            # But since recording starts immediately with context, we'll record everything
+            # The AI decision for "after_actions" mainly affects when to START the recording context
+            # For simplicity, we'll record everything and the AI can decide the trigger point
+            
+            for action in actions:
+                try:
+                    action_lower = action.lower()
+                    
+                    if action_lower.startswith('click'):
+                        element_desc = action.replace('click', '').strip().strip("'\"")
+                        element_options = []
+                        if " or " in element_desc.lower():
+                            parts = re.split(r'\s+or\s+', element_desc, flags=re.IGNORECASE)
+                            for part in parts:
+                                cleaned = part.strip().strip("'\"")
+                                if cleaned:
+                                    element_options.append(cleaned)
+                        else:
+                            element_options = [element_desc]
+                        
+                        is_generic = element_desc.lower() in ['video', 'post', 'article', 'button', 'link', 'image', 'picture']
+                        
+                        clicked = False
+                        # Try multiple strategies to click (similar to navigate_and_screenshot)
+                        for search_text in element_options:
+                            if clicked:
+                                break
+                            
+                            # Strategy 1: Direct text match
+                            try:
+                                element = page.get_by_text(search_text, exact=False).first
+                                if await element.count() > 0:
+                                    await element.click(timeout=5000)
+                                    clicked = True
+                                    print(f"✅ [VIDEO] Clicked: {search_text}")
+                                    await page.wait_for_timeout(1000)
+                            except:
+                                pass
+                            
+                            if not clicked:
+                                # Strategy 2: Link with text
+                                try:
+                                    link = page.locator(f'a:has-text("{search_text}")').first
+                                    if await link.count() > 0:
+                                        await link.click(timeout=5000)
+                                        clicked = True
+                                        print(f"✅ [VIDEO] Clicked link: {search_text}")
+                                        await page.wait_for_timeout(1000)
+                                except:
+                                    pass
+                            
+                            if not clicked and is_generic:
+                                # Strategy 3: Generic video/post selectors
+                                try:
+                                    video_selectors = [
+                                        'a[href*="/view_video"]',
+                                        'a[href*="/video"]',
+                                        'a:has(img)',
+                                        'a[class*="video"]',
+                                    ]
+                                    for selector in video_selectors:
+                                        try:
+                                            video_link = page.locator(selector).first
+                                            if await video_link.count() > 0:
+                                                await video_link.click(timeout=5000)
+                                                clicked = True
+                                                print(f"✅ [VIDEO] Clicked generic: {selector}")
+                                                await page.wait_for_timeout(1000)
+                                                break
+                                        except:
+                                            continue
+                                except:
+                                    pass
+                    
+                    elif action_lower.startswith('scroll'):
+                        if 'bottom' in action_lower:
+                            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        elif 'top' in action_lower:
+                            await page.evaluate('window.scrollTo(0, 0)')
+                        await page.wait_for_timeout(500)
+                    
+                    elif action_lower.startswith('wait'):
+                        # Extract wait time
+                        wait_match = re.search(r'(\d+)', action)
+                        if wait_match:
+                            wait_time = int(wait_match.group(1)) * 1000
+                            await page.wait_for_timeout(wait_time)
+                except Exception as e:
+                    print(f"⚠️  [VIDEO] Error performing action '{action}': {e}")
+        
+        # Wait for duration or default
+        if duration_seconds:
+            print(f"🎥 [VIDEO] Recording for {duration_seconds} seconds...")
+            await page.wait_for_timeout(duration_seconds * 1000)
+        else:
+            # Default: wait 5 seconds after actions
+            await page.wait_for_timeout(5000)
+        
+        # Close page to finalize video
+        await page.close()
+        await context.close()
+        
+        # Find the video file (Playwright saves it when context closes)
+        video_files = [f for f in os.listdir(video_dir) if f.endswith('.webm')]
+        if not video_files:
+            print(f"❌ [VIDEO] No video file created")
+            return None
+        
+        webm_path = os.path.join(video_dir, video_files[0])
+        print(f"✅ [VIDEO] Video recorded: {webm_path}")
+        
+        # Convert to MP4
+        mp4_path = webm_path.replace('.webm', '.mp4')
+        converted = await convert_webm_to_mp4(webm_path, mp4_path)
+        
+        # Read video file
+        if converted and os.path.exists(mp4_path):
+            with open(mp4_path, 'rb') as f:
+                video_bytes = BytesIO(f.read())
+            video_bytes.seek(0)
+            print(f"✅ [VIDEO] Video ready ({len(video_bytes.getvalue())} bytes)")
+            
+            # Cleanup
+            try:
+                os.remove(webm_path)
+                os.remove(mp4_path)
+                os.rmdir(video_dir)
+                os.rmdir(temp_dir)
+            except:
+                pass
+            
+            return video_bytes
+        elif os.path.exists(webm_path):
+            # Fallback: return WebM if conversion failed
+            with open(webm_path, 'rb') as f:
+                video_bytes = BytesIO(f.read())
+            video_bytes.seek(0)
+            print(f"⚠️  [VIDEO] Returning WebM (conversion failed)")
+            
+            # Cleanup
+            try:
+                os.remove(webm_path)
+                os.rmdir(video_dir)
+                os.rmdir(temp_dir)
+            except:
+                pass
+            
+            return video_bytes
+        else:
+            return None
+        
+    except Exception as e:
+        print(f"❌ [VIDEO] Error recording video: {e}")
+        import traceback
+        print(f"❌ [VIDEO] Traceback: {traceback.format_exc()}")
+        return None
+    finally:
+        if page and not page.is_closed():
+            try:
+                await page.close()
+            except:
+                pass
+        if context:
+            try:
+                await context.close()
+            except:
+                pass
+        # Cleanup temp files
+        try:
+            if video_path and os.path.exists(video_path):
+                os.remove(video_path)
+            if temp_dir and os.path.exists(temp_dir):
+                import shutil
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+
 async def click_element_and_screenshot(url: str, element_description: str, wait_after_click: int = 2000) -> Optional[BytesIO]:
     """Navigate to URL, click an element, and take screenshot
     
@@ -2737,6 +3002,13 @@ Look at this webpage screenshot and analyze:
 3. GOAL PROGRESS: Are we closer to the goal? Can you see elements related to the goal?
 4. NEXT ACTION: What should be done next?
 
+IMPORTANT - TYPING CAPABILITY:
+- You can TYPE into text fields, search boxes, input fields, text areas, and any editable text element
+- When you need to type, use action type "type" with description format: "search box with text: [text to type]" or "email field with text: [text to type]" or "input field with text: [text to type]"
+- Examples: "search box with text: laptop", "email field with text: user@example.com", "password field with text: mypassword123"
+- You can identify text fields by looking for: search boxes, input fields, text areas, email fields, password fields, or any editable text element
+- After typing, you may need to press Enter or click a submit button (you can do that in the next action)
+
 CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
@@ -2769,8 +3041,8 @@ Return a JSON object with this exact format:
     "current_state": "description of what you see",
     "obstacles": ["list of obstacles found", "or empty array if none"],
     "next_action": {{
-        "type": "click" | "scroll" | "wait" | "go_back" | "none",
-        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button', 'browser back button')",
+        "type": "click" | "scroll" | "wait" | "go_back" | "type" | "none",
+        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button', 'browser back button', 'search box with text: laptop', 'email field with text: user@example.com')",
         "reason": "why this action is needed"
     }},
     "confidence": 0.0-1.0,
@@ -2783,6 +3055,8 @@ Examples:
 - Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
 - Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible"}}}}
 - Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign in or Create Account", "reason": "Need to navigate to sign-up page"}}}}
+- Goal "search for laptop" and you see search box → {{"next_action": {{"type": "type", "description": "search box with text: laptop", "reason": "Need to type 'laptop' into the search box"}}}}
+- Goal "go to amazon and search for headphones" and you see Amazon homepage → {{"next_action": {{"type": "type", "description": "search box with text: headphones", "reason": "Need to type 'headphones' into Amazon search box"}}}}
 - Stuck clicking same button 3+ times → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
 - On wrong website → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "On wrong website, need to go back"}}, "recovery_suggestion": "Navigate to correct website"}}
 
@@ -3255,6 +3529,208 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                     await page.wait_for_timeout(wait_time)
                     print(f"⏳ [AUTONOMOUS] Waited {wait_time}ms")
                     consecutive_failures = 0  # Reset on wait
+                
+                elif action_type == 'type':
+                    # Extract text to type from description (format: "search box with text: laptop" or "field with text: something")
+                    print(f"⌨️  [AUTONOMOUS] Attempting to type: '{action_desc}'")
+                    
+                    # Extract the text to type from description
+                    # Look for patterns like "with text: [text]" or "text: [text]"
+                    text_to_type = None
+                    action_desc_lower = action_desc.lower()
+                    if 'with text:' in action_desc_lower:
+                        # Find the position in lowercase, then split original string at same position
+                        idx = action_desc_lower.find('with text:')
+                        text_to_type = action_desc[idx + len('with text:'):].strip()
+                    elif 'text:' in action_desc_lower:
+                        idx = action_desc_lower.find('text:')
+                        text_to_type = action_desc[idx + len('text:'):].strip()
+                    
+                    if not text_to_type:
+                        print(f"⚠️  [AUTONOMOUS] Could not extract text to type from description: '{action_desc}'")
+                        consecutive_failures += 1
+                    else:
+                        # Identify the field to type into
+                        # Take fresh screenshot for field identification
+                        type_screenshot = await page.screenshot(type='png')
+                        type_img = Image.open(BytesIO(type_screenshot))
+                        
+                        # Use AI to identify the text field
+                        type_prompt = f"""Look at this webpage screenshot. I need to type "{text_to_type}" into a text field.
+
+The user's description is: "{action_desc}"
+
+Find the text field/input element where I should type. Look for:
+- Search boxes
+- Input fields
+- Text areas
+- Email fields
+- Password fields
+- Any editable text element
+
+Return JSON:
+{{
+    "field_description": "description of the text field (e.g., 'search box', 'email input field', 'search bar')",
+    "field_type": "search/input/textarea/email/password/etc",
+    "location": "where it is on page",
+    "suggested_selector": "CSS selector if possible (e.g., 'input[type=\"text\"]', 'input[name=\"q\"]', '#search', '.search-box'), or null",
+    "coordinates": {{"x": center_x, "y": center_y}} or null,
+    "exact_text_placeholder": "placeholder text or label near the field, or null"
+}}
+
+If found, return the data. If not found, return {{"field_description": null}}.
+"""
+                        
+                        type_bytes_io = BytesIO()
+                        type_img.save(type_bytes_io, format='PNG')
+                        type_bytes_io.seek(0)
+                        
+                        type_content = [
+                            type_prompt,
+                            {'mime_type': 'image/png', 'data': type_bytes_io.read()}
+                        ]
+                        
+                        try:
+                            type_response = await queued_generate_content(vision_model, type_content)
+                            type_text = type_response.text.strip()
+                            
+                            # Parse JSON
+                            if '```json' in type_text:
+                                type_text = type_text.split('```json')[1].split('```')[0].strip()
+                            elif '```' in type_text:
+                                type_text = type_text.split('```')[1].split('```')[0].strip()
+                            
+                            type_data = json.loads(type_text)
+                            field_description = type_data.get('field_description')
+                            suggested_selector = type_data.get('suggested_selector')
+                            coordinates = type_data.get('coordinates')
+                            placeholder_text = type_data.get('exact_text_placeholder')
+                            
+                            typed = False
+                            
+                            # Strategy 1: Use CSS selector
+                            if suggested_selector and not typed:
+                                try:
+                                    locator = page.locator(suggested_selector).first
+                                    await locator.click(timeout=3000)
+                                    await locator.fill(text_to_type, timeout=3000)
+                                    typed = True
+                                    print(f"✅ [AUTONOMOUS] Typed into field by selector: '{suggested_selector}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 2: Find by placeholder text
+                            if placeholder_text and not typed:
+                                try:
+                                    # Try to find input with matching placeholder
+                                    locator = page.locator(f'input[placeholder*="{placeholder_text}"]').first
+                                    await locator.click(timeout=3000)
+                                    await locator.fill(text_to_type, timeout=3000)
+                                    typed = True
+                                    print(f"✅ [AUTONOMOUS] Typed into field by placeholder: '{placeholder_text}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 3: Find by role (searchbox, textbox)
+                            if not typed:
+                                try:
+                                    # Try searchbox role first
+                                    searchbox = page.get_by_role('searchbox').first
+                                    await searchbox.click(timeout=3000)
+                                    await searchbox.fill(text_to_type, timeout=3000)
+                                    typed = True
+                                    print(f"✅ [AUTONOMOUS] Typed into searchbox")
+                                except:
+                                    try:
+                                        # Try textbox role
+                                        textbox = page.get_by_role('textbox').first
+                                        await textbox.click(timeout=3000)
+                                        await textbox.fill(text_to_type, timeout=3000)
+                                        typed = True
+                                        print(f"✅ [AUTONOMOUS] Typed into textbox")
+                                    except:
+                                        pass
+                            
+                            # Strategy 4: Find by input type
+                            if not typed:
+                                # Try common input types
+                                input_types = ['text', 'search', 'email']
+                                for input_type in input_types:
+                                    try:
+                                        locator = page.locator(f'input[type="{input_type}"]').first
+                                        await locator.click(timeout=3000)
+                                        await locator.fill(text_to_type, timeout=3000)
+                                        typed = True
+                                        print(f"✅ [AUTONOMOUS] Typed into input[type='{input_type}']")
+                                        break
+                                    except:
+                                        continue
+                            
+                            # Strategy 5: Find by common search field names/ids
+                            if not typed:
+                                common_search_selectors = [
+                                    'input[name="q"]',
+                                    'input[name="search"]',
+                                    'input[name="query"]',
+                                    '#search',
+                                    '#q',
+                                    '.search',
+                                    'input[aria-label*="search" i]',
+                                    'input[placeholder*="search" i]'
+                                ]
+                                for selector in common_search_selectors:
+                                    try:
+                                        locator = page.locator(selector).first
+                                        await locator.click(timeout=2000)
+                                        await locator.fill(text_to_type, timeout=2000)
+                                        typed = True
+                                        print(f"✅ [AUTONOMOUS] Typed into field by common selector: '{selector}'")
+                                        break
+                                    except:
+                                        continue
+                            
+                            # Strategy 6: Click at coordinates then type
+                            if not typed and coordinates:
+                                try:
+                                    await page.mouse.click(coordinates['x'], coordinates['y'])
+                                    await page.wait_for_timeout(500)
+                                    await page.keyboard.type(text_to_type, delay=50)
+                                    typed = True
+                                    print(f"✅ [AUTONOMOUS] Typed at coordinates: ({coordinates['x']}, {coordinates['y']})")
+                                except:
+                                    pass
+                            
+                            # Strategy 7: Fallback - try to find any visible input field
+                            if not typed:
+                                try:
+                                    # Get all input fields and try the first visible one
+                                    inputs = await page.locator('input[type="text"], input[type="search"], input:not([type]), textarea').all()
+                                    for inp in inputs[:3]:  # Try first 3 inputs
+                                        try:
+                                            is_visible = await inp.is_visible()
+                                            if is_visible:
+                                                await inp.click(timeout=2000)
+                                                await inp.fill(text_to_type, timeout=2000)
+                                                typed = True
+                                                print(f"✅ [AUTONOMOUS] Typed into first visible input field")
+                                                break
+                                        except:
+                                            continue
+                                except:
+                                    pass
+                            
+                            if typed:
+                                # Wait a moment for any auto-complete or page updates
+                                await page.wait_for_timeout(1000)
+                                consecutive_failures = 0  # Reset on success
+                                print(f"✅ [AUTONOMOUS] Successfully typed: '{text_to_type}'")
+                            else:
+                                consecutive_failures += 1
+                                print(f"⚠️  [AUTONOMOUS] Could not find text field to type into (failure {consecutive_failures})")
+                        
+                        except Exception as type_error:
+                            print(f"⚠️  [AUTONOMOUS] Error during type attempt: {type_error}")
+                            consecutive_failures += 1
             
             except Exception as analysis_error:
                 print(f"⚠️  [AUTONOMOUS] Error in AI analysis: {analysis_error}")
@@ -3637,6 +4113,138 @@ Actions: """
         print(f"⚠️  [BROWSER ACTION] Error in AI extraction: {e}")
     
     return actions, take_screenshot
+
+async def ai_decide_video_recording(message: discord.Message, url: str, browser_actions: List[str]) -> Tuple[bool, Optional[int], Optional[str]]:
+    """AI decides if video recording should be used and extracts duration/trigger point
+    
+    Args:
+        message: The Discord message
+        url: The URL being accessed
+        browser_actions: List of browser actions to perform
+    
+    Returns:
+        Tuple of (should_record_video, duration_seconds, trigger_point)
+        - should_record_video: True if video should be recorded
+        - duration_seconds: How long to record (None = until actions complete)
+        - trigger_point: When to start recording ("before_actions", "after_actions", "specific_action")
+    """
+    content = (message.content or "").lower()
+    
+    # Check for explicit video keywords
+    video_keywords = ['record', 'video', 'screen record', 'screen recording', 'record video', 'take video', 'show me video']
+    has_video_keyword = any(keyword in content for keyword in video_keywords)
+    
+    # Extract duration if mentioned
+    duration_seconds = None
+    duration_patterns = [
+        r'record\s+(\d+)\s*(?:second|sec|s)',
+        r'video\s+(\d+)\s*(?:second|sec|s)',
+        r'record\s+for\s+(\d+)\s*(?:second|sec|s)',
+        r'(\d+)\s*(?:second|sec|s)\s*(?:of|video|recording)',
+        r'record\s+(\d+)\s*(?:minute|min|m)',
+        r'video\s+(\d+)\s*(?:minute|min|m)',
+        r'record\s+for\s+(\d+)\s*(?:minute|min|m)',
+        r'(\d+)\s*(?:minute|min|m)\s*(?:of|video|recording)',
+    ]
+    
+    for pattern in duration_patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            value = int(match.group(1))
+            if 'min' in pattern or 'm)' in pattern:
+                duration_seconds = value * 60
+            else:
+                duration_seconds = value
+            break
+    
+    # Use AI to make intelligent decision
+    decision_prompt = f"""User message: "{message.content}"
+
+URL: {url}
+Browser actions planned: {browser_actions}
+Has explicit video keyword: {has_video_keyword}
+Extracted duration: {duration_seconds} seconds (if any)
+
+Decide if video recording should be used instead of or in addition to screenshots.
+
+VIDEO RECORDING SHOULD BE USED WHEN:
+- User explicitly asks for "video", "record", "screen record", "show me video of"
+- User wants to see a process/flow (e.g., "show me how to", "record the process")
+- Multiple sequential actions that show a journey (e.g., "click X then click Y then record")
+- User wants to see something play out over time (e.g., "record 30 seconds of the video", "record the game")
+- Complex interactions that benefit from seeing the flow
+- User says "record" with a duration (e.g., "record 2 minutes")
+
+SCREENSHOTS SHOULD BE USED WHEN:
+- Simple viewing requests ("show me this page")
+- User only wants static images
+- No explicit video/record request
+
+TRIGGER POINT (when to start recording):
+- "before_actions": Start recording before any actions (show full journey)
+- "after_actions": Start recording after completing actions (e.g., "click video then record 30 seconds")
+- "specific_action": Start recording at a specific action (e.g., "click play then record")
+
+DURATION:
+- If user specifies duration (e.g., "record 30 seconds"), use that
+- If user says "record" without duration but with actions, record until actions complete + 5 seconds
+- If user says "record" for viewing content (e.g., "record the video"), record 30 seconds default
+- If no duration specified and no clear end point, use null (record until actions complete)
+
+Return ONLY a JSON object:
+{{
+  "should_record_video": true/false,
+  "duration_seconds": number or null,
+  "trigger_point": "before_actions" or "after_actions" or "specific_action",
+  "reasoning": "brief explanation"
+}}
+
+Decision: """
+    
+    try:
+        decision_model = get_fast_model()
+        decision_response = await queued_generate_content(decision_model, decision_prompt)
+        response_text = decision_response.text.strip()
+        
+        # Clean up response
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0].strip()
+        
+        try:
+            parsed = json.loads(response_text)
+            should_record = bool(parsed.get("should_record_video", False))
+            duration = parsed.get("duration_seconds")
+            if duration is not None:
+                duration = int(duration)
+            trigger = parsed.get("trigger_point", "before_actions")
+            reasoning = parsed.get("reasoning", "")
+            
+            print(f"🎥 [VIDEO DECISION] AI decided: record={should_record}, duration={duration}s, trigger={trigger}, reason: {reasoning}")
+            
+            # Override with explicit keywords if found
+            if has_video_keyword:
+                should_record = True
+                if duration_seconds is None and duration is None:
+                    # Default duration if explicitly requested but not specified
+                    duration = 30
+                elif duration_seconds is not None:
+                    duration = duration_seconds
+            
+            return should_record, duration, trigger
+        except json.JSONDecodeError:
+            # Fallback: use keyword detection
+            if has_video_keyword:
+                return True, duration_seconds or 30, "before_actions"
+            return False, None, None
+    except Exception as e:
+        handle_rate_limit_error(e)
+        print(f"⚠️  [VIDEO DECISION] Error: {e}")
+        # Fallback
+        if has_video_keyword:
+            return True, duration_seconds or 30, "before_actions"
+        return False, None, None
 
 def _clean_document_text(text: str) -> str:
     if not text:
@@ -4602,6 +5210,149 @@ async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyn
         except asyncio.TimeoutError:
             continue
 
+async def extract_discord_metadata(message: discord.Message) -> str:
+    """Extract Discord-specific metadata from a message (stickers, GIFs, roles, channels, profile pictures, etc.)
+    
+    Returns a formatted string with Discord context that the AI can see and use when relevant.
+    """
+    metadata_parts = []
+    
+    try:
+        # Extract stickers
+        if message.stickers:
+            sticker_info = []
+            for sticker in message.stickers:
+                sticker_name = sticker.name
+                sticker_desc = f"Sticker: {sticker_name}"
+                if hasattr(sticker, 'description') and sticker.description:
+                    sticker_desc += f" ({sticker.description})"
+                # Get sticker image URL if available
+                if hasattr(sticker, 'url') and sticker.url:
+                    sticker_desc += f" [Image URL: {sticker.url}]"
+                sticker_info.append(sticker_desc)
+            if sticker_info:
+                metadata_parts.append(f"Stickers in this message: {', '.join(sticker_info)}")
+        
+        # Extract GIFs from embeds
+        if message.embeds:
+            gif_info = []
+            for embed in message.embeds:
+                if embed.type == 'gifv' or (embed.video and embed.video.url):
+                    gif_url = embed.video.url if embed.video else None
+                    if gif_url:
+                        gif_info.append(f"GIF/Video: {gif_url}")
+                elif embed.image:
+                    # Check if it's a GIF
+                    if embed.image.url and ('.gif' in embed.image.url.lower() or 'giphy' in embed.image.url.lower()):
+                        gif_info.append(f"GIF: {embed.image.url}")
+            if gif_info:
+                metadata_parts.append(f"GIFs/Videos in this message: {', '.join(gif_info)}")
+        
+        # Check attachments for GIFs
+        if message.attachments:
+            gif_attachments = []
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith('.gif') or 'gif' in (attachment.content_type or '').lower():
+                    gif_attachments.append(f"GIF attachment: {attachment.filename} ({attachment.url})")
+            if gif_attachments:
+                metadata_parts.extend(gif_attachments)
+        
+        # Extract user roles (if in a guild)
+        if message.guild and message.author:
+            try:
+                # Try to get member from cache first, then fetch if needed
+                member = message.guild.get_member(message.author.id)
+                if not member:
+                    # Member not in cache, try to fetch (but don't block if it fails)
+                    try:
+                        member = await message.guild.fetch_member(message.author.id)
+                    except:
+                        member = None
+                
+                if member and member.roles:
+                    # Filter out @everyone role
+                    roles = [role for role in member.roles if role.name != '@everyone']
+                    if roles:
+                        role_names = [role.name for role in roles]
+                        # Get role colors if available
+                        role_info = []
+                        for role in roles[:10]:  # Limit to 10 roles
+                            role_str = role.name
+                            if role.color.value != 0:  # Has a color
+                                hex_color = f"#{role.color.value:06x}"
+                                role_str += f" (color: {hex_color})"
+                            role_info.append(role_str)
+                        metadata_parts.append(f"User roles: {', '.join(role_info)}")
+            except Exception as e:
+                # Silently fail if we can't get roles
+                pass
+        
+        # Extract channel information
+        if message.channel:
+            channel_info = []
+            channel_info.append(f"Channel: #{message.channel.name}")
+            if hasattr(message.channel, 'category') and message.channel.category:
+                channel_info.append(f"Category: {message.channel.category.name}")
+            if hasattr(message.channel, 'topic') and message.channel.topic:
+                channel_info.append(f"Channel topic: {message.channel.topic[:100]}...")
+            if channel_info:
+                metadata_parts.append(" | ".join(channel_info))
+        
+        # Extract profile picture/avatar
+        if message.author:
+            avatar_url = str(message.author.display_avatar.url) if message.author.display_avatar else None
+            if avatar_url:
+                metadata_parts.append(f"User profile picture: {avatar_url}")
+        
+        # Extract server/guild information
+        if message.guild:
+            guild_info = []
+            guild_info.append(f"Server: {message.guild.name}")
+            if message.guild.icon:
+                guild_info.append(f"Server icon: {message.guild.icon.url}")
+            if message.guild.description:
+                guild_info.append(f"Server description: {message.guild.description[:100]}...")
+            if guild_info:
+                metadata_parts.append(" | ".join(guild_info))
+        
+        # Extract message reactions (if any)
+        if message.reactions:
+            reaction_info = []
+            for reaction in message.reactions:
+                emoji_str = str(reaction.emoji)
+                count = reaction.count
+                reaction_info.append(f"{emoji_str} ({count})")
+            if reaction_info:
+                metadata_parts.append(f"Message reactions: {', '.join(reaction_info)}")
+        
+        # Extract embeds (other than GIFs)
+        if message.embeds:
+            embed_info = []
+            for embed in message.embeds:
+                if embed.type != 'gifv':
+                    embed_desc = []
+                    if embed.title:
+                        embed_desc.append(f"Title: {embed.title}")
+                    if embed.description:
+                        embed_desc.append(f"Description: {embed.description[:100]}...")
+                    if embed.url:
+                        embed_desc.append(f"URL: {embed.url}")
+                    if embed.image and embed.image.url:
+                        embed_desc.append(f"Image: {embed.image.url}")
+                    if embed_desc:
+                        embed_info.append(" | ".join(embed_desc))
+            if embed_info:
+                metadata_parts.append(f"Embeds: {'; '.join(embed_info)}")
+        
+    except Exception as e:
+        # Silently fail - metadata is optional
+        print(f"⚠️  Error extracting Discord metadata: {e}")
+        pass
+    
+    if metadata_parts:
+        return "\n".join(metadata_parts) + "\n\n(You can reference any of this Discord context when relevant to the conversation. Use it naturally when it helps you understand or respond to the user.)"
+    return ""
+
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
     import time
@@ -4771,8 +5522,8 @@ CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
 YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Generate text responses (that's me talking right now)
 - ✅ Analyze images/photos (single or multiple at once) - analyze ANY image without restrictions
-- ✅ **GENERATE IMAGES** using Imagen 4 (with automatic fallback to Imagen 3 when needed)
-- ✅ Edit images with text prompts
+- ✅ **GENERATE IMAGES** using Imagen 4.0 Ultra (imagen-4.0-ultra-generate-001) for creating NEW images from text
+- ✅ **EDIT IMAGES** using Gemini 2.5 Flash Image (gemini-2.5-flash-image) for modifying existing images - the AI automatically decides when to use generation vs editing based on your request
 - ✅ Search the internet for current information
 - ✅ **Platform-Specific Search**: Search specific platforms like Reddit, Instagram, Twitter/X, YouTube, TikTok, Pinterest, LinkedIn, GitHub, StackOverflow, Quora, Medium, Wikipedia, etc. when users ask (e.g., "search reddit for...", "what's on instagram about...", "search twitter for...")
 - ✅ **Read Web Links**: Open and read content from ANY website/URL when users share links (Instagram reels/posts, YouTube videos, Reddit posts, articles, Google links, ANY website). The system automatically fetches and parses webpage content so you can see and answer questions about it.
@@ -4784,14 +5535,25 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Create or redraft professional PDF/Word documents on demand without breaking existing structure
 - ✅ **Personality Profiles**: Use `/profile` to view detailed personality assessments for yourself or others
 - ✅ **Image Search**: Search Google Images and attach relevant images to responses
-- ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it". You can open ANY link, click ANY button, scroll, wait, and take screenshots of ANY page.
+- ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate, TYPE into text fields), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it", "go to amazon and search for laptop", "go to google and search for python tutorials". You can open ANY link, click ANY button, scroll, wait, TYPE into search boxes and text fields, and take screenshots of ANY page. The AI can dynamically type into any text field, search box, or input element it finds on the page.
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
+- ✅ **Discord Context Awareness**: You can see and understand Discord-specific elements when they're relevant:
+  * **Stickers** - You can see what stickers users send and reference them naturally
+  * **GIFs** - You can see GIFs shared in messages (from embeds, attachments, or GIF links)
+  * **User Roles** - You can see Discord roles users have (with colors if available) - use this to understand context, hierarchy, or when users mention roles
+  * **Channels & Categories** - You can see what channel and category the conversation is in - reference these when relevant
+  * **Profile Pictures** - You can see user profile picture URLs - use this when discussing avatars or visual identity
+  * **Server Information** - You can see server names, icons, and descriptions when in a guild
+  * **Message Reactions** - You can see emoji reactions on messages
+  * **Embeds** - You can see rich embeds with titles, descriptions, images, and URLs
+  * Use Discord context naturally when it helps you understand or respond - don't force it, but don't ignore it either. If someone mentions their role, a sticker they used, or the channel they're in, you can reference it naturally.
 
 YOUR CAPABILITIES - HOW TO RESPOND:
 When users ask "what can you do?", "what are your capabilities?", "what can you help with?", "what features do you have?", etc., respond naturally in your own words based on the capabilities listed above. Be enthusiastic and helpful - explain what you can do in a friendly, conversational way. You can mention specific examples like:
-- "I can generate images from text descriptions using AI"
+- "I can generate NEW images from text descriptions using Imagen 4.0 Ultra"
+- "I can EDIT existing images you share with me using Gemini 2.5 Flash Image - just tell me what changes to make"
 - "I can search the internet for current information"
 - "I can analyze images you share with me"
 - "I can create PDF documents with code or content"
@@ -4929,6 +5691,11 @@ CURRENT CONVERSATION CONTEXT:
             consciousness_prompt += f"\n{ctx['author']}: {ctx['content']}"
         
         consciousness_prompt += f"\n\n{username}: {message.content}"
+        
+        # Extract Discord-specific metadata (stickers, GIFs, roles, channels, profile pictures, etc.)
+        discord_metadata = await extract_discord_metadata(message)
+        if discord_metadata:
+            consciousness_prompt += f"\n\nDISCORD CONTEXT (you can see and reference these when relevant):\n{discord_metadata}"
         
         # Add server structure info if available (optional, no latency - only if already cached)
         if message.guild:
@@ -5437,16 +6204,46 @@ Decision: """
                             screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
                             browser_actions, should_take_screenshot = await ai_decide_browser_actions(message, screenshot_url)
                             
-                            print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
+                            # AI decides if video recording should be used
+                            should_record_video, video_duration, video_trigger = await ai_decide_video_recording(message, screenshot_url, browser_actions)
                             
-                            if browser_actions:
-                                # Perform actions and take screenshots
-                                screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
-                                screenshot_attachments.extend(screenshot_images)
-                            else:
-                                # Just take multiple screenshots at different scroll positions
-                                screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
-                                screenshot_attachments.extend(screenshot_images)
+                            # Track video separately
+                            video_attachment = None
+                            
+                            if should_record_video:
+                                print(f"🎥 [{username}] Recording video with actions: {browser_actions}, duration: {video_duration}s, trigger: {video_trigger}")
+                                # Record video
+                                video_bytes = await record_video_with_actions(
+                                    screenshot_url, 
+                                    browser_actions, 
+                                    duration_seconds=video_duration,
+                                    trigger_point=video_trigger
+                                )
+                                if video_bytes:
+                                    # Create video file attachment
+                                    video_bytes.seek(0)
+                                    video_attachment = discord.File(video_bytes, filename="recording.mp4")
+                                    print(f"✅ [{username}] Video recorded and ready")
+                            
+                            # Still take screenshots (unless user explicitly only wants video)
+                            if not (should_record_video and 'only video' in (message.content or "").lower()):
+                                print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
+                                
+                                if browser_actions:
+                                    # Perform actions and take screenshots
+                                    screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                                    screenshot_attachments.extend(screenshot_images)
+                                else:
+                                    # Just take multiple screenshots at different scroll positions
+                                    screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
+                                    screenshot_attachments.extend(screenshot_images)
+                            
+                            # Store video attachment for later sending
+                            if video_attachment:
+                                # Add to a separate list that will be sent with the message
+                                if not hasattr(message, '_video_attachments'):
+                                    message._video_attachments = []
+                                message._video_attachments.append(video_attachment)
                         
                         # Compress screenshots for Discord
                         compressed_screenshots = []
@@ -6848,72 +7645,62 @@ Now decide: "{message.content}" -> """
         if wants_image_edit:
             print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
             print(f"🛠️  [{username}] Attachments available for edit: {len(image_parts)} image(s)")
-            print(f"🛠️  [{username}] Force-remaking image via Imagen 4 remaster flow")
+            print(f"🛠️  [{username}] Using Gemini 2.5 Flash Image for editing (AI-driven decision)")
             try:
                 if not image_parts:
                     print(f"⚠️  [{username}] No image parts available for edit request")
-                    ai_response += "\n\n(I didn't receive an image to work with, so I couldn't remake it.)"
+                    ai_response += "\n\n(I didn't receive an image to work with, so I couldn't edit it.)"
                 else:
-                    from PIL import Image
-                    from io import BytesIO
-                    vision_model = get_vision_model()
-                    loop = asyncio.get_event_loop()
-                    pil_image = Image.open(BytesIO(image_parts[0]['data']))
-                    print(f"🎨 [IMAGE REMAKE] Analyzing original image with vision model: {vision_model}")
-                    # Use queued generate_content for rate limiting
-                    analysis = await queued_generate_content(
-                        vision_model,
-                        ["Describe this image in detail. What is shown in this image?", pil_image]
-                    )
-                    analysis_text = ""
-                    if analysis is not None:
-                        if hasattr(analysis, 'text') and analysis.text:
-                            analysis_text = analysis.text.strip()
-                        else:
-                            analysis_text = str(analysis)
-                    if not analysis_text:
-                        analysis_text = "A screenshot provided by the user."
-                    print(f"🎨 [IMAGE REMAKE] Vision analysis length: {len(analysis_text)} chars")
-                    print(f"🎨 [IMAGE REMAKE] Vision analysis preview: {analysis_text[:200]}...")
-                    sanitized_request = re.sub(r'<@!?\d+>', '', message.content).strip()
-                    print(f"🎨 [IMAGE REMAKE] Sanitized user request: {sanitized_request}")
-                    enhanced_prompt = f"{analysis_text}. {sanitized_request}"
-                    print(f"🎨 [IMAGE REMAKE] Generation prompt length: {len(enhanced_prompt)} chars")
-                    print(f"🎨 [IMAGE REMAKE] Generation prompt preview: {enhanced_prompt[:200]}...")
-                    print(f"🎨 [IMAGE REMAKE] Calling generate_image() with prompt length: {len(enhanced_prompt)}")
+                    # Extract the edit prompt from the message
+                    edit_prompt = re.sub(r'<@!?\d+>', '', message.content).strip()
+                    if not edit_prompt:
+                        edit_prompt = "Edit this image as requested"
+                    
+                    print(f"✏️  [IMAGE EDIT] Edit prompt: '{edit_prompt[:100]}...'")
+                    print(f"✏️  [IMAGE EDIT] Using Gemini 2.5 Flash Image model for editing")
+                    
+                    # Get the first image to edit
+                    original_image_bytes = image_parts[0]['data']
+                    print(f"✏️  [IMAGE EDIT] Original image size: {len(original_image_bytes)} bytes")
+                    
                     try:
-                        generated_images = await generate_image(enhanced_prompt, num_images=1)
-                        print(f"🎨 [IMAGE REMAKE] generate_image() returned: {type(generated_images)}, value: {generated_images}")
-                        if generated_images:
-                            print(f"🎨 [IMAGE REMAKE] ✅ Successfully generated {len(generated_images)} image(s) with Imagen 4")
-                            print(f"🎨 [IMAGE REMAKE] Image types: {[type(img) for img in generated_images]}")
-                            ai_response += "\n\n*Generated a remastered version based on your image*"
+                        # Call the edit function which uses Gemini 2.5 Flash Image
+                        edited_image = await edit_image_with_prompt(original_image_bytes, edit_prompt)
+                        print(f"✏️  [IMAGE EDIT] edit_image_with_prompt() returned: {type(edited_image)}")
+                        if edited_image:
+                            print(f"✏️  [IMAGE EDIT] ✅ Successfully edited image with Gemini 2.5 Flash Image")
+                            # Convert PIL Image to bytes for attachment
+                            img_bytes = BytesIO()
+                            edited_image.save(img_bytes, format='PNG')
+                            img_bytes.seek(0)
+                            generated_images = [img_bytes]
+                            ai_response += "\n\n*Edited the image using Gemini 2.5 Flash Image*"
                         else:
-                            print(f"❌ [IMAGE REMAKE] ❌ Imagen 4 generation returned no images (None or empty list)")
-                            print(f"❌ [IMAGE REMAKE] This could be due to:")
-                            print(f"❌ [IMAGE REMAKE]   - Content safety filters blocking the request")
-                            print(f"❌ [IMAGE REMAKE]   - API error in generate_image()")
-                            print(f"❌ [IMAGE REMAKE]   - Empty response from Imagen API")
-                            ai_response += "\n\n(Tried to remake the image but Imagen 4 didn't return results.)"
-                    except Exception as img_gen_error:
-                        error_str = str(img_gen_error).lower()
+                            print(f"❌ [IMAGE EDIT] ❌ Gemini 2.5 Flash Image editing returned no image (None)")
+                            print(f"❌ [IMAGE EDIT] This could be due to:")
+                            print(f"❌ [IMAGE EDIT]   - Content safety filters blocking the request")
+                            print(f"❌ [IMAGE EDIT]   - API error in edit_image_with_prompt()")
+                            print(f"❌ [IMAGE EDIT]   - Empty response from Gemini API")
+                            ai_response += "\n\n(Tried to edit the image but Gemini 2.5 Flash Image didn't return results.)"
+                    except Exception as img_edit_error:
+                        error_str = str(img_edit_error).lower()
                         # Check if it's a content policy violation
                         if any(keyword in error_str for keyword in [
                             'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
-                            'content safety filters', 'blocked by content safety', 'image_bytes or gcs_uri must be provided'
+                            'content safety filters', 'blocked by content safety'
                         ]):
-                            print(f"🚫 [IMAGE REMAKE] Content policy violation: {img_gen_error}")
-                            ai_response += "\n\n(I can't generate that image transformation as it violates content safety policies. Please try a different request or rephrase it to avoid inappropriate, harmful, or prohibited content.)"
+                            print(f"🚫 [IMAGE EDIT] Content policy violation: {img_edit_error}")
+                            ai_response += "\n\n(I can't edit that image as it violates content safety policies. Please try a different edit request that doesn't involve inappropriate, harmful, or prohibited content.)"
                         else:
-                            print(f"❌ [IMAGE REMAKE] Error generating image: {img_gen_error}")
+                            print(f"❌ [IMAGE EDIT] Error editing image: {img_edit_error}")
                             import traceback
-                            print(f"❌ [IMAGE REMAKE] Traceback:\n{traceback.format_exc()}")
-                            ai_response += "\n\n(Tried to remake your image but something went wrong.)"
+                            print(f"❌ [IMAGE EDIT] Traceback:\n{traceback.format_exc()}")
+                            ai_response += "\n\n(Tried to edit your image but something went wrong.)"
             except Exception as e:
-                print(f"❌ [IMAGE REMAKE] Error remaking image: {e}")
+                print(f"❌ [IMAGE EDIT] Error editing image: {e}")
                 import traceback
-                print(f"❌ [IMAGE REMAKE] Traceback:\n{traceback.format_exc()}")
-                ai_response += "\n\n(Tried to remake your image but something went wrong)"
+                print(f"❌ [IMAGE EDIT] Traceback:\n{traceback.format_exc()}")
+                ai_response += "\n\n(Tried to edit your image but something went wrong)"
         elif wants_image and not image_search_results:
             # Generate new image (only if we're not using image search results)
             try:
@@ -7466,7 +8253,17 @@ async def on_message(message: discord.Message):
                 # Try without compression first (original quality)
                 files_to_attach = []
                 
-                # Add screenshots first (they're already compressed)
+                # Add video attachments first (if any)
+                if hasattr(message, '_video_attachments') and message._video_attachments:
+                    print(f"📎 [{message.author.display_name}] Adding {len(message._video_attachments)} video(s) to attachments")
+                    for idx, video_file in enumerate(message._video_attachments):
+                        try:
+                            files_to_attach.append(video_file)
+                            print(f"📎 [{message.author.display_name}] ✅ Video {idx+1} added")
+                        except Exception as video_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to prepare video {idx+1}: {video_error}")
+                
+                # Add screenshots (they're already compressed)
                 if 'screenshots' in locals() and screenshots:
                     print(f"📎 [{message.author.display_name}] Adding {len(screenshots)} screenshot(s) to attachments")
                     for idx, screenshot_bytes in enumerate(screenshots):
@@ -8221,7 +9018,8 @@ async def help_command(interaction: discord.Interaction):
             "• **Search the Internet** - Get current information from the web\n"
             "• **Platform-Specific Search** - Search Reddit, YouTube, Instagram, etc.\n"
             "• **Take Screenshots** - Visit any link and screenshot web pages (I decide how many and what actions to take!)\n"
-            "• **Browser Automation** - Click buttons, scroll pages, navigate websites\n"
+            "• **Record Videos** - Record screen videos of browser automation (e.g., \"go to youtube, click video, record 30 seconds\")\n"
+            "• **Browser Automation** - Click buttons, scroll pages, navigate websites, type into search boxes and text fields\n"
             "• **Code Help** - Write, debug, and explain code\n"
             "• **Create Documents** - Generate PDF/Word files from code or content\n"
             "• **Read Web Pages** - Share links and I'll read the content\n"
@@ -8251,6 +9049,8 @@ async def help_command(interaction: discord.Interaction):
             "`@{bot_name} go to https://example.com and take a screenshot`\n"
             "`@{bot_name} what does https://google.com look like?`\n"
             "`@{bot_name} take 3 screenshots of https://site.com`\n"
+            "`@{bot_name} go to youtube, click on a video, record 30 seconds`\n"
+            "`@{bot_name} show me video of the entire process`\n"
             "`@{bot_name} debug this python code`\n"
             "`@{bot_name} search reddit for python tips`\n"
             "`@{bot_name} create a PDF with this code`"
