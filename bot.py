@@ -3547,9 +3547,152 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         else:
                             consecutive_failures += 1
                             print(f"⚠️  [AUTONOMOUS] Could not click: '{action_desc}' (failure {consecutive_failures})")
-                            # If stuck and can't click, suggest going back
+                            
+                            # AI-DRIVEN FAILURE ANALYSIS: If strategies keep failing, ask AI why and get new approach
+                            if consecutive_failures >= 2:  # After 2 failed attempts, ask AI for help
+                                print(f"🤖 [AUTONOMOUS] Click strategies failing - asking AI to analyze and suggest new approach...")
+                                
+                                # Take fresh screenshot for failure analysis
+                                failure_screenshot = await page.screenshot(type='png')
+                                failure_img = Image.open(BytesIO(failure_screenshot))
+                                
+                                failure_analysis_prompt = f"""I'm trying to click on: "{action_desc}"
+
+I've tried multiple strategies but all failed:
+- Tried clicking by button role
+- Tried clicking by link role  
+- Tried CSS selectors
+- Tried finding buttons/links containing the text
+- Tried clicking by coordinates
+- Tried clicking by plain text
+
+The element I was looking for: "{exact_text}"
+Element type AI identified: "{element_type}"
+AI suggested selector: "{suggested_selector}"
+
+Look at this screenshot and analyze WHY the clicks are failing:
+
+1. Can you see the element "{action_desc}" on the page?
+2. Is it actually clickable? Is it a button, link, or just text?
+3. Is it hidden, covered by something, or in a different location?
+4. What's the ACTUAL best way to click it?
+
+Return JSON:
+{{
+    "element_visible": true/false,
+    "why_failing": "explanation of why clicks are failing",
+    "actual_element_type": "button" or "link" or "text" or "other",
+    "better_approach": "what should be tried instead",
+    "new_exact_text": "exact text to search for (might be different)",
+    "new_selector": "better CSS selector to try",
+    "new_coordinates": {{"x": number, "y": number}} or null,
+    "alternative_action": "if clicking won't work, what should be done instead (e.g., 'scroll to find it', 'wait for popup to load', 'try different element')"
+}}
+
+Analysis: """
+                                
+                                failure_bytes_io = BytesIO()
+                                failure_img.save(failure_bytes_io, format='PNG')
+                                failure_bytes_io.seek(0)
+                                
+                                failure_content = [
+                                    failure_analysis_prompt,
+                                    {'mime_type': 'image/png', 'data': failure_bytes_io.read()}
+                                ]
+                                
+                                try:
+                                    failure_response = await queued_generate_content(vision_model, failure_content)
+                                    failure_text = failure_response.text.strip()
+                                    
+                                    # Parse JSON
+                                    if '```json' in failure_text:
+                                        failure_text = failure_text.split('```json')[1].split('```')[0].strip()
+                                    elif '```' in failure_text:
+                                        failure_text = failure_text.split('```')[1].split('```')[0].strip()
+                                    
+                                    failure_data = json.loads(failure_text)
+                                    why_failing = failure_data.get('why_failing', 'Unknown')
+                                    better_approach = failure_data.get('better_approach', '')
+                                    new_exact_text = failure_data.get('new_exact_text')
+                                    new_selector = failure_data.get('new_selector')
+                                    new_coordinates = failure_data.get('new_coordinates')
+                                    alternative_action = failure_data.get('alternative_action')
+                                    
+                                    print(f"🤖 [AUTONOMOUS] AI failure analysis: {why_failing}")
+                                    print(f"🤖 [AUTONOMOUS] AI suggests: {better_approach}")
+                                    
+                                    # Try AI's new approach
+                                    if new_exact_text or new_selector or new_coordinates:
+                                        print(f"🔄 [AUTONOMOUS] Trying AI's suggested new approach...")
+                                        
+                                        # Try new exact text if provided
+                                        if new_exact_text and new_exact_text != exact_text:
+                                            try:
+                                                if 'button' in failure_data.get('actual_element_type', '').lower():
+                                                    button = page.get_by_role('button', name=new_exact_text, exact=False).first
+                                                    if await button.count() > 0:
+                                                        await button.click(timeout=5000)
+                                                        clicked = True
+                                                        print(f"✅ [AUTONOMOUS] AI's new approach worked! Clicked: '{new_exact_text}'")
+                                                elif 'link' in failure_data.get('actual_element_type', '').lower():
+                                                    link = page.get_by_role('link', name=new_exact_text, exact=False).first
+                                                    if await link.count() > 0:
+                                                        await link.click(timeout=5000)
+                                                        clicked = True
+                                                        print(f"✅ [AUTONOMOUS] AI's new approach worked! Clicked: '{new_exact_text}'")
+                                                else:
+                                                    # Try as button first, then link, then text
+                                                    try:
+                                                        button = page.locator(f'button:has-text("{new_exact_text}")').first
+                                                        if await button.count() > 0:
+                                                            await button.click(timeout=5000)
+                                                            clicked = True
+                                                            print(f"✅ [AUTONOMOUS] AI's new approach worked! Clicked button: '{new_exact_text}'")
+                                                    except:
+                                                        try:
+                                                            await page.get_by_text(new_exact_text, exact=False).first.click(timeout=5000)
+                                                            clicked = True
+                                                            print(f"✅ [AUTONOMOUS] AI's new approach worked! Clicked text: '{new_exact_text}'")
+                                                        except:
+                                                            pass
+                                            except:
+                                                pass
+                                        
+                                        # Try new selector if provided
+                                        if not clicked and new_selector:
+                                            try:
+                                                await page.locator(new_selector).first.click(timeout=5000)
+                                                clicked = True
+                                                print(f"✅ [AUTONOMOUS] AI's new selector worked: '{new_selector}'")
+                                            except:
+                                                pass
+                                        
+                                        # Try new coordinates if provided
+                                        if not clicked and new_coordinates:
+                                            try:
+                                                await page.mouse.click(new_coordinates['x'], new_coordinates['y'])
+                                                clicked = True
+                                                print(f"✅ [AUTONOMOUS] AI's coordinates worked: ({new_coordinates['x']}, {new_coordinates['y']})")
+                                            except:
+                                                pass
+                                        
+                                        if clicked:
+                                            consecutive_failures = 0  # Reset on success
+                                            await page.wait_for_timeout(1000)
+                                    elif alternative_action:
+                                        # AI suggests doing something else instead
+                                        print(f"🔄 [AUTONOMOUS] AI suggests alternative: {alternative_action}")
+                                        # The alternative action will be handled in the next iteration when AI re-analyzes
+                                        # For now, just break out and let the loop continue
+                                        break
+                                    
+                                except Exception as analysis_error:
+                                    print(f"⚠️  [AUTONOMOUS] Error in AI failure analysis: {analysis_error}")
+                                    # Continue with normal flow
+                            
+                            # If still stuck after AI analysis, mark for recovery
                             if consecutive_failures >= 3 or is_stuck:
-                                print(f"🔄 [AUTONOMOUS] Multiple failures detected, will try recovery strategy")
+                                print(f"🔄 [AUTONOMOUS] Multiple failures detected, will try recovery strategy in next iteration")
                     
                     except Exception as click_error:
                         print(f"⚠️  [AUTONOMOUS] Error during click attempt: {click_error}")
