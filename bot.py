@@ -1746,6 +1746,8 @@ _browser: Optional[Any] = None  # Using Any instead of Browser to avoid import i
 
 # Track active AI response tasks per user so they can be cancelled with /stop
 ACTIVE_USER_TASKS: Dict[int, List[asyncio.Task]] = {}
+# Global storage for video attachments (keyed by message ID since Message objects are read-only)
+VIDEO_ATTACHMENTS: Dict[int, List[discord.File]] = {}
 
 async def get_browser() -> Optional[Any]:
     """Get or create a browser instance (reused across requests)"""
@@ -2999,6 +3001,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             recent_actions = action_history[-3:] if len(action_history) >= 3 else action_history
             action_history_text = ", ".join(recent_actions) if recent_actions else "None"
             
+            # Check if goal involves video recording
+            goal_lower = goal.lower()
+            is_recording_goal = any(keyword in goal_lower for keyword in ['record', 'video', 'recording', 'screen record'])
+            
             analysis_prompt = f"""You are an autonomous browser agent. Your goal is: "{goal}"
 
 Look at this webpage screenshot and analyze:
@@ -3024,7 +3030,18 @@ CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
 - Be smart about identifying elements - use visual cues, text, buttons, links
-- GOAL ACHIEVEMENT: Mark goal_achieved as TRUE when you reach the page/form the user asked for:
+
+VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
+- If the goal is to "record X seconds" of a video:
+  * FIRST: Handle any obstacles (cookie banners, popups, etc.)
+  * THEN: Get to the video page and make sure the video is PLAYING (not paused, not showing error)
+  * ONCE VIDEO IS PLAYING: Mark goal_achieved = TRUE immediately! Do NOT keep clicking things!
+  * After goal_achieved = true, the system will automatically record for the specified duration
+  * DO NOT try to click play buttons, settings, or other controls once the video is already playing
+  * DO NOT navigate away from the video page once it's playing
+  * Example: Goal "record 10 seconds" → goal_achieved = true when you see the video playing (even if paused at start, that's fine - it will play)
+
+GOAL ACHIEVEMENT: Mark goal_achieved as TRUE when you reach the page/form the user asked for:
   * If goal is "show me sign up" or "sign up" → goal_achieved = true when you see:
     - Sign-up page/form
     - Create account page/form
@@ -3033,6 +3050,7 @@ CRITICAL RULES:
     - Any page with fields to create a new account (email, password, name, etc.)
   * If goal is "show me login" → goal_achieved = true when you see login page/form
   * If goal is "show me [specific page]" → goal_achieved = true when that page is visible
+  * If goal is "record X seconds" of a video → goal_achieved = true when the video is on screen and ready to play (even if paused)
 - IMPORTANT: "Create account", "Sign up", "Register", "Create your account" all mean the same thing - if you see any account creation form, the goal is achieved!
 
 LOOP DETECTION & RECOVERY:
@@ -3462,7 +3480,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                     print(f"✅ [AUTONOMOUS] Clicked at coordinates: ({coordinates['x']}, {coordinates['y']})")
                                 except:
                                     pass
-                            
+                        
                             # Strategy 6: LAST RESORT - Click by text (but only if nothing else worked)
                             # This might click wrong element if text appears multiple times, but it's a fallback
                             if not clicked:
@@ -6450,9 +6468,11 @@ Decision: """
                             if video_bytes:
                                 video_bytes.seek(0)
                                 video_attachment = discord.File(video_bytes, filename="recording.mp4")
-                                if not hasattr(message, '_video_attachments'):
-                                    message._video_attachments = []
-                                message._video_attachments.append(video_attachment)
+                                # Store in global dictionary (Message objects are read-only)
+                                message_id = message.id
+                                if message_id not in VIDEO_ATTACHMENTS:
+                                    VIDEO_ATTACHMENTS[message_id] = []
+                                VIDEO_ATTACHMENTS[message_id].append(video_attachment)
                                 print(f"✅ [{username}] Video recorded from autonomous automation")
                         else:
                             # Use regular automation with explicit actions
@@ -6483,22 +6503,23 @@ Decision: """
                             # Still take screenshots (unless user explicitly only wants video)
                             if not (should_record_video and 'only video' in (message.content or "").lower()):
                                 print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
-                                
-                                if browser_actions:
-                                    # Perform actions and take screenshots
-                                    screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
-                                    screenshot_attachments.extend(screenshot_images)
-                                else:
-                                    # Just take multiple screenshots at different scroll positions
-                                    screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
-                                    screenshot_attachments.extend(screenshot_images)
+                            
+                            if browser_actions:
+                                # Perform actions and take screenshots
+                                screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                                screenshot_attachments.extend(screenshot_images)
+                            else:
+                                # Just take multiple screenshots at different scroll positions
+                                screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
+                                screenshot_attachments.extend(screenshot_images)
                             
                             # Store video attachment for later sending
                             if video_attachment:
-                                # Add to a separate list that will be sent with the message
-                                if not hasattr(message, '_video_attachments'):
-                                    message._video_attachments = []
-                                message._video_attachments.append(video_attachment)
+                                # Store in global dictionary (Message objects are read-only)
+                                message_id = message.id
+                                if message_id not in VIDEO_ATTACHMENTS:
+                                    VIDEO_ATTACHMENTS[message_id] = []
+                                VIDEO_ATTACHMENTS[message_id].append(video_attachment)
                         
                         # Compress screenshots for Discord
                         compressed_screenshots = []
@@ -8509,14 +8530,18 @@ async def on_message(message: discord.Message):
                 files_to_attach = []
                 
                 # Add video attachments first (if any)
-                if hasattr(message, '_video_attachments') and message._video_attachments:
-                    print(f"📎 [{message.author.display_name}] Adding {len(message._video_attachments)} video(s) to attachments")
-                    for idx, video_file in enumerate(message._video_attachments):
+                message_id = message.id
+                if message_id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS[message_id]:
+                    video_list = VIDEO_ATTACHMENTS[message_id]
+                    print(f"📎 [{message.author.display_name}] Adding {len(video_list)} video(s) to attachments")
+                    for idx, video_file in enumerate(video_list):
                         try:
                             files_to_attach.append(video_file)
                             print(f"📎 [{message.author.display_name}] ✅ Video {idx+1} added")
                         except Exception as video_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to prepare video {idx+1}: {video_error}")
+                    # Clean up after use
+                    del VIDEO_ATTACHMENTS[message_id]
                 
                 # Add screenshots (they're already compressed)
                 if 'screenshots' in locals() and screenshots:
