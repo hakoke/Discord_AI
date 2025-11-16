@@ -2884,7 +2884,7 @@ Analysis: """
             except:
                 pass
 
-async def autonomous_browser_automation(url: str, goal: str, max_iterations: int = 10) -> List[BytesIO]:
+async def autonomous_browser_automation(url: str, goal: str, max_iterations: int = 10) -> Tuple[List[BytesIO], Optional[BytesIO]]:
     """Fully autonomous browser automation - AI dynamically analyzes pages and works towards goals
     
     This function uses AI vision to:
@@ -2893,41 +2893,75 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     3. Automatically handle obstacles
     4. Work towards the user's goal step by step
     5. Continue until goal is achieved or max iterations reached
+    6. If goal includes "record" or "video", records video instead of just screenshots
     
     Args:
         url: URL to navigate to
-        goal: User's goal (e.g., "show me sign up", "click on the first video", "go to login page")
+        goal: User's goal (e.g., "show me sign up", "click on the first video", "go to login page", "record 10 seconds")
         max_iterations: Maximum number of AI decision cycles (prevents infinite loops)
     
     Returns:
-        List of BytesIO containing PNG screenshots showing the journey
+        Tuple of (List of BytesIO containing PNG screenshots, Optional BytesIO video if recording was requested)
     """
     if not PLAYWRIGHT_AVAILABLE:
-        return []
+        return [], None
     
     # Clean URL
     url = clean_url(url)
     if not url:
         print(f"❌ [AUTONOMOUS] Invalid URL after cleaning")
-        return []
+        return [], None
     
     browser = await get_browser()
     if not browser:
-        return []
+        return [], None
+    
+    # Check if goal includes video recording
+    goal_lower = goal.lower()
+    should_record_video = any(keyword in goal_lower for keyword in ['record', 'video', 'screen record', 'recording'])
+    video_duration = None
+    if should_record_video:
+        # Extract duration from goal
+        duration_match = re.search(r'(\d+)\s*(?:second|sec|s|minute|min|m)', goal_lower)
+        if duration_match:
+            value = int(duration_match.group(1))
+            if 'min' in duration_match.group(0):
+                video_duration = value * 60
+            else:
+                video_duration = value
+        else:
+            video_duration = 30  # Default 30 seconds
     
     page = None
+    context = None
     screenshots = []
+    video_bytes = None
     iteration = 0
     goal_achieved = False
     
     try:
         print(f"🤖 [AUTONOMOUS] Starting autonomous automation for goal: '{goal}'")
+        if should_record_video:
+            print(f"🎥 [AUTONOMOUS] Video recording enabled: {video_duration}s")
         print(f"🎬 [AUTONOMOUS] Navigating to {url[:80]}...")
         
-        page = await browser.new_page(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
+        # Create context with video recording if needed
+        if should_record_video:
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+            video_dir = os.path.join(temp_dir, "videos")
+            os.makedirs(video_dir, exist_ok=True)
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                record_video_dir=video_dir
+            )
+            page = await context.new_page()
+        else:
+            page = await browser.new_page(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
         
         # Navigate to URL
         try:
@@ -2950,6 +2984,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             candidates = [
                 ('button', 'accept'),
                 ('button', 'accept all'),
+                ('button', 'alles accepteren'),  # Dutch
                 ('button', 'i agree'),
                 ('button', 'agree'),
                 ('button', 'consent'),
@@ -2960,10 +2995,32 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             ]
             for role_name, text_part in candidates:
                 try:
-                    await page.get_by_role(role_name, name=re.compile(text_part, re.IGNORECASE)).first.click(timeout=1500)
-                    await page.wait_for_timeout(500)
+                    element = page.get_by_role(role_name, name=re.compile(text_part, re.IGNORECASE)).first
+                    if await element.count() > 0:
+                        # Try clicking with force and wait longer
+                        await element.click(timeout=3000, force=True)
+                        await page.wait_for_timeout(2000)  # Wait longer for popup to disappear
+                        # Verify popup is gone by checking if element still exists
+                        try:
+                            await element.wait_for(state='hidden', timeout=2000)
+                        except:
+                            pass  # Element might not support hidden state
                 except Exception:
                     continue
+            # Also try by text directly (for YouTube's Dutch popup)
+            try:
+                accept_texts = ['Alles accepteren', 'Accept all', 'Accept', 'I agree', 'Agree']
+                for text in accept_texts:
+                    try:
+                        element = page.get_by_text(text, exact=False).first
+                        if await element.count() > 0:
+                            await element.click(timeout=3000, force=True)
+                            await page.wait_for_timeout(2000)
+                            break
+                    except:
+                        continue
+            except:
+                pass
         except Exception:
             # Non-fatal: continue autonomous loop which also handles obstacles
             pass
@@ -3761,7 +3818,57 @@ If found, return the data. If not found, return {{"field_description": null}}.
         else:
             print(f"⚠️  [AUTONOMOUS] Stopped after {iteration} iterations (goal may not be fully achieved)")
         
-        return screenshots
+        # If video recording was requested, finalize the video
+        if should_record_video and context and not page.is_closed():
+            try:
+                # Wait for the specified duration if goal achieved, or default wait
+                if goal_achieved and video_duration:
+                    print(f"🎥 [AUTONOMOUS] Recording for {video_duration} seconds...")
+                    await page.wait_for_timeout(video_duration * 1000)
+                elif goal_achieved:
+                    await page.wait_for_timeout(5000)  # Default 5 seconds
+                
+                # Close page and context to finalize video
+                await page.close()
+                await context.close()
+                
+                # Find and convert video file
+                video_files = [f for f in os.listdir(video_dir) if f.endswith('.webm')]
+                if video_files:
+                    webm_path = os.path.join(video_dir, video_files[0])
+                    mp4_path = webm_path.replace('.webm', '.mp4')
+                    converted = await convert_webm_to_mp4(webm_path, mp4_path)
+                    
+                    if converted and os.path.exists(mp4_path):
+                        with open(mp4_path, 'rb') as f:
+                            video_bytes = BytesIO(f.read())
+                        video_bytes.seek(0)
+                        print(f"✅ [AUTONOMOUS] Video recorded ({len(video_bytes.getvalue())} bytes)")
+                    elif os.path.exists(webm_path):
+                        with open(webm_path, 'rb') as f:
+                            video_bytes = BytesIO(f.read())
+                        video_bytes.seek(0)
+                        print(f"⚠️  [AUTONOMOUS] Video recorded as WebM (conversion failed)")
+                    
+                    # Cleanup
+                    try:
+                        if os.path.exists(webm_path):
+                            os.remove(webm_path)
+                        if os.path.exists(mp4_path):
+                            os.remove(mp4_path)
+                        os.rmdir(video_dir)
+                        os.rmdir(temp_dir)
+                    except:
+                        pass
+            except Exception as video_error:
+                print(f"⚠️  [AUTONOMOUS] Error recording video: {video_error}")
+                if context:
+                    try:
+                        await context.close()
+                    except:
+                        pass
+        
+        return screenshots, video_bytes
     
     except Exception as e:
         print(f"❌ [AUTONOMOUS] Error in autonomous automation: {e}")
@@ -3778,12 +3885,17 @@ If found, return the data. If not found, return {{"field_description": null}}.
             except:
                 pass
         
-        return screenshots if screenshots else []
+        return (screenshots if screenshots else []), None
     
     finally:
-        if page:
+        if page and not page.is_closed():
             try:
                 await page.close()
+            except:
+                pass
+        if context:
+            try:
+                await context.close()
             except:
                 pass
 
@@ -6195,10 +6307,19 @@ Decision: """
                         if autonomous_goal:
                             # Use fully autonomous automation - AI will handle everything dynamically
                             print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
-                            screenshot_images = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
+                            screenshot_images, video_bytes = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
                             screenshot_attachments.extend(screenshot_images)
                             # Set screenshot_count for logging (autonomous mode returns variable number)
                             screenshot_count = len(screenshot_images) if screenshot_images else 0
+                            
+                            # Add video if recorded
+                            if video_bytes:
+                                video_bytes.seek(0)
+                                video_attachment = discord.File(video_bytes, filename="recording.mp4")
+                                if not hasattr(message, '_video_attachments'):
+                                    message._video_attachments = []
+                                message._video_attachments.append(video_attachment)
+                                print(f"✅ [{username}] Video recorded from autonomous automation")
                         else:
                             # Use regular automation with explicit actions
                             screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
