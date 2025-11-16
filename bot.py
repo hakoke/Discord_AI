@@ -2677,6 +2677,8 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         
         # Main autonomous loop
         last_significant_state = None
+        action_history = []  # Track actions to detect loops
+        consecutive_failures = 0  # Track consecutive failed attempts
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
@@ -2687,6 +2689,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             
             # Use AI to analyze current state and decide next action
             vision_model = get_vision_model()  # Use faster vision model instead of smart model
+            
+            # Build action history context for loop detection
+            recent_actions = action_history[-3:] if len(action_history) >= 3 else action_history
+            action_history_text = ", ".join(recent_actions) if recent_actions else "None"
             
             analysis_prompt = f"""You are an autonomous browser agent. Your goal is: "{goal}"
 
@@ -2717,17 +2723,30 @@ CRITICAL RULES:
   * If goal is "show me [specific page]" → goal_achieved = true when that page is visible
 - IMPORTANT: "Create account", "Sign up", "Register", "Create your account" all mean the same thing - if you see any account creation form, the goal is achieved!
 
+LOOP DETECTION & RECOVERY:
+Recent actions taken: {action_history_text}
+- If you've tried the SAME action multiple times and it's not working → try a DIFFERENT approach!
+- If you're stuck clicking the same button repeatedly → you're in a loop! Try:
+  * Going back (browser back button) if you're on the wrong page
+  * Clicking a DIFFERENT element that might lead to the goal
+  * Scrolling to find other options
+  * Looking for alternative navigation paths
+- If you're on the WRONG website/page (e.g., goal is "skribbl" but you're on "payedsurveys.com") → go back and try again!
+- If an element isn't working after 2-3 tries → it's probably not the right element, try something else!
+
 Return a JSON object with this exact format:
 {{
     "goal_achieved": true/false,
     "current_state": "description of what you see",
     "obstacles": ["list of obstacles found", "or empty array if none"],
     "next_action": {{
-        "type": "click" | "scroll" | "wait" | "none",
-        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button')",
+        "type": "click" | "scroll" | "wait" | "go_back" | "none",
+        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button', 'browser back button')",
         "reason": "why this action is needed"
     }},
-    "confidence": 0.0-1.0
+    "confidence": 0.0-1.0,
+    "is_stuck": true/false,
+    "recovery_suggestion": "if stuck, what should be tried instead"
 }}
 
 Examples:
@@ -2735,6 +2754,8 @@ Examples:
 - Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
 - Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible"}}}}
 - Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign in or Create Account", "reason": "Need to navigate to sign-up page"}}}}
+- Stuck clicking same button 3+ times → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
+- On wrong website → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "On wrong website, need to go back"}}, "recovery_suggestion": "Navigate to correct website"}}
 
 Analyze the screenshot now: """
             
@@ -2768,6 +2789,26 @@ Analyze the screenshot now: """
                 obstacles = analysis_data.get('obstacles', [])
                 next_action = analysis_data.get('next_action', {})
                 confidence = analysis_data.get('confidence', 0.5)
+                is_stuck = analysis_data.get('is_stuck', False)
+                recovery_suggestion = analysis_data.get('recovery_suggestion', '')
+                
+                # Track action for loop detection
+                action_desc = next_action.get('description', '')
+                if action_desc:
+                    action_history.append(action_desc)
+                    # Keep only last 5 actions
+                    if len(action_history) > 5:
+                        action_history.pop(0)
+                
+                # Detect loops: same action 3+ times in a row
+                if len(action_history) >= 3:
+                    last_three = action_history[-3:]
+                    if len(set(last_three)) == 1:  # All same action
+                        is_stuck = True
+                        print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{last_three[0]}' repeated 3+ times")
+                
+                if is_stuck:
+                    print(f"🔄 [AUTONOMOUS] AI detected stuck state: {recovery_suggestion}")
                 
                 print(f"🤖 [AUTONOMOUS] Analysis:")
                 print(f"   State: {current_state}")
@@ -2775,6 +2816,8 @@ Analyze the screenshot now: """
                 print(f"   Next action: {next_action.get('type')} - {next_action.get('description')}")
                 print(f"   Goal achieved: {goal_achieved}")
                 print(f"   Confidence: {confidence:.2f}")
+                if is_stuck:
+                    print(f"   ⚠️  Stuck: {recovery_suggestion}")
                 
                 # Ask AI if this screenshot is worth showing to the user based on their goal
                 should_save_screenshot = False
@@ -2923,6 +2966,19 @@ Decision: """
                     print(f"⏸️  [AUTONOMOUS] No action needed, stopping")
                     break
                 
+                elif action_type == 'go_back':
+                    # Go back in browser history
+                    print(f"⬅️  [AUTONOMOUS] Going back in browser history")
+                    try:
+                        await page.go_back()
+                        await page.wait_for_timeout(2000)
+                        consecutive_failures = 0  # Reset failure count
+                        action_history.clear()  # Clear history after going back
+                        print(f"✅ [AUTONOMOUS] Went back successfully")
+                    except Exception as back_error:
+                        print(f"⚠️  [AUTONOMOUS] Error going back: {back_error}")
+                        consecutive_failures += 1
+                
                 elif action_type == 'click':
                     # Use AI to find and click the element
                     print(f"🖱️  [AUTONOMOUS] Attempting to click: '{action_desc}'")
@@ -3054,8 +3110,13 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                 await asyncio.wait_for(page.wait_for_load_state('domcontentloaded', timeout=5000), timeout=6.0)  # Reduced timeouts
                             except:
                                 await page.wait_for_timeout(500)  # Reduced from 1000ms
+                            consecutive_failures = 0  # Reset on success
                         else:
-                            print(f"⚠️  [AUTONOMOUS] Could not click: '{action_desc}' - will retry in next iteration")
+                            consecutive_failures += 1
+                            print(f"⚠️  [AUTONOMOUS] Could not click: '{action_desc}' (failure {consecutive_failures})")
+                            # If stuck and can't click, suggest going back
+                            if consecutive_failures >= 3 or is_stuck:
+                                print(f"🔄 [AUTONOMOUS] Multiple failures detected, will try recovery strategy")
                     
                     except Exception as click_error:
                         print(f"⚠️  [AUTONOMOUS] Error during click attempt: {click_error}")
@@ -3072,6 +3133,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                         print(f"📜 [AUTONOMOUS] Scrolled down (default)")
                     await page.wait_for_timeout(1500)
+                    consecutive_failures = 0  # Reset on scroll
                 
                 elif action_type == 'wait':
                     wait_time = 2000  # Default 2 seconds
@@ -3081,6 +3143,7 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         wait_time = int(wait_match.group(1)) * 1000
                     await page.wait_for_timeout(wait_time)
                     print(f"⏳ [AUTONOMOUS] Waited {wait_time}ms")
+                    consecutive_failures = 0  # Reset on wait
             
             except Exception as analysis_error:
                 print(f"⚠️  [AUTONOMOUS] Error in AI analysis: {analysis_error}")
