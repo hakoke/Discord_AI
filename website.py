@@ -65,12 +65,19 @@ async def get_discord_guild_info(guild_id: str):
                     
                     return guild_info
                 elif response.status == 404:
-                    return {'name': 'Server Not Found', 'id': guild_id}
+                    print(f"Discord API 404 for guild {guild_id}: Bot may not be in server")
+                    return {'name': None, 'id': guild_id, 'not_found': True}
                 else:
-                    return None
+                    error_text = await response.text()
+                    print(f"Discord API error for guild {guild_id}: Status {response.status}, Response: {error_text}")
+                    return {'name': None, 'id': guild_id, 'error': f"HTTP {response.status}"}
     except Exception as e:
-        print(f"Error fetching Discord guild info for {guild_id}: {e}")
-        return None
+        import traceback
+        error_msg = f"Error fetching Discord guild info for {guild_id}: {e}"
+        print(error_msg)
+        print(traceback.format_exc())
+        # Return a dict with None name so template knows it failed
+        return {'name': None, 'id': guild_id, 'error': str(e)}
 
 def get_discord_guild_info_sync(guild_id: str):
     """Synchronous wrapper for get_discord_guild_info"""
@@ -521,7 +528,11 @@ PUBLIC_HTML = """
                     <div class="server-icon">🖥️</div>
                     {% endif %}
                     <div class="server-name">
-                        {{ server.guild_info.name if server.guild_info and server.guild_info.name else 'Server ' + loop.index|string }}
+                        {% if server.guild_info and server.guild_info.name %}
+                            {{ server.guild_info.name }}
+                        {% else %}
+                            Server {{ loop.index }}
+                        {% endif %}
                     </div>
                     <div class="server-stats">
                         <span>👥 <span class="stat-number">{{ server.guild_info.member_count if server.guild_info and server.guild_info.member_count else '?' }}</span></span>
@@ -1284,7 +1295,14 @@ async def get_public_data():
     """Fetch public data for homepage"""
     database_url = os.getenv('DATABASE_URL')
     if not database_url:
+        print("⚠️ DATABASE_URL not set")
         return {'stats': {'unique_servers': 0, 'total_interactions': 0, 'unique_users': 0, 'memory_records': 0}, 'servers': []}
+    
+    discord_token = os.getenv('DISCORD_TOKEN')
+    if not discord_token:
+        print("⚠️ DISCORD_TOKEN not set - server names will not be available")
+    else:
+        print(f"✅ DISCORD_TOKEN is set (length: {len(discord_token)})")
     
     conn = await asyncpg.connect(database_url)
     
@@ -1315,8 +1333,18 @@ async def get_public_data():
         for server in servers:
             server_dict = dict(server)
             # Fetch Discord guild info
-            guild_info = await get_discord_guild_info(server_dict['guild_id'])
-            server_dict['guild_info'] = guild_info
+            try:
+                guild_info = await get_discord_guild_info(server_dict['guild_id'])
+                server_dict['guild_info'] = guild_info
+                if guild_info and guild_info.get('name'):
+                    print(f"✅ Fetched guild info for {server_dict['guild_id']}: {guild_info.get('name')}")
+                else:
+                    print(f"⚠️ No guild name for {server_dict['guild_id']} (guild_info: {guild_info})")
+            except Exception as e:
+                print(f"❌ Exception fetching guild info for {server_dict['guild_id']}: {e}")
+                import traceback
+                traceback.print_exc()
+                server_dict['guild_info'] = {'name': None, 'id': server_dict['guild_id']}
             servers_list.append(server_dict)
         
         return {

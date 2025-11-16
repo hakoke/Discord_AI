@@ -2977,55 +2977,9 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
                 await page.goto(url, wait_until='load', timeout=30000)
                 await page.wait_for_timeout(2000)
         
-        # Best-effort: handle common blocking overlays generically (no site-specific logic)
-        # Attempt to dismiss cookie/consent/age verification prompts using generic labels.
-        try:
-            # Try common consent buttons by role/name (case-insensitive)
-            candidates = [
-                ('button', 'accept'),
-                ('button', 'accept all'),
-                ('button', 'alles accepteren'),  # Dutch
-                ('button', 'i agree'),
-                ('button', 'agree'),
-                ('button', 'consent'),
-                ('button', 'continue'),
-                ('button', 'enter'),
-                ('link', 'accept'),
-                ('link', 'agree'),
-            ]
-            for role_name, text_part in candidates:
-                try:
-                    element = page.get_by_role(role_name, name=re.compile(text_part, re.IGNORECASE)).first
-                    if await element.count() > 0:
-                        # Try clicking with force and wait longer
-                        await element.click(timeout=3000, force=True)
-                        await page.wait_for_timeout(2000)  # Wait longer for popup to disappear
-                        # Verify popup is gone by checking if element still exists
-                        try:
-                            await element.wait_for(state='hidden', timeout=2000)
-                        except:
-                            pass  # Element might not support hidden state
-                except Exception:
-                    continue
-            # Also try by text directly (for YouTube's Dutch popup)
-            try:
-                accept_texts = ['Alles accepteren', 'Accept all', 'Accept', 'I agree', 'Agree']
-                for text in accept_texts:
-                    try:
-                        element = page.get_by_text(text, exact=False).first
-                        if await element.count() > 0:
-                            await element.click(timeout=3000, force=True)
-                            await page.wait_for_timeout(2000)
-                            break
-                    except:
-                        continue
-            except:
-                pass
-        except Exception:
-            # Non-fatal: continue autonomous loop which also handles obstacles
-            pass
-        
-        # Main autonomous loop
+        # Main autonomous loop - FULLY AI-DRIVEN
+        # The AI will analyze screenshots and dynamically decide what to click
+        # No hardcoded lists - everything is determined by AI vision analysis
         last_significant_state = None
         action_history = []  # Track actions to detect loops
         consecutive_failures = 0  # Track consecutive failed attempts
