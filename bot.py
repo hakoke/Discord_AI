@@ -5375,13 +5375,9 @@ Decision: """
                 
                 should_fetch_urls = await decide_if_urls_relevant()
                 
-                # Check if screenshot is needed (AI-driven decision)
-                # BUT skip screenshots if user explicitly wants image search (they want Google images, not website screenshots)
-                screenshot_needed = False
-                if not wants_image_search:
-                    screenshot_needed = await ai_decide_screenshot_needed(message, urls)
-                else:
-                    print(f"⏭️  [{username}] Skipping screenshot - user wants image search, not website screenshots")
+                # Defer screenshot decision until after URL extraction so we don't miss screenshots
+                # when the URL isn't in the original message.
+                screenshot_needed = None  # decide below
                 
                 if should_fetch_urls:
                     print(f"🌐 [{username}] URLs are relevant - fetching content...")
@@ -5401,6 +5397,20 @@ Decision: """
                 
                 # Handle screenshots if needed (separate from text fetching)
                 screenshot_attachments = []
+
+                # Decide screenshot after URLs were gathered or inferred.
+                if screenshot_needed is None:
+                    if wants_image_search:
+                        print(f"⏭️  [{username}] Skipping screenshot - user wants image search, not website screenshots")
+                        screenshot_needed = False
+                    else:
+                        # If the user asked to "show" something, default to True; otherwise let AI decide.
+                        content_lower = (message.content or "").lower()
+                        if 'show me' in content_lower or 'show the' in content_lower or 'show page' in content_lower or 'screenshot' in content_lower or wants_screenshot:
+                            screenshot_needed = True
+                        else:
+                            screenshot_needed = await ai_decide_screenshot_needed(message, urls)
+
                 if screenshot_needed and PLAYWRIGHT_AVAILABLE:
                     # Take screenshots of first URL (limit to 1 URL for screenshots to avoid overload)
                     screenshot_url = clean_url(urls[0])  # Clean URL to remove any trailing invalid characters
