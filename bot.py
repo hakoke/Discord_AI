@@ -4199,17 +4199,25 @@ Decision: """
                     # Use AI to identify the exact element
                     click_prompt = f"""Look at this webpage screenshot. I need to click on: "{action_desc}"
 
-CRITICAL: Find the ACTUAL CLICKABLE BUTTON/LINK, not just text that appears elsewhere on the page.
-If there are multiple instances of the same text, find the one that is actually a clickable button/link.
+CRITICAL: Find the ACTUAL CLICKABLE ELEMENT - this could be a button, link, interactive div, tile, card, or any clickable element.
+IMPORTANT: Many websites use interactive DIVs, SPANs, or other elements (not just buttons/links) that are clickable:
+- Game tiles/boxes (like Connections game tiles, crossword squares, puzzle pieces)
+- Cards/card elements (product cards, article cards)
+- Interactive divs/spans that look clickable (have hover effects, borders, backgrounds)
+- Clickable text elements within containers
+- Elements that respond to clicks even if they're not standard buttons/links
+
+If there are multiple instances of the same text, find the one that is actually clickable/interactive.
 
 Find the exact clickable element. Return JSON:
 {{
-    "exact_text": "exact text on the button/link",
-    "element_type": "button" or "link" or "other" - IMPORTANT: specify if it's a button or link,
-    "location": "where it is on page (e.g., 'in the popup', 'top right', 'center')",
-    "suggested_selector": "CSS selector if possible (prioritize button selectors like 'button:has-text(...)'), or null",
+    "exact_text": "exact text/content visible on the clickable element",
+    "element_type": "button" or "link" or "interactive_div" or "tile" or "card" or "clickable_text" or "other",
+    "location": "where it is on page (e.g., 'in the popup', 'top right', 'center', 'in game grid', 'third row')",
+    "suggested_selector": "CSS selector if possible - for interactive divs, try '[data-*]', '.class-name', or text-based selectors like 'div:has-text(...)', or null",
     "coordinates": {{"x": center_x, "y": center_y}} or null,
-    "is_in_popup": true/false - is this element inside a popup/modal?
+    "is_in_popup": true/false - is this element inside a popup/modal?,
+    "container_info": "if it's in a grid/list/container, describe it (e.g., 'third tile in second row', 'first item in list')"
 }}
 
 If found, return the data. If not found, return {{"exact_text": null}}.
@@ -4242,10 +4250,37 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                         is_in_popup = click_data.get('is_in_popup', False)
                         
                         clicked = False
+                        container_info = click_data.get('container_info', '')
                         
                         # PRIORITIZE BUTTONS/LINKS OVER PLAIN TEXT
                         # Strategy order matters - try clickable elements FIRST
                         if exact_text:
+                            # Strategy 0.5: For interactive divs/tiles/cards, try clicking by text within container first
+                            if not clicked and any(term in element_type for term in ['interactive_div', 'tile', 'card', 'clickable']):
+                                try:
+                                    # Try finding div/span elements containing the text
+                                    for selector_type in ['div', 'span', '[role="button"]', '[role="link"]', '[tabindex]']:
+                                        try:
+                                            locator = page.locator(f'{selector_type}:has-text("{exact_text}")').first
+                                            if await locator.count() > 0:
+                                                await locator.click(timeout=5000)
+                                                clicked = True
+                                                print(f"✅ [AUTONOMOUS] Clicked interactive {element_type} by text: '{exact_text}'")
+                                                break
+                                        except:
+                                            continue
+                                    # Also try clicking by coordinates if AI provided them and element is interactive
+                                    if not clicked and coordinates:
+                                        try:
+                                            # Verify element at coordinates is clickable
+                                            await page.mouse.click(coordinates['x'], coordinates['y'])
+                                            clicked = True
+                                            print(f"✅ [AUTONOMOUS] Clicked interactive element at coordinates: ({coordinates['x']}, {coordinates['y']})")
+                                        except:
+                                            pass
+                                except:
+                                    pass
+                            
                             # Strategy 1: If AI says it's a button, try button role FIRST
                             if 'button' in element_type and not clicked:
                                 try:
@@ -4298,6 +4333,32 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                         await link_locator.click(timeout=5000)
                                         clicked = True
                                         print(f"✅ [AUTONOMOUS] Clicked link containing text: '{exact_text}'")
+                                except:
+                                    pass
+                            
+                            # Strategy 4.5: For game tiles/interactive elements, try various selectors
+                            if not clicked and any(term in element_type for term in ['tile', 'card', 'interactive']):
+                                try:
+                                    # Try various ways to find interactive elements
+                                    for pattern in [
+                                        f'[data-word="{exact_text}"]',
+                                        f'[data-value="{exact_text}"]',
+                                        f'[aria-label*="{exact_text}"]',
+                                        f'.tile:has-text("{exact_text}")',
+                                        f'.card:has-text("{exact_text}")',
+                                        f'.item:has-text("{exact_text}")',
+                                        f'div[role="button"]:has-text("{exact_text}")',
+                                        f'span[role="button"]:has-text("{exact_text}")',
+                                    ]:
+                                        try:
+                                            locator = page.locator(pattern).first
+                                            if await locator.count() > 0:
+                                                await locator.click(timeout=5000)
+                                                clicked = True
+                                                print(f"✅ [AUTONOMOUS] Clicked {element_type} by pattern: '{pattern}'")
+                                                break
+                                        except:
+                                            continue
                                 except:
                                     pass
                         
@@ -7797,35 +7858,53 @@ Query: """
             if not SERPER_API_KEY:
                 return False
             
+            # Check if this is an automation task - if so, skip search (automation already captured what's needed)
+            force_fast_check = getattr(message, "_servermate_force_fast_model", False)
+            has_video_check = (message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id))
+            has_screenshots_check = (screenshot_attachments and len(screenshot_attachments) > 0)
+            is_automation_task = force_fast_check or (has_video_check and has_screenshots_check) or (has_video_check and not has_screenshots_check)
+            
+            if is_automation_task:
+                # For automation tasks, AI will decide if search is truly needed (but usually it's not)
+                print(f"🤖 [{username}] Automation task detected - AI will decide if search is needed")
+                # Still let AI decide, but with context that this is automation
+                automation_context = " NOTE: This is an automation task (video/screenshots were captured). Search is usually NOT needed for automation responses - the automation already captured what the user wanted."
+            else:
+                automation_context = ""
+            
             # If screenshots were taken, let AI decide if search is still needed
             # Sometimes user wants both screenshots AND additional info from search
             if screenshot_attachments and len(screenshot_attachments) > 0:
                 # Include context that screenshots were taken in the decision prompt
                 search_decision_prompt = f"""User message: "{message.content}"
 
-NOTE: Screenshots were already taken of a website.
+NOTE: Screenshots were already taken of a website.{automation_context}
 
-Does the user still want internet search for additional information, or is the screenshot enough?
+Does the user still want internet search for additional information, or is the screenshot/video enough?
 
 SEARCH still needed when:
-- User asks for additional info beyond what's in the screenshot
-- User wants to know more about something shown in the screenshot
+- User EXPLICITLY asks for additional info beyond what's in the screenshot/video (e.g., "tell me about", "explain", "what is")
 - User asks questions like "what is", "explain", "tell me about", "search for", etc.
-- User wants information that might not be in the screenshot
+- User wants information that might not be in the screenshot/video
+- User wants links or sources
 
 DON'T search when:
-- User just wanted to see the website (screenshot is enough)
-- Simple screenshot request like "show me this website" (no additional questions)
-- User already has the visual they need
+- User just wanted to see/record something (screenshot/video is enough)
+- Simple automation request like "show me this website" or "record video" (no additional questions)
+- User already has the visual/video they need
+- Automation task completed successfully (automation already captured what user wanted)
+- User didn't ask for additional information beyond what was captured
 
 Respond with ONLY: "SEARCH" or "NO"
 
 Examples:
 "show me this website" (screenshot taken) -> NO
 "go to amazon and show me" (screenshot taken) -> NO
+"record video of you playing game" (video recorded) -> NO
 "take screenshot of X.com and tell me about it" -> SEARCH
 "show me this website, what is it?" -> SEARCH
 "go to X.com and search for more info about Y" -> SEARCH
+"show me you playing the game" (automation completed) -> NO
 
 Now decide: "{message.content}" -> """
                 
@@ -8064,6 +8143,24 @@ Return ONLY the JSON object, nothing else:"""
         # and was somehow returned from generate_response directly (which should never happen)
         print(f"🔍 [{username}] DEBUG: Continuing after search block - should reach safety check at line 9047")
         
+        # Add automation success context if video/screenshots were captured from automation
+        automation_context_added = False
+        if message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id):
+            video_count = len(VIDEO_ATTACHMENTS[message.id])
+            screenshot_count_for_context = len(screenshot_attachments) if screenshot_attachments else 0
+            automation_success_text = f"\n\n🎥 AUTOMATION SUCCESS - IMPORTANT CONTEXT:\n"
+            automation_success_text += f"- I successfully completed the web automation task\n"
+            automation_success_text += f"- Video recording was SUCCESSFUL: {video_count} video(s) captured ({video_count} file(s) attached)\n"
+            if screenshot_count_for_context > 0:
+                automation_success_text += f"- Screenshots captured: {screenshot_count_for_context} screenshot(s)\n"
+            automation_success_text += f"- The automation worked correctly - video and screenshots are included in my response\n"
+            automation_success_text += f"- DO NOT say the video failed or that there was an error - the video was successfully recorded!\n"
+            automation_success_text += f"- Describe what I captured in the video/screenshots naturally and positively\n"
+            automation_success_text += f"- If the user asked me to do something specific (e.g., 'play the game'), describe what I did in the video\n"
+            consciousness_prompt += automation_success_text
+            automation_context_added = True
+            print(f"✅ [{username}] Added automation success context to prompt (video={video_count}, screenshots={screenshot_count_for_context})")
+        
         # Add webpage contents to prompt if available
         if webpage_contents:
             print(f"🔗 [{username}] Adding {len(webpage_contents)} webpage content(s) to prompt")
@@ -8245,12 +8342,20 @@ Now decide: "{message.content}" -> """
         
         needs_smart_model = False
         decision_time = 0.0
+        # Check for automation in multiple ways (message flag, or presence of video/screenshots from automation)
         force_fast_due_to_automation = getattr(message, "_servermate_force_fast_model", False)
-        if force_fast_due_to_automation:
+        # Also check if we have video from automation (more reliable than message flag which might not persist)
+        has_automation_video = (message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id))
+        has_automation_screenshots = (screenshot_attachments and len(screenshot_attachments) > 0)
+        # If we have both video and screenshots, or video alone, it's likely from automation
+        is_automation_response = force_fast_due_to_automation or (has_automation_video and has_automation_screenshots) or (has_automation_video and not has_automation_screenshots)
+        
+        if is_automation_response:
             # ALWAYS use fast model for automation - no decision needed, saves time
             needs_smart_model = False
             decision_time = 0
             print(f"⚡ [{username}] ⚡ FORCED FAST MODEL for autonomous web automation (skipping all decision logic)")
+            print(f"⚡ [{username}] ⚡ Automation detected via: flag={force_fast_due_to_automation}, video={has_automation_video}, screenshots={has_automation_screenshots}")
         else:
             decision_start = time.time()
             # For summaries, always use fast model (summaries don't need deep reasoning)
@@ -8503,8 +8608,14 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             # If we already decided on smart model (complex reasoning), use it for images too (2.5 Pro has vision!)
             # Otherwise, check if images need deep analysis
             # BUT: If automation forced fast model, ALWAYS use fast model for images too (saves time!)
-            print(f"🔍 [{username}] DEBUG: Deciding which model to use for images, needs_smart_model={needs_smart_model}, force_fast_due_to_automation={force_fast_due_to_automation}")
-            if force_fast_due_to_automation:
+            # Re-check automation status for image model decision (using same logic as text model)
+            force_fast_due_to_automation_check = getattr(message, "_servermate_force_fast_model", False)
+            has_automation_video_check = (message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id))
+            has_automation_screenshots_check = (screenshot_attachments and len(screenshot_attachments) > 0)
+            is_automation_response_check = force_fast_due_to_automation_check or (has_automation_video_check and has_automation_screenshots_check) or (has_automation_video_check and not has_automation_screenshots_check)
+            
+            print(f"🔍 [{username}] DEBUG: Deciding which model to use for images, needs_smart_model={needs_smart_model}, is_automation_response={is_automation_response_check}")
+            if is_automation_response_check:
                 # ALWAYS use fast model for automation - no decision needed, saves time
                 print(f"⚡ [{username}] ⚡ FORCED FAST MODEL for images (automation detected)")
                 image_model = get_vision_model()
