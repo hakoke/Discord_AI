@@ -1716,6 +1716,205 @@ async def download_image(url: str) -> bytes:
     """Download image from URL"""
     return await download_bytes(url)
 
+async def ai_decide_discord_assets_needed(message: discord.Message) -> Dict[str, bool]:
+    """AI decides which Discord visual assets are needed based on user's message"""
+    content = (message.content or "").strip().lower()
+    
+    # Quick heuristic check first
+    needs_profile_picture = any(phrase in content for phrase in [
+        'profile picture', 'profile pic', 'avatar', 'my picture', 'my avatar',
+        'send me my', 'show me my', 'get my', 'my pfp', 'pfp'
+    ])
+    
+    needs_sticker = bool(message.stickers) or any(phrase in content for phrase in [
+        'sticker', 'analyze sticker', 'this sticker'
+    ])
+    
+    needs_gif = bool(message.embeds) or any(phrase in content for phrase in [
+        'gif', 'analyze gif', 'this gif'
+    ])
+    
+    needs_server_icon = any(phrase in content for phrase in [
+        'server icon', 'server picture', 'server avatar', 'guild icon'
+    ])
+    
+    needs_role_icon = any(phrase in content for phrase in [
+        'role icon', 'role picture'
+    ])
+    
+    # If user explicitly mentions something, always extract it
+    # Otherwise, let AI make the final decision
+    if needs_profile_picture or needs_sticker or needs_gif or needs_server_icon or needs_role_icon:
+        return {
+            'profile_picture': needs_profile_picture,
+            'sticker': needs_sticker or bool(message.stickers),
+            'gif': needs_gif or bool(message.embeds),
+            'server_icon': needs_server_icon,
+            'role_icon': needs_role_icon
+        }
+    
+    # If message has stickers/GIFs, always extract them (user sent them)
+    if message.stickers or message.embeds:
+        return {
+            'profile_picture': False,
+            'sticker': bool(message.stickers),
+            'gif': bool(message.embeds),
+            'server_icon': False,
+            'role_icon': False
+        }
+    
+    # Default: extract profile picture and server icon for context (lightweight)
+    # But let AI decide if it needs them based on the conversation
+    return {
+        'profile_picture': True,  # Always available for context
+        'sticker': bool(message.stickers),
+        'gif': bool(message.embeds),
+        'server_icon': True,  # Always available for context
+        'role_icon': False  # Only when explicitly needed
+    }
+
+async def extract_discord_visual_assets(message: discord.Message, assets_needed: Dict[str, bool] = None) -> List[Dict[str, Any]]:
+    """Extract Discord visual assets based on what's needed (AI-decided)"""
+    visual_assets = []
+    
+    # If no assets_needed dict provided, extract everything (backward compatibility)
+    if assets_needed is None:
+        assets_needed = {
+            'profile_picture': True,
+            'sticker': True,
+            'gif': True,
+            'server_icon': True,
+            'role_icon': True
+        }
+    
+    try:
+        # Extract stickers
+        if message.stickers:
+            for sticker in message.stickers:
+                try:
+                    # Get sticker image URL
+                    sticker_url = None
+                    if hasattr(sticker, 'url') and sticker.url:
+                        sticker_url = str(sticker.url)
+                    elif hasattr(sticker, 'image_url') and sticker.image_url:
+                        sticker_url = str(sticker.image_url)
+                    
+                    if sticker_url:
+                        image_data = await download_image(sticker_url)
+                        if image_data:
+                            visual_assets.append({
+                                'mime_type': 'image/png',  # Stickers are typically PNG
+                                'data': image_data,
+                                'type': 'sticker',
+                                'name': sticker.name,
+                                'description': getattr(sticker, 'description', None)
+                            })
+                            print(f"📸 Extracted sticker: {sticker.name} ({len(image_data)} bytes)")
+                except Exception as e:
+                    print(f"⚠️  Error extracting sticker {sticker.name}: {e}")
+        
+        # Extract GIFs from embeds (only if needed)
+        if assets_needed.get('gif', False) and message.embeds:
+            for embed in message.embeds:
+                try:
+                    # Check for GIF/video in embed
+                    if embed.type == 'gifv' or (embed.video and embed.video.url):
+                        gif_url = embed.video.url if embed.video else None
+                        if gif_url:
+                            image_data = await download_image(gif_url)
+                            if image_data:
+                                visual_assets.append({
+                                    'mime_type': 'image/gif',
+                                    'data': image_data,
+                                    'type': 'gif',
+                                    'source': 'embed_video'
+                                })
+                                print(f"📸 Extracted GIF from embed video ({len(image_data)} bytes)")
+                    elif embed.image and embed.image.url:
+                        # Check if it's a GIF
+                        if '.gif' in embed.image.url.lower() or 'giphy' in embed.image.url.lower():
+                            image_data = await download_image(embed.image.url)
+                            if image_data:
+                                visual_assets.append({
+                                    'mime_type': 'image/gif',
+                                    'data': image_data,
+                                    'type': 'gif',
+                                    'source': 'embed_image'
+                                })
+                                print(f"📸 Extracted GIF from embed image ({len(image_data)} bytes)")
+                except Exception as e:
+                    print(f"⚠️  Error extracting GIF from embed: {e}")
+        
+        # Extract profile picture/avatar (only if needed)
+        if assets_needed.get('profile_picture', False) and message.author:
+            try:
+                avatar_url = str(message.author.display_avatar.url) if message.author.display_avatar else None
+                if avatar_url:
+                    image_data = await download_image(avatar_url)
+                    if image_data:
+                        visual_assets.append({
+                            'mime_type': 'image/png',  # Discord avatars are typically PNG/WebP
+                            'data': image_data,
+                            'type': 'profile_picture',
+                            'user_id': str(message.author.id),
+                            'username': message.author.display_name
+                        })
+                        print(f"📸 Extracted profile picture for {message.author.display_name} ({len(image_data)} bytes)")
+            except Exception as e:
+                print(f"⚠️  Error extracting profile picture: {e}")
+        
+        # Extract server icon (only if needed)
+        if assets_needed.get('server_icon', False) and message.guild and message.guild.icon:
+            try:
+                icon_url = str(message.guild.icon.url)
+                image_data = await download_image(icon_url)
+                if image_data:
+                    visual_assets.append({
+                        'mime_type': 'image/png',
+                        'data': image_data,
+                        'type': 'server_icon',
+                        'guild_id': str(message.guild.id),
+                        'guild_name': message.guild.name
+                    })
+                    print(f"📸 Extracted server icon for {message.guild.name} ({len(image_data)} bytes)")
+            except Exception as e:
+                print(f"⚠️  Error extracting server icon: {e}")
+        
+        # Extract role icons (only if needed)
+        if assets_needed.get('role_icon', False) and message.guild and message.author:
+            try:
+                member = message.guild.get_member(message.author.id)
+                if not member:
+                    try:
+                        member = await message.guild.fetch_member(message.author.id)
+                    except:
+                        member = None
+                
+                if member and member.roles:
+                    for role in member.roles[:5]:  # Limit to 5 roles to avoid too many images
+                        if hasattr(role, 'icon') and role.icon:
+                            try:
+                                icon_url = str(role.icon.url)
+                                image_data = await download_image(icon_url)
+                                if image_data:
+                                    visual_assets.append({
+                                        'mime_type': 'image/png',
+                                        'data': image_data,
+                                        'type': 'role_icon',
+                                        'role_id': str(role.id),
+                                        'role_name': role.name
+                                    })
+                                    print(f"📸 Extracted role icon for {role.name} ({len(image_data)} bytes)")
+                            except Exception as e:
+                                print(f"⚠️  Error extracting role icon for {role.name}: {e}")
+            except Exception as e:
+                print(f"⚠️  Error extracting role icons: {e}")
+        
+    except Exception as e:
+        print(f"⚠️  Error in extract_discord_visual_assets: {e}")
+    
+    return visual_assets
+
 async def fetch_webpage_content(url: str) -> str:
     """Fetch and parse webpage content from a URL, extracting readable text"""
     if not BEAUTIFULSOUP_AVAILABLE:
@@ -3283,7 +3482,7 @@ Decide the optimal automation strategy. Consider EVERYTHING the user implies:
 
 Return ONLY valid JSON with this shape:
 {{
-  "max_iterations": 3-12 integer,
+  "max_iterations": 3-40 integer,
   "video_mode": "off" | "full_process" | "content_only",
   "record_duration_seconds": number or null,
   "content_only_clip_seconds": number or null,
@@ -3297,7 +3496,8 @@ Interpret synonyms intelligently:
 - If no video/record request → video_mode should be "off"
 - Use the duration the user mentions (seconds/minutes). If unspecified but video is requested, choose a reasonable value (e.g., 20-45 seconds for clips).
 - Keep max_iterations low (3-4) for one-step previews ("just show the page").
-- Use higher counts (8-12) for games, puzzles, multi-step forms, or whenever the user expects you to actually play/do something so there is room for progress.
+- Use higher counts (8-15) for games, puzzles, multi-step forms, or whenever the user expects you to actually play/do something so there is room for progress.
+- Use even higher counts (20-40) for very complex tasks that require many steps.
 
 Important:
 - Be flexible with wording; don't rely on specific keywords.
@@ -3318,7 +3518,7 @@ Important:
 
         max_iterations = parsed.get('max_iterations')
         if isinstance(max_iterations, (int, float)):
-            plan['max_iterations'] = max(3, min(12, int(max_iterations)))
+            plan['max_iterations'] = max(3, min(40, int(max_iterations)))  # Hard cap at 40
 
         video_mode = (parsed.get('video_mode') or 'off').lower()
         if video_mode not in ('off', 'full_process', 'content_only'):
@@ -3601,9 +3801,74 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         username_keywords = ['username', 'user name', 'email', 'e-mail', 'mobile', 'phone', 'number', 'name', 'contact']
         guidance_messages: List[str] = []
 
+        original_max_iterations = max_iterations
+        user_requested_extension = False
+        extension_reason = None
+        
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
+            
+            # Check if we should extend iterations (AI-driven decision)
+            # Only extend if: not stuck, not done, not random, and either user asked or AI thinks we need it
+            if iteration >= max_iterations - 1 and not goal_achieved and max_iterations < 40:
+                # Use AI to decide if we should extend
+                extension_prompt = f"""You are reviewing an autonomous browser automation task.
+
+Goal: "{goal}"
+Current iteration: {iteration}/{max_iterations}
+Is stuck: {is_stuck}
+Goal achieved: {goal_achieved}
+Meaningful actions taken: {meaningful_actions}
+Recent actions: {', '.join(executed_actions[-5:]) if executed_actions else 'None'}
+
+Should we extend iterations beyond {max_iterations}? Maximum allowed: 40.
+
+EXTEND ONLY IF:
+- Goal is NOT achieved yet
+- We are NOT stuck (not repeating same action, making progress)
+- Task is open-ended and needs more time (e.g., "go to youtube and watch some videos", "browse around", "explore")
+- User explicitly asked for more iterations OR task genuinely needs more time
+- We're making meaningful progress toward the goal
+
+DO NOT EXTEND IF:
+- We're stuck in a loop (same action repeated)
+- Goal is already achieved
+- Task is clearly done (e.g., "show me sign up" and sign up page is visible)
+- We're doing random things with no clear progress
+- Task is simple and should be done by now
+
+Return JSON:
+{{
+    "should_extend": true/false,
+    "reason": "brief explanation",
+    "extend_by": number (how many more iterations, max total 40)
+}}"""
+                
+                try:
+                    extension_model = get_fast_model()
+                    extension_response = await queued_generate_content(extension_model, extension_prompt)
+                    extension_text = extension_response.text.strip()
+                    
+                    # Parse JSON
+                    if '```json' in extension_text:
+                        extension_text = extension_text.split('```json')[1].split('```')[0]
+                    elif '```' in extension_text:
+                        extension_text = extension_text.split('```')[1].split('```')[0]
+                    
+                    extension_data = await parse_ai_json_response(extension_text, context_label="iteration-extension", goal=goal)
+                    
+                    if extension_data and extension_data.get('should_extend', False):
+                        extend_by = extension_data.get('extend_by', 5)
+                        extend_by = max(1, min(40 - max_iterations, extend_by))  # Clamp to max 40 total
+                        max_iterations = min(40, max_iterations + extend_by)
+                        extension_reason = extension_data.get('reason', 'AI determined more iterations needed')
+                        print(f"🔄 [AUTONOMOUS] Extending iterations: {max_iterations - original_max_iterations} more (new max: {max_iterations}) - {extension_reason}")
+                    else:
+                        print(f"🔄 [AUTONOMOUS] AI decided not to extend iterations - {extension_data.get('reason', 'Goal should be achievable with current iterations') if extension_data else 'No extension needed'}")
+                except Exception as ext_error:
+                    print(f"⚠️  [AUTONOMOUS] Error checking iteration extension: {ext_error}")
+                    # Don't extend on error - safer to stop
             
             # Take screenshot of current state (but don't save it yet - only save significant ones)
             current_screenshot = await page.screenshot(type='png')
@@ -3712,6 +3977,13 @@ GAMEPLAY / INTERACTIVE TASKS:
 GOAL ACHIEVEMENT - BE SMART AND DYNAMIC:
 Analyze what the user actually wants and mark goal_achieved = TRUE when you've achieved what they asked for.
 
+🚨 CRITICAL: STOP IMMEDIATELY WHEN GOAL IS ACHIEVED 🚨
+- Once goal_achieved = TRUE, you MUST STOP and NOT continue with any more actions
+- When you mark goal_achieved = TRUE, set next_action.type = "none" and next_action.description = "Goal achieved - stopping"
+- DO NOT continue clicking, scrolling, or interacting once the goal is achieved
+- BE CONFIDENT: If you've achieved the user's goal, mark goal_achieved = TRUE immediately
+- Don't hesitate or second-guess yourself - if the goal is done, mark it as achieved and STOP
+
 CRITICAL FOR MULTI-STEP PROCESSES:
 - If the goal involves MULTIPLE STEPS (e.g., "going to amazon, clicking sign up, filling out username and password"):
   * Understand that these are SEQUENTIAL STEPS in ONE process
@@ -3793,19 +4065,25 @@ Return a JSON object with this exact format:
 }}
 
 Examples (be smart and dynamic):
-- Cookie banner visible → {{"next_action": {{"type": "click", "description": "Accept Cookies or Accept All", "reason": "Cookie banner is blocking the page"}}}}
-- Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
-- Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible"}}}}
+- Cookie banner visible → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Accept Cookies or Accept All", "reason": "Cookie banner is blocking the page"}}}}
+- Age verification visible → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
+- Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible - STOP IMMEDIATELY"}}}}
 - Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign Up or Create Account or Register", "reason": "Need to navigate to sign-up page"}}}}
-- Goal "show me the page of wordle" and you see wordle game page → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - wordle page is visible", "reason": "User just wants to see the page, not play it"}}}}
+- Goal "show me the page of wordle" and you see wordle game page → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - wordle page is visible", "reason": "User just wants to see the page, not play it - STOP IMMEDIATELY"}}}}
 - Goal "show me you playing connections" and you see connections game → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Start game or Play button", "reason": "Need to start playing the game"}}}}
+- Goal "show me you playing connections" and you've clicked some tiles → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - playing the game", "reason": "You've started playing by clicking tiles - STOP IMMEDIATELY"}}}}
+- Goal "go to wordle and put in the word stare" and you've typed "stare" → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - word entered", "reason": "You've typed the word 'stare' as requested - STOP IMMEDIATELY"}}}}
 - Goal "show me you finishing wordle" and you see wordle game → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "First letter tile or game element", "reason": "Need to play and complete the wordle puzzle"}}}}
-- Goal "show me you signing up" and you see sign-up form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up form is visible", "reason": "User wants to see the sign-up form, which is now visible"}}}}
-- Goal "record 30 seconds" and you see video playing → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - video is ready", "reason": "Video is playing, system will record for 30 seconds"}}}}
-- Goal "search for laptop" and you see search box → {{"next_action": {{"type": "type", "description": "search box with text: laptop", "reason": "Need to type 'laptop' into the search box"}}}}
-- Goal "go to amazon and search for headphones" and you see Amazon homepage → {{"next_action": {{"type": "type", "description": "search box with text: headphones", "reason": "Need to type 'headphones' into Amazon search box"}}}}
-- Stuck clicking same button 3+ times → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
-- On wrong website → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "On wrong website, need to go back"}}, "recovery_suggestion": "Navigate to correct website"}}
+- Goal "show me you signing up" and you see sign-up form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up form is visible", "reason": "User wants to see the sign-up form, which is now visible - STOP IMMEDIATELY"}}}}
+- Goal "record 30 seconds" and you see video playing → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - video is ready", "reason": "Video is playing, system will record for 30 seconds - STOP IMMEDIATELY"}}}}
+- Goal "search for laptop" and you see search box → {{"goal_achieved": false, "next_action": {{"type": "type", "description": "search box with text: laptop", "reason": "Need to type 'laptop' into the search box"}}}}
+- Goal "search for laptop" and you've typed "laptop" and see results → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - search completed", "reason": "You've searched for 'laptop' and results are shown - STOP IMMEDIATELY"}}}}
+- Goal "go to amazon and search for headphones" and you see Amazon homepage → {{"goal_achieved": false, "next_action": {{"type": "type", "description": "search box with text: headphones", "reason": "Need to type 'headphones' into Amazon search box"}}}}
+- Goal "fill out email and password" and you've filled both fields → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - fields filled", "reason": "Both email and password fields are filled as requested - STOP IMMEDIATELY"}}}}
+- Stuck clicking same button 3+ times → {{"goal_achieved": false, "is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
+- On wrong website → {{"goal_achieved": false, "is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "On wrong website, need to go back"}}, "recovery_suggestion": "Navigate to correct website"}}
+
+IMPORTANT: When goal_achieved = true, ALWAYS set next_action.type = "none" and next_action.description = "Goal achieved - stopping". NEVER continue with clicks, scrolls, or other actions once the goal is achieved.
 
 Analyze the screenshot now: """
             
@@ -3892,8 +4170,16 @@ Analyze the screenshot now: """
                 if is_stuck:
                     print(f"   ⚠️  Stuck: {recovery_suggestion}")
                 
-                # Ask AI if this screenshot is worth showing to the user based on their goal
+                # 🚨 CRITICAL: If AI says goal is achieved but wants to continue, force stop
+                if goal_achieved and next_action.get('type') != 'none':
+                    print(f"⚠️  [AUTONOMOUS] AI marked goal_achieved=True but wants to continue with action: {next_action.get('type')}")
+                    print(f"⚠️  [AUTONOMOUS] Forcing next_action.type='none' to stop immediately")
+                    next_action = {'type': 'none', 'description': 'Goal achieved - stopping', 'reason': 'Goal achieved, stopping as instructed'}
+                
+                # 🚨 CRITICAL: Stop immediately if goal is achieved (unless special cases below)
                 should_save_screenshot = False
+                goal_achieved_original = goal_achieved
+                
                 if goal_achieved and content_only_video:
                     if not await is_video_playing(page):
                         goal_achieved = False
@@ -5182,6 +5468,12 @@ AUTONOMOUS automation is NOT needed when:
 - User just wants a simple screenshot of the page as-is with no interaction
 - User gives very specific step-by-step instructions (use regular automation)
 - No goal is mentioned, just "show me this website" (unless it requires navigation/interaction)
+- User just wants INFORMATION or a LINK (e.g., "show me the link to X", "give me the link", "what's the link", "find me the link")
+  * If user asks for a link, they want YOU to provide the link/info, not actually navigate to the website
+  * Only use automation if they explicitly want to SEE/NTERACT with the website itself
+  * Examples: "show me the link to mr beast's most popular video" → NOT autonomous (just provide link)
+  * Examples: "show me mr beast's most popular video" → autonomous (navigate and show video)
+- User asks for data/information that you can provide directly without browser interaction
 
 If autonomous automation is needed, extract the GOAL (what the user wants to achieve).
 The goal should be a clear objective that captures the user's FULL intent, including:
@@ -5227,8 +5519,13 @@ Examples:
 "show me you signing up" -> {{"needs_autonomous": true, "goal": "show me you signing up"}}
 "show me the page of wordle" -> {{"needs_autonomous": true, "goal": "show me the page of wordle"}}
 "show me you doing this" -> {{"needs_autonomous": true, "goal": "show me you doing this"}}
+"show me mr beast's most popular video" -> {{"needs_autonomous": true, "goal": "show me mr beast's most popular video"}}
 "take a screenshot of reddit.com" -> {{"needs_autonomous": false, "goal": null}}
 "show me this website" -> {{"needs_autonomous": false, "goal": null}}
+"show me the link to mr beast's most popular video" -> {{"needs_autonomous": false, "goal": null}}
+"give me the link to X" -> {{"needs_autonomous": false, "goal": null}}
+"what's the link to Y" -> {{"needs_autonomous": false, "goal": null}}
+"find me the link to Z" -> {{"needs_autonomous": false, "goal": null}}
 
 Now analyze: """
     
@@ -6741,6 +7038,124 @@ async def extract_discord_metadata(message: discord.Message) -> str:
         return "\n".join(metadata_parts) + "\n\n(You can reference any of this Discord context when relevant to the conversation. Use it naturally when it helps you understand or respond to the user.)"
     return ""
 
+async def ai_parse_discord_command(message: discord.Message, guild_id: str = None) -> dict:
+    """AI-driven parser for Discord commands (go to channel, mention roles, store reminders, etc.)
+    
+    Returns dict with:
+    - needs_discord_action: bool
+    - action_type: str (e.g., "send_message", "store_memory", "query_memory")
+    - target_channel: str (channel name or ID)
+    - target_role: str (role name or @everyone)
+    - message_content: str
+    - memory_type: str (e.g., "reminder", "birthday", "event", "channel_instruction")
+    - memory_data: dict
+    """
+    if not guild_id or not message.guild:
+        return {"needs_discord_action": False}
+    
+    content = (message.content or "").strip()
+    if not content:
+        return {"needs_discord_action": False}
+    
+    # Get server structure for context
+    server_structure = None
+    try:
+        server_structure = await db.get_server_structure(guild_id)
+    except:
+        pass
+    
+    channels_info = ""
+    if server_structure and server_structure.get('channels'):
+        channels = server_structure['channels'][:20]
+        channels_info = "\n".join([f"- {ch.get('name', 'unknown')} (ID: {ch.get('id', 'unknown')})" for ch in channels])
+    
+    # Get roles info
+    roles_info = ""
+    try:
+        if message.guild:
+            roles = [role for role in message.guild.roles if role.name != '@everyone'][:20]
+            roles_info = "\n".join([f"- {role.name} (ID: {role.id})" for role in roles])
+    except:
+        pass
+    
+    prompt = f"""You are parsing a Discord command to determine if the user wants you to:
+1. Send a message to a specific channel (possibly mentioning roles/users)
+2. Store server memory (reminders, birthdays, events, channel instructions)
+3. Query/retrieve server memory (show reminders, birthdays, etc.)
+
+User message: "{content}"
+
+Available channels in this server:
+{channels_info if channels_info else "No channel info available"}
+
+Available roles in this server:
+{roles_info if roles_info else "No role info available"}
+
+COMMAND TYPES:
+
+1. SEND MESSAGE TO CHANNEL:
+   - User wants you to send a message to a channel (possibly with mentions)
+   - Examples: "go to announcements @ everyone and talk about our future plans", "make a short announcement @ing everyone in announcements about the future of this server"
+   - YOU MUST: Intelligently pick the BEST channel, GENERATE the actual message content (don't just copy user's words), determine mentions
+   
+2. STORE MEMORY:
+   - User wants to store ANY information for the server
+   - Examples: "remind people of John's birthday @ everyone", "ONLY reply in this channel", "store weekly message every Monday", "save hourly reminder"
+   - YOU MUST: Create dynamic memory structure - store WHATEVER the user asks for in any structure that makes sense
+   
+3. QUERY MEMORY:
+   - "show me what reminders we have"
+   - "show me people's birthdays"
+   - "what reminders do we have?"
+   - "list birthdays"
+   
+Return JSON:
+{{
+    "needs_discord_action": true/false,
+    "action_type": "send_message" | "store_memory" | "query_memory" | null,
+    "target_channel": "BEST channel name from available channels (pick intelligently)" or null,
+    "target_role": "role name or @everyone" or null,
+    "target_user": "user mention or name" or null,
+    "message_content": "FULLY GENERATED message content (create the actual message, don't just copy user's words)" or null,
+    "memory_type": "any type (birthday, reminder, event, schedule, instruction, custom, etc.)" or null,
+    "memory_key": "unique key for this memory" or null,
+    "memory_data": {{"fully dynamic structure - store whatever user needs"}} or null,
+    "query_type": "reminders" | "birthdays" | "events" | "all" or null
+}}
+
+CRITICAL FOR SEND_MESSAGE:
+- If user says "make a short announcement @ing everyone in announcements about the future of this server":
+  * target_channel: Pick the best "announcements" channel from available channels (intelligently match even if name isn't exact)
+  * message_content: GENERATE a proper short announcement about the server's future (don't just copy user's words - create the actual message)
+  * target_role: "@everyone"
+  
+CRITICAL FOR STORE_MEMORY:
+- Store ANYTHING the user asks for - be fully dynamic
+- Examples:
+  * "store weekly message every Monday" → memory_type: "schedule", memory_data: {{"frequency": "weekly", "day": "Monday", "type": "message"}}
+  * "save hourly reminder" → memory_type: "reminder", memory_data: {{"frequency": "hourly"}}
+  * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
+  * Store in whatever structure makes sense - be flexible and dynamic!
+
+Be smart and extract all relevant information. Return needs_discord_action=false if this is just a normal conversation."""
+    
+    try:
+        decision_model = get_fast_model()
+        response = await queued_generate_content(decision_model, prompt)
+        response_text = response.text.strip()
+        
+        # Parse JSON
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0]
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0]
+        
+        parsed = await parse_ai_json_response(response_text, context_label="discord-command", goal=content)
+        return parsed if parsed else {"needs_discord_action": False}
+    except Exception as e:
+        print(f"⚠️  Error parsing Discord command: {e}")
+        return {"needs_discord_action": False}
+
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
     import time
@@ -6756,6 +7171,128 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
         guild_id = str(message.guild.id) if message.guild else None
         
         print(f"⏱️  [{username}] Starting response generation...")
+        
+        # Check for Discord commands (go to channel, store memory, etc.) - EFFICIENT: only when likely needed
+        discord_command_result = None
+        discord_command = None
+        if guild_id:
+            # Quick heuristic check first (no AI call) - only parse if likely a command
+            content_lower = (message.content or "").lower()
+            likely_discord_command = any(phrase in content_lower for phrase in [
+                'go to', 'send to', 'post in', 'channel', 'announcements',
+                'remind', 'reminder', 'birthday', 'birthdays',
+                'show me what reminders', 'show me reminders', 'list reminders',
+                'show me birthdays', 'list birthdays', 'only reply in this',
+                'store', 'remember', 'save this'
+            ])
+            
+            if likely_discord_command:
+                try:
+                    # Run in parallel with other processing to reduce latency
+                    discord_command = await ai_parse_discord_command(message, guild_id)
+                    if discord_command.get('needs_discord_action'):
+                        print(f"🎯 [{username}] Discord command detected: {discord_command.get('action_type')}")
+                        
+                        # Handle send_message action - AI decides channel and generates message
+                        if discord_command.get('action_type') == 'send_message':
+                            target_channel_name = discord_command.get('target_channel')
+                            target_role = discord_command.get('target_role')
+                            message_content = discord_command.get('message_content')  # AI-generated message
+                            
+                            if target_channel_name and message_content:
+                                try:
+                                    # AI-driven channel selection - find best match (fuzzy)
+                                    channel = None
+                                    target_lower = target_channel_name.lower()
+                                    
+                                    # Try exact match first
+                                    for ch in message.guild.text_channels:
+                                        if ch.name.lower() == target_lower or str(ch.id) == target_channel_name:
+                                            channel = ch
+                                            break
+                                    
+                                    # If no exact match, try fuzzy matching (AI picked channel name, find closest)
+                                    if not channel:
+                                        best_match = None
+                                        best_score = 0
+                                        for ch in message.guild.text_channels:
+                                            ch_name_lower = ch.name.lower()
+                                            # Check if target is contained in channel name or vice versa
+                                            if target_lower in ch_name_lower or ch_name_lower in target_lower:
+                                                score = len(set(target_lower) & set(ch_name_lower))
+                                                if score > best_score:
+                                                    best_score = score
+                                                    best_match = ch
+                                        channel = best_match
+                                    
+                                    if channel:
+                                        # Build message with mentions (AI already decided what to mention)
+                                        final_message = message_content  # Use AI-generated message
+                                        if target_role:
+                                            if target_role.lower() == '@everyone':
+                                                final_message = f"@everyone {final_message}"
+                                            else:
+                                                # Find role (AI picked the role name)
+                                                role = discord.utils.get(message.guild.roles, name=target_role)
+                                                if role:
+                                                    final_message = f"{role.mention} {final_message}"
+                                        
+                                        await channel.send(final_message)
+                                        discord_command_result = f"✅ Sent AI-generated message to #{channel.name}: {final_message}"
+                                    else:
+                                        discord_command_result = f"❌ Could not find channel matching '{target_channel_name}'"
+                                except Exception as e:
+                                    discord_command_result = f"❌ Error sending message: {str(e)}"
+                        
+                        # Handle store_memory action - AI decides structure dynamically
+                        elif discord_command.get('action_type') == 'store_memory':
+                            memory_type = discord_command.get('memory_type')  # AI decides type (can be anything)
+                            memory_key = discord_command.get('memory_key')  # AI creates unique key
+                            memory_data = discord_command.get('memory_data', {})  # AI creates dynamic structure
+                            
+                            # AI can store ANYTHING - fully dynamic
+                            if memory_type and memory_key and memory_data:
+                                try:
+                                    await memory.store_server_memory(
+                                        guild_id, memory_type, memory_key, memory_data, user_id
+                                    )
+                                    discord_command_result = f"✅ Stored {memory_type} memory: {memory_key} (fully dynamic structure)"
+                                except Exception as e:
+                                    discord_command_result = f"❌ Error storing memory: {str(e)}"
+                        
+                        # Handle query_memory action
+                        elif discord_command.get('action_type') == 'query_memory':
+                            query_type = discord_command.get('query_type', 'all')
+                            try:
+                                memories = await memory.get_server_memory(guild_id)
+                                if not memories:
+                                    discord_command_result = "No server memories found."
+                                else:
+                                    # Filter by query_type
+                                    if query_type != 'all':
+                                        memories = [m for m in memories if m.get('memory_type') == query_type]
+                                    
+                                    if not memories:
+                                        discord_command_result = f"No {query_type} memories found."
+                                    else:
+                                        # Format response
+                                        response_parts = []
+                                        for mem in memories[:20]:  # Limit to 20
+                                            mem_type = mem.get('memory_type', 'unknown')
+                                            mem_key = mem.get('memory_key', 'unknown')
+                                            mem_data = mem.get('memory_data', {})
+                                            response_parts.append(f"**{mem_type}** - {mem_key}: {json.dumps(mem_data, indent=2)}")
+                                        
+                                        discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
+                            except Exception as e:
+                                discord_command_result = f"❌ Error querying memory: {str(e)}"
+                except Exception as e:
+                    print(f"⚠️  Error handling Discord command: {e}")
+        
+        # If Discord command was executed, add result to context for AI to respond
+        if discord_command_result:
+            # Add to message content so AI can acknowledge it
+            message.content = (message.content or "") + f"\n\n[System: {discord_command_result}]"
         
         # Check if user wants a conversation summary
         MAX_SUMMARY_MESSAGES = 200  # Maximum messages to fetch for summary
@@ -6930,15 +7467,29 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
 - ✅ **Discord Context Awareness**: You can see and understand Discord-specific elements when they're relevant:
-  * **Stickers** - You can see what stickers users send and reference them naturally
-  * **GIFs** - You can see GIFs shared in messages (from embeds, attachments, or GIF links)
-  * **User Roles** - You can see Discord roles users have (with colors if available) - use this to understand context, hierarchy, or when users mention roles
-  * **Channels & Categories** - You can see what channel and category the conversation is in - reference these when relevant
-  * **Profile Pictures** - You can see user profile picture URLs - use this when discussing avatars or visual identity
+  * **Stickers** - You can SEE and ANALYZE stickers users send! When a user sends a sticker, you receive the actual image data. You can describe what's in the sticker, analyze it visually, or use it for any inquiry. Users can ask you to "analyze this sticker" and you'll see it visually. You can reference stickers naturally in conversation.
+  * **GIFs** - You can SEE and ANALYZE GIFs from embeds or attachments! You receive the actual image/GIF data and can describe animations, content, themes, and what's happening in the GIF. Users can ask you to "analyze this GIF" and you'll see it visually.
+  * **Profile Pictures** - You can SEE user profile pictures! When a user mentions their profile picture or avatar, you receive the actual image data. Users can ask you to:
+    - "send me my profile picture" - You should send it back to them (use the !avatar command or send the image directly)
+    - "turn my profile picture into X" - You should edit/transform their profile picture using image editing capabilities
+    - "analyze my profile picture" - You should describe what you see in their profile picture visually
+    - "what's in my profile picture" - Describe the visual content
+  * **Server Icons** - You can see server icons when relevant. Users can ask you to "send me the server icon" and you'll receive the image data.
+  * **Role Icons** - You can see role icons if available. You can reference roles visually when discussing them.
+  * **User Roles** - You can see Discord roles users have (with colors if available) - use this to understand context, hierarchy, or when users mention roles. You can see role names, colors, and icons.
+  * **Channels & Categories** - You can see what channel and category the conversation is in - reference these when relevant. You have access to channel names, categories, and server structure. You can reference channels by name when users ask about them.
   * **Server Information** - You can see server names, icons, and descriptions when in a guild
   * **Message Reactions** - You can see emoji reactions on messages
   * **Embeds** - You can see rich embeds with titles, descriptions, images, and URLs
-  * Use Discord context naturally when it helps you understand or respond - don't force it, but don't ignore it either. If someone mentions their role, a sticker they used, or the channel they're in, you can reference it naturally.
+  * Use Discord context naturally when it helps you understand or respond - don't force it, but don't ignore it either. If someone mentions their role, a sticker they used, or the channel they're in, you can reference it naturally. When users ask about Discord entities (stickers, profile pictures, roles, channels), you can see and analyze them visually!
+- ✅ **Server Memory & Discord Actions**: You can store and retrieve server-specific information dynamically! Each server has its own memory where you can store:
+  * **Reminders** - "remind me of an event next week at 6 pm", "remind people of someone's birthday @ everyone"
+  * **Birthdays** - "add John's birthday on March 15", "remind people of Sarah's birthday @ everyone"
+  * **Events** - Store event information with dates and descriptions
+  * **Channel Instructions** - "ONLY reply in this channel" - you'll remember and follow channel-specific rules
+  * **Query Memory** - "show me what reminders we have", "show me people's birthdays", "list all events"
+  * **Discord Actions** - "go to announcements @ everyone and talk about our future plans" - you can send messages to specific channels and mention roles
+  * All server memory is dynamic - you create the fields you need, and each server has its own isolated memory. You can store ANYTHING the server needs to remember!
 
 YOUR CAPABILITIES - HOW TO RESPOND:
 When users ask "what can you do?", "what are your capabilities?", "what can you help with?", "what features do you have?", etc., respond naturally in your own words based on the capabilities listed above. Be enthusiastic and helpful - explain what you can do in a friendly, conversational way. You can mention specific examples like:
@@ -7151,6 +7702,22 @@ CURRENT CONVERSATION CONTEXT:
                     except Exception as e:
                         print(f"Error downloading image: {e}")
         
+        # Extract Discord visual assets (stickers, GIFs, profile pictures, etc.) from current message
+        try:
+            discord_assets = await extract_discord_visual_assets(message)
+            for asset in discord_assets:
+                image_parts.append({
+                    'mime_type': asset['mime_type'],
+                    'data': asset['data'],
+                    'is_current': True,
+                    'discord_type': asset.get('type'),
+                    'discord_name': asset.get('name'),
+                    'discord_description': asset.get('description')
+                })
+                print(f"📸 [{username}] Added Discord visual asset: {asset.get('type', 'unknown')} ({len(asset['data'])} bytes)")
+        except Exception as e:
+            print(f"⚠️  [{username}] Error extracting Discord visual assets: {e}")
+        
         # If replying to a message, also get images from that message
         if message.reference and not image_parts:  # Only if user didn't send their own images
             try:
@@ -7186,6 +7753,30 @@ CURRENT CONVERSATION CONTEXT:
                                             print(f"⚠️  [{username}] Failed to add screenshot from replied message: {screenshot_error}")
                             except Exception as e:
                                 print(f"Error downloading replied image: {e}")
+                
+                # Also extract Discord visual assets from replied message (AI decides what's needed)
+                try:
+                    # For replied messages, extract everything since user is likely asking about it
+                    replied_assets_needed = {
+                        'profile_picture': True,
+                        'sticker': True,
+                        'gif': True,
+                        'server_icon': False,  # Usually not needed from replied message
+                        'role_icon': False
+                    }
+                    replied_discord_assets = await extract_discord_visual_assets(replied_msg, replied_assets_needed)
+                    for asset in replied_discord_assets:
+                        image_parts.append({
+                            'mime_type': asset['mime_type'],
+                            'data': asset['data'],
+                            'is_current': False,
+                            'discord_type': asset.get('type'),
+                            'discord_name': asset.get('name'),
+                            'discord_description': asset.get('description')
+                        })
+                        print(f"📸 [{username}] Added Discord visual asset from replied message: {asset.get('type', 'unknown')} ({len(asset['data'])} bytes)")
+                except Exception as e:
+                    print(f"⚠️  [{username}] Error extracting Discord visual assets from replied message: {e}")
             except Exception as e:
                 print(f"Error fetching replied message images: {e}")
         
@@ -10633,7 +11224,9 @@ async def help_command(interaction: discord.Interaction):
             "• **Create Documents** - Generate PDF/Word files from code or content\n"
             "• **Read Web Pages** - Share links and I'll read the content\n"
             "• **Remember Conversations** - I build personality profiles over time\n"
-            "• **Multi-modal** - Process text, images, and documents together"
+            "• **Multi-modal** - Process text, images, and documents together\n"
+            "• **Server Memory** - Store reminders, birthdays, events, and channel instructions per server\n"
+            "• **Discord Actions** - Send messages to channels, mention roles, and interact with Discord dynamically"
         ),
         inline=False
     )
@@ -10826,6 +11419,125 @@ async def generate_image_command(ctx, *, prompt: str):
                 await ctx.send("Failed to generate image. Try again!")
         except Exception as e:
             await ctx.send(f"Image generation error: {str(e)}")
+
+@bot.command(name='avatar')
+async def get_avatar_command(ctx, user: discord.Member = None):
+    """Get a user's profile picture (or your own if no user specified)"""
+    target_user = user or ctx.author
+    try:
+        avatar_url = str(target_user.display_avatar.url)
+        avatar_data = await download_image(avatar_url)
+        if avatar_data:
+            file = discord.File(fp=BytesIO(avatar_data), filename=f'{target_user.display_name}_avatar.png')
+            embed = discord.Embed(
+                title=f"{target_user.display_name}'s Profile Picture",
+                color=target_user.color if hasattr(target_user, 'color') and target_user.color.value != 0 else discord.Color.blue()
+            )
+            embed.set_image(url=f"attachment://{target_user.display_name}_avatar.png")
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(f"Could not download {target_user.display_name}'s profile picture.")
+    except Exception as e:
+        await ctx.send(f"Error getting profile picture: {str(e)}")
+
+@bot.command(name='servericon')
+async def get_server_icon_command(ctx):
+    """Get the server's icon"""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server!")
+        return
+    try:
+        if ctx.guild.icon:
+            icon_url = str(ctx.guild.icon.url)
+            icon_data = await download_image(icon_url)
+            if icon_data:
+                file = discord.File(fp=BytesIO(icon_data), filename=f'{ctx.guild.name}_icon.png')
+                embed = discord.Embed(
+                    title=f"{ctx.guild.name}'s Server Icon",
+                    color=discord.Color.blue()
+                )
+                embed.set_image(url=f"attachment://{ctx.guild.name}_icon.png")
+                await ctx.send(embed=embed, file=file)
+            else:
+                await ctx.send("Could not download the server icon.")
+        else:
+            await ctx.send("This server doesn't have an icon.")
+    except Exception as e:
+        await ctx.send(f"Error getting server icon: {str(e)}")
+
+@bot.command(name='analyze')
+async def analyze_command(ctx):
+    """Analyze stickers, GIFs, or images from the replied message"""
+    if not ctx.message.reference:
+        await ctx.send("Please reply to a message with a sticker, GIF, or image to analyze!")
+        return
+    
+    try:
+        replied_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        
+        # Extract visual assets from the replied message
+        visual_assets = await extract_discord_visual_assets(replied_msg)
+        
+        # Also check for regular attachments
+        if replied_msg.attachments:
+            for attachment in replied_msg.attachments:
+                if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                    try:
+                        image_data = await download_image(attachment.url)
+                        if image_data:
+                            mime_type = attachment.content_type or 'image/png'
+                            visual_assets.append({
+                                'mime_type': mime_type,
+                                'data': image_data,
+                                'type': 'attachment',
+                                'name': attachment.filename
+                            })
+                    except Exception as e:
+                        print(f"Error downloading attachment: {e}")
+        
+        if not visual_assets:
+            await ctx.send("No stickers, GIFs, or images found in that message!")
+            return
+        
+        async with ctx.typing():
+            # Analyze each visual asset
+            analyses = []
+            for asset in visual_assets:
+                try:
+                    asset_type = asset.get('type', 'image')
+                    asset_name = asset.get('name', 'Unknown')
+                    
+                    # Create analysis prompt
+                    if asset_type == 'sticker':
+                        prompt = f"Analyze this Discord sticker named '{asset_name}'. Describe what you see in detail, including any text, characters, emotions, style, and overall theme."
+                    elif asset_type == 'gif':
+                        prompt = f"Analyze this GIF. Describe what's happening, the animation, any characters or objects, and the overall mood or theme."
+                    elif asset_type == 'profile_picture':
+                        prompt = f"Analyze this Discord profile picture. Describe the image in detail, including any characters, objects, colors, style, and overall aesthetic."
+                    else:
+                        prompt = f"Analyze this image in detail. Describe what you see, including any objects, people, text, colors, style, and overall composition."
+                    
+                    # Use vision model to analyze
+                    vision_model = get_vision_model()
+                    image_part = Image.open(BytesIO(asset['data']))
+                    response = await queued_generate_content(vision_model, [prompt, image_part])
+                    
+                    analysis_text = response.text if response and response.text else "Could not analyze this image."
+                    analyses.append(f"**{asset_type.upper()} ({asset_name}):**\n{analysis_text}")
+                except Exception as e:
+                    analyses.append(f"**{asset_type.upper()} ({asset_name}):** Error analyzing: {str(e)}")
+            
+            # Send analysis
+            analysis_text = "\n\n".join(analyses)
+            if len(analysis_text) > 2000:
+                # Split into chunks
+                chunks = [analysis_text[i:i+2000] for i in range(0, len(analysis_text), 2000)]
+                for chunk in chunks:
+                    await ctx.send(chunk)
+            else:
+                await ctx.send(analysis_text)
+    except Exception as e:
+        await ctx.send(f"Error analyzing: {str(e)}")
 
 @bot.event
 async def on_disconnect():

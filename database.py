@@ -101,11 +101,77 @@ class Database:
                 )
             ''')
             
+            # Server configurations table - stores per-server settings
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS server_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    updated_by TEXT
+                )
+            ''')
+            
+            # Reminders table - stores user and server reminders
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT,
+                    user_id TEXT NOT NULL,
+                    reminder_text TEXT NOT NULL,
+                    trigger_at TIMESTAMP NOT NULL,
+                    channel_id TEXT,
+                    target_user_id TEXT,
+                    target_role_id TEXT,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            ''')
+            
+            # Scheduled messages table - stores periodic/recurring messages
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS scheduled_messages (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    message_content TEXT NOT NULL,
+                    schedule_type TEXT NOT NULL CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly', 'birthday')),
+                    next_run_at TIMESTAMP NOT NULL,
+                    last_run_at TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    mentions JSONB,
+                    metadata JSONB
+                )
+            ''')
+            
+            # Server memory table - stores dynamic server-specific data (reminders, birthdays, events, channel instructions, etc.)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS server_memory (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    memory_key TEXT NOT NULL,
+                    memory_data JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    created_by TEXT,
+                    UNIQUE(guild_id, memory_type, memory_key)
+                )
+            ''')
+            
             # Create indexes for performance
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_interactions_user_id ON interactions(user_id)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_consciousness_timestamp ON consciousness_stream(timestamp)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_bans_expires ON server_bans(expires_at)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_reminders_trigger_at ON reminders(trigger_at) WHERE is_completed = FALSE')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_scheduled_messages_next_run ON scheduled_messages(next_run_at) WHERE is_active = TRUE')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_scheduled_messages_guild ON scheduled_messages(guild_id)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_memory_guild ON server_memory(guild_id)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_memory_type ON server_memory(memory_type)')
             
             print("Database initialized successfully")
     
@@ -540,6 +606,205 @@ class Database:
                 return row['channel_id']
             return None
     
+    # Server configuration methods
+    async def get_server_config(self, guild_id: str):
+        """Get server configuration"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT config FROM server_configs WHERE guild_id = $1
+            ''', guild_id)
+            
+            if row:
+                config = row['config']
+                return json.loads(config) if isinstance(config, str) else config
+            return {}
+    
+    async def update_server_config(self, guild_id: str, config: dict, updated_by: str = None):
+        """Update server configuration"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO server_configs (guild_id, config, updated_by, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (guild_id) 
+                DO UPDATE SET 
+                    config = $2,
+                    updated_by = $3,
+                    updated_at = NOW()
+            ''', guild_id, json.dumps(config), updated_by)
+    
+    # Reminder methods
+    async def create_reminder(self, user_id: str, reminder_text: str, trigger_at: datetime,
+                            guild_id: str = None, channel_id: str = None, 
+                            target_user_id: str = None, target_role_id: str = None):
+        """Create a reminder"""
+        async with self.pool.acquire() as conn:
+            reminder_id = await conn.fetchval('''
+                INSERT INTO reminders 
+                (guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING id
+            ''', guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id)
+            return reminder_id
+    
+    async def get_pending_reminders(self, before_time: datetime = None):
+        """Get reminders that should be triggered"""
+        async with self.pool.acquire() as conn:
+            if before_time is None:
+                before_time = datetime.now()
+            
+            rows = await conn.fetch('''
+                SELECT * FROM reminders
+                WHERE is_completed = FALSE
+                AND trigger_at <= $1
+                ORDER BY trigger_at ASC
+            ''', before_time)
+            return [dict(row) for row in rows]
+    
+    async def complete_reminder(self, reminder_id: int):
+        """Mark reminder as completed"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE reminders
+                SET is_completed = TRUE, completed_at = NOW()
+                WHERE id = $1
+            ''', reminder_id)
+    
+    async def get_user_reminders(self, user_id: str, include_completed: bool = False):
+        """Get reminders for a user"""
+        async with self.pool.acquire() as conn:
+            if include_completed:
+                rows = await conn.fetch('''
+                    SELECT * FROM reminders
+                    WHERE user_id = $1
+                    ORDER BY trigger_at DESC
+                ''', user_id)
+            else:
+                rows = await conn.fetch('''
+                    SELECT * FROM reminders
+                    WHERE user_id = $1 AND is_completed = FALSE
+                    ORDER BY trigger_at ASC
+                ''', user_id)
+            return [dict(row) for row in rows]
+    
+    # Scheduled message methods
+    async def create_scheduled_message(self, guild_id: str, channel_id: str, message_content: str,
+                                     schedule_type: str, next_run_at: datetime, created_by: str,
+                                     mentions: dict = None, metadata: dict = None):
+        """Create a scheduled message"""
+        async with self.pool.acquire() as conn:
+            scheduled_id = await conn.fetchval('''
+                INSERT INTO scheduled_messages
+                (guild_id, channel_id, message_content, schedule_type, next_run_at, created_by, mentions, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id
+            ''', guild_id, channel_id, message_content, schedule_type, next_run_at, created_by,
+            json.dumps(mentions or {}), json.dumps(metadata or {}))
+            return scheduled_id
+    
+    async def get_due_scheduled_messages(self, before_time: datetime = None):
+        """Get scheduled messages that are due"""
+        async with self.pool.acquire() as conn:
+            if before_time is None:
+                before_time = datetime.now()
+            
+            rows = await conn.fetch('''
+                SELECT * FROM scheduled_messages
+                WHERE is_active = TRUE
+                AND next_run_at <= $1
+                ORDER BY next_run_at ASC
+            ''', before_time)
+            return [dict(row) for row in rows]
+    
+    async def update_scheduled_message_next_run(self, scheduled_id: int, next_run_at: datetime, last_run_at: datetime = None):
+        """Update next run time for scheduled message"""
+        async with self.pool.acquire() as conn:
+            if last_run_at:
+                await conn.execute('''
+                    UPDATE scheduled_messages
+                    SET next_run_at = $1, last_run_at = $2
+                    WHERE id = $3
+                ''', next_run_at, last_run_at, scheduled_id)
+            else:
+                await conn.execute('''
+                    UPDATE scheduled_messages
+                    SET next_run_at = $1
+                    WHERE id = $2
+                ''', next_run_at, scheduled_id)
+    
+    async def deactivate_scheduled_message(self, scheduled_id: int):
+        """Deactivate a scheduled message"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE scheduled_messages
+                SET is_active = FALSE
+                WHERE id = $1
+            ''', scheduled_id)
+    
+    async def get_server_scheduled_messages(self, guild_id: str):
+        """Get all scheduled messages for a server"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM scheduled_messages
+                WHERE guild_id = $1
+                ORDER BY next_run_at ASC
+            ''', guild_id)
+            return [dict(row) for row in rows]
+    
+    # Server memory methods
+    async def store_server_memory(self, guild_id: str, memory_type: str, memory_key: str, 
+                                  memory_data: dict, created_by: str = None):
+        """Store or update server memory (dynamic data storage)"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO server_memory (guild_id, memory_type, memory_key, memory_data, created_by, updated_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (guild_id, memory_type, memory_key)
+                DO UPDATE SET 
+                    memory_data = $4,
+                    updated_at = NOW()
+            ''', guild_id, memory_type, memory_key, json.dumps(memory_data), created_by)
+    
+    async def get_server_memory(self, guild_id: str, memory_type: str = None, memory_key: str = None):
+        """Get server memory - can filter by type and/or key"""
+        async with self.pool.acquire() as conn:
+            if memory_type and memory_key:
+                row = await conn.fetchrow('''
+                    SELECT * FROM server_memory
+                    WHERE guild_id = $1 AND memory_type = $2 AND memory_key = $3
+                ''', guild_id, memory_type, memory_key)
+                if row:
+                    result = dict(row)
+                    result['memory_data'] = json.loads(result['memory_data']) if isinstance(result['memory_data'], str) else result['memory_data']
+                    return result
+                return None
+            elif memory_type:
+                rows = await conn.fetch('''
+                    SELECT * FROM server_memory
+                    WHERE guild_id = $1 AND memory_type = $2
+                    ORDER BY updated_at DESC
+                ''', guild_id, memory_type)
+            else:
+                rows = await conn.fetch('''
+                    SELECT * FROM server_memory
+                    WHERE guild_id = $1
+                    ORDER BY updated_at DESC
+                ''', guild_id)
+            
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['memory_data'] = json.loads(result['memory_data']) if isinstance(result['memory_data'], str) else result['memory_data']
+                results.append(result)
+            return results
+    
+    async def delete_server_memory(self, guild_id: str, memory_type: str, memory_key: str):
+        """Delete server memory entry"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                DELETE FROM server_memory
+                WHERE guild_id = $1 AND memory_type = $2 AND memory_key = $3
+            ''', guild_id, memory_type, memory_key)
+
     async def close(self):
         """Close database connection"""
         if self.pool:

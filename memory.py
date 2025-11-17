@@ -326,4 +326,18 @@ NOW: What did you learn from {username}? Be honest and specific."""
     async def get_stats(self):
         """Get memory system statistics"""
         return await self.db.get_stats()
+    
+    # Server memory methods
+    async def store_server_memory(self, guild_id: str, memory_type: str, memory_key: str, 
+                                  memory_data: dict, created_by: str = None):
+        """Store server-specific memory (reminders, birthdays, events, channel instructions, etc.)"""
+        return await self.db.store_server_memory(guild_id, memory_type, memory_key, memory_data, created_by)
+    
+    async def get_server_memory(self, guild_id: str, memory_type: str = None, memory_key: str = None):
+        """Get server memory - can filter by type and/or key"""
+        return await self.db.get_server_memory(guild_id, memory_type, memory_key)
+    
+    async def delete_server_memory(self, guild_id: str, memory_type: str, memory_key: str):
+        """Delete server memory entry"""
+        return await self.db.delete_server_memory(guild_id, memory_type, memory_key)
 
