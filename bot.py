@@ -1240,7 +1240,7 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
             return _edit_image_imagen_fallback(original_image_bytes, prompt)
         except Exception as fallback_error:
             print(f"❌ [IMAGE EDIT] Imagen fallback also failed: {fallback_error}")
-            raise
+        raise
 
 def _edit_image_imagen_fallback(original_image_bytes: bytes, prompt: str) -> Image:
     """Fallback to Imagen editing if Gemini fails"""
@@ -3197,17 +3197,42 @@ VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
   * DO NOT navigate away from the video page once it's playing
   * Example: Goal "record 10 seconds" → goal_achieved = true when you see the video playing (even if paused at start, that's fine - it will play)
 
-GOAL ACHIEVEMENT: Mark goal_achieved as TRUE when you reach the page/form the user asked for:
-  * If goal is "show me sign up" or "sign up" → goal_achieved = true when you see:
-    - Sign-up page/form
-    - Create account page/form
-    - Registration page/form
-    - Account creation page/form
-    - Any page with fields to create a new account (email, password, name, etc.)
-  * If goal is "show me login" → goal_achieved = true when you see login page/form
-  * If goal is "show me [specific page]" → goal_achieved = true when that page is visible
-  * If goal is "record X seconds" of a video → goal_achieved = true when the video is on screen and ready to play (even if paused)
-- IMPORTANT: "Create account", "Sign up", "Register", "Create your account" all mean the same thing - if you see any account creation form, the goal is achieved!
+GOAL ACHIEVEMENT - BE SMART AND DYNAMIC:
+Analyze what the user actually wants and mark goal_achieved = TRUE when you've achieved what they asked for.
+
+CRITICAL FOR MULTI-STEP PROCESSES:
+- If the goal involves MULTIPLE STEPS (e.g., "going to amazon, clicking sign up, filling out username and password"):
+  * Understand that these are SEQUENTIAL STEPS in ONE process
+  * You're making PROGRESS when you complete each step
+  * DO NOT go back if you're on the right path!
+  * Example: Goal "filling out username and password"
+    - Step 1: Fill username → DONE (you filled it!)
+    - Step 2: Password page appears → This is the NEXT STEP, not wrong! You're on the right path!
+    - Step 3: Fill password → DONE
+    - goal_achieved = true when BOTH username AND password are filled (or password page is visible with username already filled)
+  * If you see a password field after filling username → You're making progress! Don't go back!
+  * If you see "sign in" but you just filled username for sign-up → Check if there's a "Create account" link or if this is part of the sign-up flow
+  * Be smart: Some sites show "sign in" page but it's actually part of sign-up (they ask email first, then password)
+
+UNDERSTANDING USER INTENT:
+* "show me sign up" / "show me you signing up" → goal_achieved when you see sign-up/registration/account creation form/page OR when you've filled the required fields
+* "show me login" → goal_achieved when you see login page/form
+* "show me [specific page]" → goal_achieved when that page is visible
+* "show me the page of wordle" → goal_achieved when wordle game page is visible (just show the page, no need to play)
+* "show me you playing connections" / "show me you completing connections" → goal_achieved when you've started playing or completed the game
+* "show me you finishing wordle" → goal_achieved when you've completed/solved the wordle puzzle
+* "show me you doing [task]" → goal_achieved when you've completed the task
+* "filling out username and password" → goal_achieved when BOTH are filled (or password page is visible with username already filled - you're on the right path!)
+* "record X seconds" of video → goal_achieved when video is on screen and ready to play (system will record after)
+* "record me completing [game]" → goal_achieved when you've completed the game (system will record the process)
+
+KEY INSIGHT: Understand the USER'S INTENT, not just keywords:
+- If user says "show me the page" → they just want to SEE it (screenshot is enough)
+- If user says "show me you doing X" → they want to see you COMPLETE/DO it (interact and complete)
+- If user says "record" → they want VIDEO, not just screenshots
+- Be smart about synonyms: "sign up" = "register" = "create account" = "signup" (all mean the same)
+- Be smart about context: "show me wordle" might mean "show me the wordle page" (just screenshot) vs "show me you playing wordle" (interact and complete)
+- Be smart about multi-step processes: If you've completed step 1 and see step 2 → You're making progress! Don't go back!
 
 LOOP DETECTION & RECOVERY:
 Recent actions taken: {action_history_text}
@@ -3219,6 +3244,12 @@ Recent actions taken: {action_history_text}
   * Looking for alternative navigation paths
 - If you're on the WRONG website/page (e.g., goal is "skribbl" but you're on "payedsurveys.com") → go back and try again!
 - If an element isn't working after 2-3 tries → it's probably not the right element, try something else!
+
+CRITICAL: AVOID FALSE LOOPS - Don't go back if you're making progress!
+- If you filled username and see password page → This is PROGRESS, not wrong! Continue forward!
+- If you're on step 2 of a multi-step process → You're on the right path! Don't go back to step 1!
+- Only go back if you're TRULY on the wrong page or stuck
+- If you see a page that's part of the process (e.g., password page after username) → That's the NEXT STEP, continue!
 
 Return a JSON object with this exact format:
 {{
@@ -3387,14 +3418,41 @@ Decision: """
                             print(f"⚠️  [AUTONOMOUS] Error in duplicate check, skipping to avoid duplicates: {duplicate_check_error}")
                             should_save_screenshot = False
                     else:
-                        # First screenshot when goal achieved - always save
-                        should_save_screenshot = True
-                        print(f"📸 [AUTONOMOUS] Saving first screenshot of achieved goal")
+                        # First screenshot when goal achieved - be smart about it
+                        if should_record_video:
+                            # When video is recording, only save if user explicitly asked for screenshots
+                            # Check if goal contains explicit screenshot request
+                            goal_lower = goal.lower()
+                            user_wants_screenshots = any(keyword in goal_lower for keyword in ['screenshot', 'screenshot and', 'and screenshot', 'pic', 'image'])
+                            if user_wants_screenshots:
+                                should_save_screenshot = True
+                                print(f"📸 [AUTONOMOUS] Saving first screenshot of achieved goal (user explicitly requested screenshots)")
+                            else:
+                                should_save_screenshot = False
+                                print(f"⏭️  [AUTONOMOUS] Skipping screenshot - video is recording and user didn't explicitly ask for screenshots")
+                        else:
+                            # No video recording - always save first goal screenshot
+                            should_save_screenshot = True
+                            print(f"📸 [AUTONOMOUS] Saving first screenshot of achieved goal")
                 else:
                     # Ask AI if this screenshot shows progress toward the user's goal
+                    video_recording_context = ""
+                    if should_record_video:
+                        video_recording_context = f"""
+
+⚠️ IMPORTANT: VIDEO RECORDING IS ACTIVE - The entire process is being recorded as a video!
+- Screenshots are REDUNDANT when video is recording (the video already shows everything)
+- Only save screenshots if:
+  1. User EXPLICITLY asked for screenshots (e.g., "screenshot AND video")
+  2. OR the screenshot shows something TRULY USEFUL that the video might not capture well (e.g., a specific detail, error message, or static information that needs to be read carefully)
+- DO NOT save screenshots just because it's a milestone or progress - the video already shows that!
+- DO NOT save screenshots of intermediate steps, popups, or navigation - the video shows all of that!
+- When in doubt, return false - the video is enough!
+"""
+                    
                     screenshot_decision_prompt = f"""Look at this webpage screenshot. The user's goal is: "{goal}"
 
-You have already captured {len(screenshots)} screenshot(s).
+You have already captured {len(screenshots)} screenshot(s).{video_recording_context}
 
 Does this NEW screenshot show something the user would want to see that is DIFFERENT from previous screenshots? Consider:
 - Does it show NEW progress toward the goal that wasn't shown before?
@@ -3402,14 +3460,15 @@ Does this NEW screenshot show something the user would want to see that is DIFFE
 - Is it just the SAME page/content already shown (don't show duplicates!)?
 - Is it just an intermediate step (like dismissing a banner) that doesn't show the goal?
 
-CRITICAL: Only return true if this screenshot shows something NEW/DIFFERENT. If it's the same page or content as previous screenshots, return false.
+CRITICAL: Only return true if this screenshot shows something NEW/DIFFERENT AND USEFUL. If it's the same page or content as previous screenshots, return false.
+{video_recording_context}
 
 User asked for: "{goal}"
 
 Return JSON:
 {{
     "worth_showing": true/false,
-    "reason": "why this screenshot is or isn't worth showing (is it new/different?)"
+    "reason": "why this screenshot is or isn't worth showing (is it new/different/useful?)"
 }}
 
 Examples:
@@ -3417,6 +3476,9 @@ Examples:
 - Goal: "show me sign up", previous screenshots show sign-up page, new screenshot shows same sign-up page → {{"worth_showing": false, "reason": "This is the same sign-up page already shown"}}
 - Goal: "show me sign up", screenshot shows homepage → {{"worth_showing": false, "reason": "This is just the homepage, not the sign-up page"}}
 - Goal: "show me sign up", screenshot shows dismissing a banner → {{"worth_showing": false, "reason": "This is just dismissing a banner, not showing the goal"}}
+- Goal: "record me completing game" + VIDEO RECORDING ACTIVE, screenshot shows game progress → {{"worth_showing": false, "reason": "Video is recording, this progress is already captured in the video"}}
+- Goal: "record me completing game" + VIDEO RECORDING ACTIVE, screenshot shows final completion screen → {{"worth_showing": false, "reason": "Video is recording, the completion is already captured in the video"}}
+- Goal: "screenshot AND record video", screenshot shows important detail → {{"worth_showing": true, "reason": "User explicitly asked for screenshots, and this shows an important detail"}}
 
 Decision: """
                     
@@ -4251,7 +4313,18 @@ AUTONOMOUS automation is NOT needed when:
 - No goal is mentioned, just "show me this website" (unless it requires navigation/interaction)
 
 If autonomous automation is needed, extract the GOAL (what the user wants to achieve).
-The goal should be a clear objective that captures the user's intent:
+The goal should be a clear objective that captures the user's FULL intent, including:
+- ALL actions the user mentioned (e.g., "going to amazon, clicking sign up, filling out username and password")
+- Video recording requests (e.g., "send me a video", "record this", "video of", "ONLY video")
+- The complete task, not just part of it
+
+CRITICAL: If the user mentions "video", "record", "recording", "send me a video", "ONLY video", etc. → INCLUDE that in the goal!
+Examples:
+- "show me sign up and send me a video" → goal: "show me sign up and record video"
+- "fill out form and send me a video ONLY" → goal: "fill out form and record video"
+- "show me you going to amazon, clicking sign up and filling out username and password and send me a video ONLY" → goal: "show me you going to amazon, clicking sign up and filling out username and password and record video"
+
+The goal should capture the user's FULL intent:
 - "show me sign up" or "show me you signing up" or "show sign up page"
 - "click on the first video"
 - "go to login page"
@@ -4263,7 +4336,8 @@ The goal should be a clear objective that captures the user's intent:
 - "record 30 seconds of the video"
 - "record the process"
 - "complete the game" or "solve the puzzle"
-- ANY task the user wants you to do - be smart and extract the goal dynamically!
+- "show me you going to amazon, clicking sign up and filling out username and password" (multi-step process)
+- ANY task the user wants you to do - be smart and extract the COMPLETE goal dynamically!
 
 Return JSON:
 {{
