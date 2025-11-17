@@ -1117,6 +1117,15 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
             print(f"🔍 [IMAGE EDIT] Candidate type: {type(candidate)}")
             print(f"🔍 [IMAGE EDIT] Candidate has content: {hasattr(candidate, 'content')}")
             
+            # Check finish_reason to understand why no image was returned
+            if hasattr(candidate, 'finish_reason'):
+                finish_reason = candidate.finish_reason
+                print(f"🔍 [IMAGE EDIT] Finish reason: {finish_reason} (type: {type(finish_reason)})")
+                if hasattr(finish_reason, 'name'):
+                    print(f"🔍 [IMAGE EDIT] Finish reason name: {finish_reason.name}")
+                if hasattr(finish_reason, 'value'):
+                    print(f"🔍 [IMAGE EDIT] Finish reason value: {finish_reason.value}")
+            
             if hasattr(candidate, 'content') and candidate.content:
                 parts = candidate.content.parts
                 print(f"🔍 [IMAGE EDIT] Number of parts: {len(parts)}")
@@ -1124,6 +1133,13 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
                 for i, part in enumerate(parts):
                     print(f"🔍 [IMAGE EDIT] Part {i} type: {type(part)}")
                     print(f"🔍 [IMAGE EDIT] Part {i} has inline_data: {hasattr(part, 'inline_data')}")
+                    print(f"🔍 [IMAGE EDIT] Part {i} has text: {hasattr(part, 'text')}")
+                    
+                    # Check for function_call or other response types
+                    if hasattr(part, 'function_call'):
+                        print(f"🔍 [IMAGE EDIT] Part {i} has function_call: {part.function_call}")
+                    if hasattr(part, 'function_response'):
+                        print(f"🔍 [IMAGE EDIT] Part {i} has function_response: {part.function_response}")
                     
                     if hasattr(part, 'inline_data') and part.inline_data:
                         print(f"🔍 [IMAGE EDIT] Found inline_data, extracting image...")
@@ -1167,9 +1183,19 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
                             continue
                     elif hasattr(part, 'text'):
                         # If no image in response, log the text
-                        print(f"⚠️  [IMAGE EDIT] Response contains text part: {part.text[:200] if part.text else 'None'}...")
+                        text_content = part.text[:500] if part.text else 'None'
+                        print(f"⚠️  [IMAGE EDIT] Response contains text part: {text_content}...")
+                        print(f"⚠️  [IMAGE EDIT] This suggests Gemini 2.5 Flash Image returned text instead of an edited image.")
+                        print(f"⚠️  [IMAGE EDIT] The model may not support direct image editing, or the response format is different.")
         
-        # Fallback: if no image in response, return original (or try alternative method)
+        # Check if we got any text response that might explain the issue
+        try:
+            if hasattr(response, 'text') and response.text:
+                print(f"⚠️  [IMAGE EDIT] Response text content: {response.text[:500]}...")
+        except:
+            pass
+        
+        # Fallback: if no image in response, return None (will trigger Imagen fallback)
         print(f"⚠️  [IMAGE EDIT] No image found in response, trying alternative approach...")
         
         # Alternative: Use the model's image generation with the original as reference
