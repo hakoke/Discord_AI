@@ -7395,7 +7395,8 @@ Decision: """
                         if autonomous_goal:
                             # Use fully autonomous automation - AI will handle everything dynamically
                             print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
-                            setattr(message, "_servermate_force_fast_model", True)
+                            if hasattr(message, "__dict__"):
+                                message._servermate_force_fast_model = True
                             screenshot_images, video_bytes = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
                             screenshot_attachments.extend(screenshot_images)
                             # Set screenshot_count for logging (autonomous mode returns variable number)
