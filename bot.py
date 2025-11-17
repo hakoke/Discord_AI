@@ -7359,9 +7359,13 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
     screenshot_attachments = []
     
     try:
-        # Get user info
+        # Get user info - GUARANTEE username is NEVER None (Discord can have None display_name/name)
         user_id = str(message.author.id)
-        username = message.author.display_name
+        # Try display_name first, then name, then user_id as string, finally "Unknown" - ONE of these MUST work
+        username = (message.author.display_name if message.author.display_name else None) or \
+                   (message.author.name if message.author.name else None) or \
+                   str(message.author.id) or \
+                   "Unknown"
         guild_id = str(message.guild.id) if message.guild else None
         
         print(f"⏱️  [{username}] Starting response generation...")
@@ -10148,9 +10152,12 @@ Now decide: "{message.content}" -> """
         
         # Store interaction in memory
         channel_id = str(message.channel.id) if message.channel else None
+        # FINAL SAFETY CHECK: Ensure username is NEVER None before storing (double-check)
+        # This should never trigger since username is set with fallbacks above, but safety first
+        safe_username = username if username and username.strip() else (str(message.author.id) if message.author else "Unknown")
         await memory.store_interaction(
             user_id=user_id,
-            username=username,
+            username=safe_username,
             guild_id=guild_id,
             user_message=message.content,
             bot_response=ai_response,
@@ -10163,7 +10170,7 @@ Now decide: "{message.content}" -> """
         
         # Analyze and update user memory (run in background to not block Discord)
         asyncio.create_task(
-            memory.analyze_and_update_memory(user_id, username, message.content, ai_response)
+            memory.analyze_and_update_memory(user_id, safe_username, message.content, ai_response)
         )
         
         print(f"📤 [{username}] Returning response with:")
@@ -10210,9 +10217,11 @@ Now decide: "{message.content}" -> """
         return result
         
     except Exception as e:
-        print(f"❌ [{username}] Error generating response: {e}")
+        # Get username safely for error logging (might not be set if exception happened early)
+        error_username = username if 'username' in locals() else (message.author.display_name if message.author else "Unknown")
+        print(f"❌ [{error_username}] Error generating response: {e}")
         import traceback
-        print(f"❌ [{username}] Full traceback:\n{traceback.format_exc()}")
+        print(f"❌ [{error_username}] Full traceback:\n{traceback.format_exc()}")
         
         # Provide user-friendly error messages
         error_str = str(e).lower()
