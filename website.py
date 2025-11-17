@@ -11,6 +11,8 @@ import json
 import aiohttp
 import time
 from functools import wraps
+import markdown
+import re
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'servermate-official-website-secret-key-change-in-production')
@@ -127,13 +129,34 @@ def tojson_filter(obj):
         raise TypeError(f"Type {type(obj)} not serializable")
     return json.dumps(obj, default=json_serial)
 
+def load_markdown_document(path: str, document_name: str):
+    """Load markdown file and convert to HTML"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        html_content = markdown.markdown(content, extensions=['extra'])
+        match = re.search(r'_Last updated:\s*(.+?)_', content)
+        last_updated = match.group(1) if match else None
+        return html_content, last_updated
+    except FileNotFoundError:
+        error_msg = f"⚠️ {document_name} file not found at {path}"
+        print(error_msg)
+        return f"<p>{error_msg}</p>", None
+    except Exception as e:
+        print(f"Error loading {document_name} ({path}): {e}")
+        import traceback
+        traceback.print_exc()
+        return f"<p>{document_name} is temporarily unavailable.</p>", None
+
+TERMS_HTML, TERMS_LAST_UPDATED = load_markdown_document('TERMS_OF_SERVICE.md', 'Terms of Service')
+PRIVACY_HTML, PRIVACY_LAST_UPDATED = load_markdown_document('PRIVACY_POLICY.md', 'Privacy Policy')
+
 # Route for profile picture
 @app.route('/profile.png')
 def profile_picture():
     """Serve the profile picture from images folder"""
     try:
         import os
-        from flask import Response
         
         images_dir = 'images'
         # Try different file formats in order of preference
@@ -442,6 +465,40 @@ PUBLIC_HTML = """
             font-size: 16px;
         }
         
+        /* Legal Section */
+        .legal {
+            padding: 80px 20px;
+        }
+        .legal-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        .legal-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 25px;
+        }
+        .legal-card h3 {
+            color: var(--text-accent);
+            margin-bottom: 10px;
+        }
+        .legal-card p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+        .legal-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+        }
+        .legal-card .btn {
+            width: 100%;
+            text-align: center;
+        }
+        
         @media (max-width: 768px) {
             .hero h1 { font-size: 36px; }
             .hero p { font-size: 18px; }
@@ -460,6 +517,9 @@ PUBLIC_HTML = """
             <div class="nav-links">
                 <a href="#features">Features</a>
                 <a href="#servers">Servers</a>
+                <a href="#legal">Legal</a>
+                <a href="/terms" target="_blank">Terms</a>
+                <a href="/privacy" target="_blank">Privacy</a>
                 <a href="{{ discord_invite }}" target="_blank">Discord</a>
                 <a href="/admin/login" class="btn btn-secondary">Admin</a>
             </div>
@@ -583,16 +643,147 @@ PUBLIC_HTML = """
         </div>
     </section>
     
+    <section id="legal" class="legal">
+        <div class="container">
+            <h2 class="section-title">Trust & Compliance</h2>
+            <div class="legal-grid">
+                <div class="legal-card">
+                    <h3>Terms of Service</h3>
+                    <div class="legal-meta">Last updated: {{ terms_last_updated or 'November 17, 2025' }}</div>
+                    <p>How ServerMate operates inside your community, admin responsibilities, and acceptable use.</p>
+                    <a href="/terms" class="btn btn-primary">View Terms</a>
+                </div>
+                <div class="legal-card">
+                    <h3>Privacy Policy</h3>
+                    <div class="legal-meta">Last updated: {{ privacy_last_updated or 'November 17, 2025' }}</div>
+                    <p>Learn what data ServerMate processes, why it is stored, and how to manage or delete it.</p>
+                    <a href="/privacy" class="btn btn-primary">View Privacy Policy</a>
+                </div>
+            </div>
+        </div>
+    </section>
+    
     <footer>
         <div class="container">
             <div class="footer-links">
                 <a href="{{ discord_invite }}" target="_blank">Discord Server</a>
                 <a href="https://top.gg/bot/1438667256866537482" target="_blank">Top.gg Page</a>
+                <a href="/terms" target="_blank">Terms of Service</a>
+                <a href="/privacy" target="_blank">Privacy Policy</a>
                 <a href="/admin/login">Admin Login</a>
             </div>
             <p>&copy; 2024 ServerMate. Complete AI assistant for Discord.</p>
         </div>
     </footer>
+</body>
+</html>
+"""
+
+LEGAL_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ document_title }} — ServerMate</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --primary: #5865F2;
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --border: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.7;
+            padding: 20px;
+        }
+        .container { max-width: 960px; margin: 0 auto; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        header a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin-right: 15px;
+        }
+        header a:hover { color: var(--text-primary); }
+        .btn {
+            padding: 10px 16px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-secondary { background: var(--border); color: var(--text-primary); }
+        .legal-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 30px;
+        }
+        .legal-card h1 { margin-bottom: 10px; }
+        .legal-card .meta {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+        .legal-content h2,
+        .legal-content h3 {
+            margin-top: 25px;
+            margin-bottom: 10px;
+            color: #79c0ff;
+        }
+        .legal-content p {
+            margin-bottom: 15px;
+        }
+        .legal-content ul {
+            margin-bottom: 15px;
+            padding-left: 20px;
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <a href="/">← Back to Website</a>
+                <a href="/terms">Terms</a>
+                <a href="/privacy">Privacy</a>
+                <a href="{{ discord_invite }}" target="_blank">Discord</a>
+            </div>
+            <a href="/" class="btn btn-secondary">Home</a>
+        </header>
+        <div class="legal-card">
+            <h1>{{ document_title }}</h1>
+            {% if last_updated %}
+            <div class="meta">Last updated: {{ last_updated }}</div>
+            {% endif %}
+            <div class="legal-content">
+                {{ document_html | safe }}
+            </div>
+        </div>
+        <footer>
+            Need the other policy? <a href="{{ alternate_url }}">{{ alternate_label }}</a>
+        </footer>
+    </div>
 </body>
 </html>
 """
@@ -1319,11 +1510,39 @@ def index():
             PUBLIC_HTML,
             stats=data['stats'],
             servers=data['servers'],
-            discord_invite=DISCORD_INVITE
+            discord_invite=DISCORD_INVITE,
+            terms_last_updated=TERMS_LAST_UPDATED,
+            privacy_last_updated=PRIVACY_LAST_UPDATED
         )
     except Exception as e:
         import traceback
         return f"<pre style='color: red;'>{str(e)}\n\n{traceback.format_exc()}</pre>", 500
+
+@app.route('/terms')
+def terms_page():
+    """Terms of Service page"""
+    return render_template_string(
+        LEGAL_TEMPLATE,
+        document_title="ServerMate Discord Bot — Terms of Service",
+        document_html=TERMS_HTML,
+        last_updated=TERMS_LAST_UPDATED,
+        alternate_url="/privacy",
+        alternate_label="Privacy Policy",
+        discord_invite=DISCORD_INVITE
+    )
+
+@app.route('/privacy')
+def privacy_page():
+    """Privacy Policy page"""
+    return render_template_string(
+        LEGAL_TEMPLATE,
+        document_title="ServerMate Discord Bot — Privacy Policy",
+        document_html=PRIVACY_HTML,
+        last_updated=PRIVACY_LAST_UPDATED,
+        alternate_url="/terms",
+        alternate_label="Terms of Service",
+        discord_invite=DISCORD_INVITE
+    )
 
 async def get_public_data():
     """Fetch public data for homepage"""

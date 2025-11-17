@@ -2429,6 +2429,127 @@ async def record_video_with_actions(url: str, actions: List[str] = None, duratio
         except:
             pass
 
+async def ensure_media_playback(page, playback_hint: str = ""):
+    """Attempt to start playback for generic video players without site-specific logic."""
+    try:
+        # Give the page a moment to render controls
+        await page.wait_for_timeout(750)
+
+        # Prefer interacting with actual <video> elements when possible
+        video_locator = page.locator("video").first
+        if await video_locator.count() > 0:
+            try:
+                box = await video_locator.bounding_box()
+                if box:
+                    await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+                    await page.wait_for_timeout(500)
+                    return
+            except Exception:
+                pass
+
+        # Generic play button selectors (text/aria-label only to avoid site-specific code)
+        generic_play_selectors = [
+            '[aria-label*="play" i]',
+            'button:has-text("Play")',
+            '[role="button"]:has-text("Play")',
+            'button[title*="Play" i]',
+        ]
+        for selector in generic_play_selectors:
+            try:
+                button = page.locator(selector).first
+                if await button.count() > 0:
+                    await button.click(timeout=3000)
+                    await page.wait_for_timeout(500)
+                    return
+            except Exception:
+                continue
+
+        # As a fallback, try focusing the body and sending standard video hotkeys (space/k)
+        try:
+            await page.keyboard.press("k")
+            await page.wait_for_timeout(300)
+            return
+        except Exception:
+            pass
+
+        try:
+            await page.keyboard.press(" ")
+        except Exception:
+            pass
+    except Exception as playback_error:
+        print(f"⚠️  [VIDEO] Unable to auto-play media: {playback_error}")
+
+async def record_content_only_video(browser, target_url: str, duration_seconds: int, storage_state = None, playback_hint: str = "") -> Optional[BytesIO]:
+    """Record only the final content (e.g., video playback) without the navigation steps."""
+    import tempfile
+
+    temp_dir = tempfile.mkdtemp()
+    video_dir = os.path.join(temp_dir, "videos")
+    os.makedirs(video_dir, exist_ok=True)
+
+    context = None
+    page = None
+    try:
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            record_video_dir=video_dir,
+            storage_state=storage_state
+        )
+        page = await context.new_page()
+        await page.goto(target_url, wait_until='domcontentloaded', timeout=45000)
+        await page.wait_for_timeout(1000)
+
+        # Try to start playback if needed
+        await ensure_media_playback(page, playback_hint)
+
+        await page.wait_for_timeout(max(1, duration_seconds) * 1000)
+
+        await page.close()
+        await context.close()
+
+        video_files = [f for f in os.listdir(video_dir) if f.endswith('.webm')]
+        if not video_files:
+            print("⚠️  [VIDEO] No video file produced for content-only recording")
+            return None
+
+        webm_path = os.path.join(video_dir, video_files[0])
+        mp4_path = webm_path.replace('.webm', '.mp4')
+        converted = await convert_webm_to_mp4(webm_path, mp4_path)
+
+        target_path = mp4_path if converted and os.path.exists(mp4_path) else webm_path
+        if not os.path.exists(target_path):
+            return None
+
+        with open(target_path, 'rb') as f:
+            video_bytes = BytesIO(f.read())
+        video_bytes.seek(0)
+
+        return video_bytes
+    except Exception as record_error:
+        print(f"⚠️  [VIDEO] Content-only recording failed: {record_error}")
+        return None
+    finally:
+        try:
+            if page and not page.is_closed():
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(video_dir):
+                for fname in os.listdir(video_dir):
+                    os.remove(os.path.join(video_dir, fname))
+                os.rmdir(video_dir)
+            if os.path.exists(temp_dir):
+                os.rmdir(temp_dir)
+        except Exception:
+            pass
+
 async def click_element_and_screenshot(url: str, element_description: str, wait_after_click: int = 2000) -> Optional[BytesIO]:
     """Navigate to URL, click an element, and take screenshot
     
@@ -3042,6 +3163,98 @@ Analysis: """
             except:
                 pass
 
+async def ai_plan_autonomous_goal(goal: str) -> Dict[str, Any]:
+    """Use AI to interpret the user's goal for automation strategy."""
+    default_plan = {
+        'max_iterations': 10,
+        'video_mode': 'off',
+        'record_duration_seconds': None,
+        'content_only_clip_seconds': 20,
+        'notes': ''
+    }
+
+    goal = (goal or "").strip()
+    if not goal:
+        return default_plan
+
+    decision_prompt = f"""You are configuring an autonomous browsing agent.
+
+User goal: "{goal}"
+
+Decide the optimal automation strategy. Consider EVERYTHING the user implies:
+- Are they asking to WATCH the agent perform the task (full journey)?
+- Are they asking for a simple CLIP of the final video/content?
+- Do they just want a quick screenshot/preview (no recording)?
+- How complex is the journey? How many thought/action cycles are needed?
+- How long should any requested video clip run?
+
+Return ONLY valid JSON with this shape:
+{{
+  "max_iterations": 3-12 integer,
+  "video_mode": "off" | "full_process" | "content_only",
+  "record_duration_seconds": number or null,
+  "content_only_clip_seconds": number or null,
+  "notes": "short reasoning"
+}}
+
+Interpret synonyms intelligently:
+- "show me you...", "show yourself...", "record yourself doing..." → full_process (show navigation/actions)
+- "show me a video of...", "play it for 20 seconds", "take a video of the video" → content_only (record only the final playback)
+- If no video/record request → video_mode should be "off"
+- Use the duration the user mentions (seconds/minutes). If unspecified but video is requested, choose a reasonable value (e.g., 20-45 seconds for clips).
+- Keep max_iterations low (3-4) for quick demos, higher (8-12) for multi-step tasks/games/forms.
+
+Important:
+- Be flexible with wording; don't rely on specific keywords.
+- Always respond with JSON only.
+"""
+
+    plan = default_plan.copy()
+    try:
+        decision_model = get_fast_model()
+        response = await queued_generate_content(decision_model, decision_prompt)
+        plan_text = response.text.strip()
+        if '```json' in plan_text:
+            plan_text = plan_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in plan_text:
+            plan_text = plan_text.split('```')[1].split('```')[0].strip()
+
+        parsed = json.loads(plan_text)
+
+        max_iterations = parsed.get('max_iterations')
+        if isinstance(max_iterations, (int, float)):
+            plan['max_iterations'] = max(3, min(12, int(max_iterations)))
+
+        video_mode = (parsed.get('video_mode') or 'off').lower()
+        if video_mode not in ('off', 'full_process', 'content_only'):
+            video_mode = 'off'
+        plan['video_mode'] = video_mode
+
+        record_duration = parsed.get('record_duration_seconds')
+        if isinstance(record_duration, (int, float)):
+            plan['record_duration_seconds'] = max(1, min(600, int(record_duration)))
+        else:
+            plan['record_duration_seconds'] = None
+
+        clip_duration = parsed.get('content_only_clip_seconds')
+        if isinstance(clip_duration, (int, float)):
+            plan['content_only_clip_seconds'] = max(5, min(180, int(clip_duration)))
+        else:
+            plan['content_only_clip_seconds'] = None
+
+        notes = parsed.get('notes')
+        if isinstance(notes, str):
+            plan['notes'] = notes.strip()
+        else:
+            plan['notes'] = ''
+
+        print(f"🧭 [AUTONOMOUS PLAN] {plan}")
+    except Exception as e:
+        handle_rate_limit_error(e)
+        print(f"⚠️  [AUTONOMOUS PLAN] Using default plan due to error: {e}")
+
+    return plan
+
 async def autonomous_browser_automation(url: str, goal: str, max_iterations: int = 10) -> Tuple[List[BytesIO], Optional[BytesIO]]:
     """Fully autonomous browser automation - AI dynamically analyzes pages and works towards goals
     
@@ -3074,21 +3287,31 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     if not browser:
         return [], None
     
-    # Check if goal includes video recording
+    # Check if goal includes video recording via AI planning
+    goal_plan = await ai_plan_autonomous_goal(goal)
     goal_lower = goal.lower()
-    should_record_video = any(keyword in goal_lower for keyword in ['record', 'video', 'screen record', 'recording'])
-    video_duration = None
-    if should_record_video:
-        # Extract duration from goal
-        duration_match = re.search(r'(\d+)\s*(?:second|sec|s|minute|min|m)', goal_lower)
-        if duration_match:
-            value = int(duration_match.group(1))
-            if 'min' in duration_match.group(0):
-                video_duration = value * 60
-            else:
-                video_duration = value
-        else:
-            video_duration = 30  # Default 30 seconds
+
+    plan_iterations = goal_plan.get('max_iterations')
+    if isinstance(plan_iterations, (int, float)):
+        max_iterations = max(1, min(12, int(plan_iterations)))
+
+    video_mode = (goal_plan.get('video_mode') or 'off').lower()
+    content_only_video = video_mode == 'content_only'
+    should_record_video = video_mode in ('content_only', 'full_process')
+    
+    video_duration = goal_plan.get('record_duration_seconds')
+    if isinstance(video_duration, (int, float)):
+        video_duration = max(1, min(600, int(video_duration)))
+    elif should_record_video:
+        video_duration = 30  # Fallback if AI requested video but omitted duration
+    else:
+        video_duration = None
+
+    content_clip_duration = goal_plan.get('content_only_clip_seconds')
+    if isinstance(content_clip_duration, (int, float)):
+        content_clip_duration = max(5, min(180, int(content_clip_duration)))
+    else:
+        content_clip_duration = None
     
     page = None
     context = None
@@ -3096,6 +3319,8 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     video_bytes = None
     iteration = 0
     goal_achieved = False
+    temp_dir = None
+    video_dir = None
     
     try:
         print(f"🤖 [AUTONOMOUS] Starting autonomous automation for goal: '{goal}'")
@@ -3104,7 +3329,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         print(f"🎬 [AUTONOMOUS] Navigating to {url[:80]}...")
         
         # Create context with video recording if needed
-        if should_record_video:
+        if should_record_video and not content_only_video:
             import tempfile
             temp_dir = tempfile.mkdtemp()
             video_dir = os.path.join(temp_dir, "videos")
@@ -3210,6 +3435,11 @@ CRITICAL RULES:
 - Be smart about identifying elements - use visual cues, text, buttons, links
 
 VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
+- If the user says "show me a video of ___", "play it for X seconds", "take a video of the video itself", or similar:
+  * Treat it as a CONTENT-ONLY clip. Navigate first, get the video ready, then set goal_achieved = TRUE so the system records ONLY the playback.
+  * Do NOT keep iterating once the video is visible. The clip should not include navigation unless the user explicitly asked for that.
+- If the user says "show me you ___", "show me you playing/navigating/doing", "record yourself ___", etc.:
+  * Treat it as a FULL-PROCESS capture. Keep iterating so the recording shows the entire journey (navigation + interaction).
 - If the goal is to "record X seconds" of a video:
   * FIRST: Handle any obstacles (cookie banners, popups, etc.)
   * THEN: Get to the video page and make sure the video is PLAYING (not paused, not showing error)
@@ -3280,6 +3510,11 @@ CRITICAL: AVOID FALSE LOOPS - Don't go back if you're making progress!
 - If you're on step 2 of a multi-step process → You're on the right path! Don't go back to step 1!
 - Only go back if you're TRULY on the wrong page or stuck
 - If you see a page that's part of the process (e.g., password page after username) → That's the NEXT STEP, continue!
+
+SCROLLING RULES:
+- When you need to scroll, explicitly say how far (e.g., "scroll down a little", "scroll 25%", "scroll to bottom").
+- Default to small increments (one viewport or ~25%) unless the user explicitly wants the top/bottom.
+- Only request "scroll to bottom/top" when you truly need that exact position.
 
 Return a JSON object with this exact format:
 {{
@@ -3564,6 +3799,20 @@ Decision: """
                 
                 # If goal is achieved, we're done
                 if goal_achieved:
+                    if should_record_video and content_only_video and video_bytes is None:
+                        duration_for_clip = content_clip_duration or video_duration or 20
+                        storage_state = None
+                        try:
+                            storage_state = await page.context.storage_state()
+                        except Exception:
+                            pass
+                        video_bytes = await record_content_only_video(
+                            browser,
+                            page.url,
+                            duration_for_clip,
+                            storage_state,
+                            goal
+                        )
                     print(f"✅ [AUTONOMOUS] Goal achieved!")
                     break
                 
@@ -3978,18 +4227,42 @@ Analysis: """
                         print(f"⚠️  [AUTONOMOUS] Error during click attempt: {click_error}")
                 
                 elif action_type == 'scroll':
-                    if 'down' in action_desc.lower() or 'bottom' in action_desc.lower():
-                        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                        print(f"📜 [AUTONOMOUS] Scrolled down")
-                    elif 'up' in action_desc.lower() or 'top' in action_desc.lower():
-                        await page.evaluate('window.scrollTo(0, 0)')
-                        print(f"📜 [AUTONOMOUS] Scrolled up")
-                    else:
-                        # Scroll down by default
-                        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                        print(f"📜 [AUTONOMOUS] Scrolled down (default)")
-                    await page.wait_for_timeout(1500)
-                    consecutive_failures = 0  # Reset on scroll
+                    desc_lower = action_desc.lower()
+                    try:
+                        if 'top' in desc_lower or 'start' in desc_lower or 'up to top' in desc_lower:
+                            await page.evaluate('window.scrollTo(0, 0)')
+                            print("📜 [AUTONOMOUS] Scrolled to top")
+                        elif 'bottom' in desc_lower:
+                            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                            print("📜 [AUTONOMOUS] Scrolled to bottom")
+                        else:
+                            percent_match = re.search(r'(\d+)\s*%', desc_lower)
+                            if percent_match:
+                                percent = max(0, min(100, int(percent_match.group(1)))) / 100
+                                await page.evaluate(f'''
+                                    (() => {{
+                                        const target = (document.body.scrollHeight - window.innerHeight) * {percent};
+                                        window.scrollTo(0, target);
+                                    }})()
+                                ''')
+                                print(f"📜 [AUTONOMOUS] Scrolled to {percent*100:.0f}% position")
+                            elif 'half' in desc_lower or 'middle' in desc_lower:
+                                await page.evaluate('window.scrollTo(0, (document.body.scrollHeight - window.innerHeight) * 0.5)')
+                                print("📜 [AUTONOMOUS] Scrolled to middle")
+                            elif 'up' in desc_lower:
+                                await page.evaluate('window.scrollBy(0, -window.innerHeight * 0.6)')
+                                print("📜 [AUTONOMOUS] Scrolled up slightly")
+                            elif any(keyword in desc_lower for keyword in ['little', 'bit', 'slight', 'small']):
+                                await page.evaluate('window.scrollBy(0, window.innerHeight * 0.25)')
+                                print("📜 [AUTONOMOUS] Scrolled down slightly")
+                            else:
+                                await page.evaluate('window.scrollBy(0, window.innerHeight * 0.6)')
+                                print("📜 [AUTONOMOUS] Scrolled down (incremental)")
+                        await page.wait_for_timeout(900)
+                        consecutive_failures = 0
+                    except Exception as scroll_error:
+                        print(f"⚠️  [AUTONOMOUS] Scroll action failed: {scroll_error}")
+                        consecutive_failures += 1
                 
                 elif action_type == 'wait':
                     wait_time = 2000  # Default 2 seconds
@@ -4232,8 +4505,24 @@ If found, return the data. If not found, return {{"field_description": null}}.
         else:
             print(f"⚠️  [AUTONOMOUS] Stopped after {iteration} iterations (goal may not be fully achieved)")
         
+        # If we still owe a content-only clip, capture it even if the AI never toggled goal_achieved
+        if should_record_video and content_only_video and video_bytes is None:
+            duration_for_clip = content_clip_duration or video_duration or 20
+            storage_state = None
+            try:
+                storage_state = await page.context.storage_state()
+            except Exception:
+                pass
+            video_bytes = await record_content_only_video(
+                browser,
+                page.url,
+                duration_for_clip,
+                storage_state,
+                goal
+            )
+
         # If video recording was requested, finalize the video
-        if should_record_video and context and not page.is_closed():
+        if should_record_video and not content_only_video and context and not page.is_closed():
             try:
                 # Wait for the specified duration if goal achieved, or default wait
                 if goal_achieved and video_duration:
