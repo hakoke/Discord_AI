@@ -2435,6 +2435,11 @@ async def ensure_media_playback(page, playback_hint: str = ""):
         # Give the page a moment to render controls
         await page.wait_for_timeout(750)
 
+        try:
+            await page.wait_for_selector("video", timeout=5000)
+        except Exception:
+            pass
+
         # Prefer interacting with actual <video> elements when possible
         video_locator = page.locator("video").first
         if await video_locator.count() > 0:
@@ -2447,12 +2452,43 @@ async def ensure_media_playback(page, playback_hint: str = ""):
             except Exception:
                 pass
 
-        # Generic play button selectors (text/aria-label only to avoid site-specific code)
+        # Try to autoplay via JS (muted to satisfy policies)
+        try:
+            await page.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    if (video) {
+                        video.muted = true;
+                        const playPromise = video.play();
+                        if (playPromise && playPromise.catch) {
+                            playPromise.catch(() => {});
+                        }
+                    }
+                }
+            """)
+            await page.wait_for_timeout(300)
+            is_playing = await page.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    if (!video) return false;
+                    return !video.paused && video.currentTime > 0;
+                }
+            """)
+            if is_playing:
+                return
+        except Exception:
+            pass
+
+        # Generic play button selectors (text/aria-label or common control classes)
         generic_play_selectors = [
             '[aria-label*="play" i]',
             'button:has-text("Play")',
             '[role="button"]:has-text("Play")',
             'button[title*="Play" i]',
+            '.ytp-large-play-button',
+            '.ytp-play-button',
+            '.html5-video-player button[aria-label*="Play" i]',
+            '[data-testid*="play" i]',
         ]
         for selector in generic_play_selectors:
             try:
@@ -2468,7 +2504,15 @@ async def ensure_media_playback(page, playback_hint: str = ""):
         try:
             await page.keyboard.press("k")
             await page.wait_for_timeout(300)
-            return
+            is_playing = await page.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    if (!video) return false;
+                    return !video.paused;
+                }
+            """)
+            if is_playing:
+                return
         except Exception:
             pass
 
@@ -2501,6 +2545,8 @@ async def record_content_only_video(browser, target_url: str, duration_seconds: 
         await page.wait_for_timeout(1000)
 
         # Try to start playback if needed
+        await ensure_media_playback(page, playback_hint)
+        await page.wait_for_timeout(500)
         await ensure_media_playback(page, playback_hint)
 
         await page.wait_for_timeout(max(1, duration_seconds) * 1000)
@@ -3202,7 +3248,8 @@ Interpret synonyms intelligently:
 - "show me a video of...", "play it for 20 seconds", "take a video of the video" → content_only (record only the final playback)
 - If no video/record request → video_mode should be "off"
 - Use the duration the user mentions (seconds/minutes). If unspecified but video is requested, choose a reasonable value (e.g., 20-45 seconds for clips).
-- Keep max_iterations low (3-4) for quick demos, higher (8-12) for multi-step tasks/games/forms.
+- Keep max_iterations low (3-4) for one-step previews ("just show the page").
+- Use higher counts (8-12) for games, puzzles, multi-step forms, or whenever the user expects you to actually play/do something so there is room for progress.
 
 Important:
 - Be flexible with wording; don't rely on specific keywords.
@@ -3294,6 +3341,11 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     plan_iterations = goal_plan.get('max_iterations')
     if isinstance(plan_iterations, (int, float)):
         max_iterations = max(1, min(12, int(plan_iterations)))
+
+    interactive_goal_keywords = ['play', 'playing', 'game', 'solve', 'complete', 'finish', 'record', 'video', 'watch', 'random video']
+    interactive_goal = any(keyword in goal_lower for keyword in interactive_goal_keywords)
+    if interactive_goal and max_iterations < 10:
+        max_iterations = 10
 
     video_mode = (goal_plan.get('video_mode') or 'off').lower()
     content_only_video = video_mode == 'content_only'
@@ -3400,12 +3452,13 @@ Look at this webpage screenshot and analyze:
 3. GOAL PROGRESS: Are we closer to the goal? Can you see elements related to the goal?
 4. NEXT ACTION: What should be done next?
 
-IMPORTANT - TYPING CAPABILITY:
+IMPORTANT - TYPING & KEYBOARD CAPABILITY:
 - You can TYPE into text fields, search boxes, input fields, text areas, and any editable text element
 - When you need to type, use action type "type" with description format: "search box with text: [text to type]" or "email field with text: [text to type]" or "input field with text: [text to type]"
 - Examples: "search box with text: laptop", "email field with text: user@example.com", "password field with text: mypassword123"
 - You can identify text fields by looking for: search boxes, input fields, text areas, email fields, password fields, or any editable text element
 - After typing, you may need to press Enter or click a submit button (you can do that in the next action)
+- You can PRESS keyboard keys when needed (Enter, Space, Arrow keys, etc.). Use action type "press_key" with description format: "Enter key", "Space key", "ArrowDown", etc. Example: to submit a search after typing, use {{"type": "press_key", "description": "Enter key"}}.
 
 CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
@@ -3448,6 +3501,18 @@ VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
   * DO NOT try to click play buttons, settings, or other controls once the video is already playing
   * DO NOT navigate away from the video page once it's playing
   * Example: Goal "record 10 seconds" → goal_achieved = true when you see the video playing (even if paused at start, that's fine - it will play)
+
+VIDEO PLAYBACK TASKS (CRITICAL):
+- Make sure the actual media/video is playing before marking the goal complete.
+- If the video is paused, click the play button, use keyboard shortcuts (space, K), or interact with the video viewport until you clearly see playback.
+- Confirm the timecode is moving or the visuals are changing. If not, keep trying (click controls, press space/K, unmute if needed).
+- Only mark goal_achieved once the video is actively playing so the recorded clip shows motion, not a paused frame.
+
+GAMEPLAY / INTERACTIVE TASKS:
+- When the user says "play", "show me you playing", "finish", "complete", "solve", etc., you must actually interact with the game/task (select items, submit answers, make moves).
+- Keep taking meaningful actions (select tiles, press Submit, make guesses) until you clearly demonstrate gameplay progress (solved group, submitted move, etc.).
+- Do NOT stop right after loading the game—show tangible progress before marking the goal complete.
+- If one strategy fails, try different combinations, scroll for other controls, shuffle, etc. Stay persistent within the allotted iterations.
 
 GOAL ACHIEVEMENT - BE SMART AND DYNAMIC:
 Analyze what the user actually wants and mark goal_achieved = TRUE when you've achieved what they asked for.
@@ -3522,8 +3587,8 @@ Return a JSON object with this exact format:
     "current_state": "description of what you see",
     "obstacles": ["list of obstacles found", "or empty array if none"],
     "next_action": {{
-        "type": "click" | "scroll" | "wait" | "go_back" | "type" | "none",
-        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button', 'browser back button', 'search box with text: laptop', 'email field with text: user@example.com')",
+        "type": "click" | "scroll" | "wait" | "go_back" | "type" | "press_key" | "none",
+        "description": "what element to interact with (e.g., 'Accept Cookies button', 'Sign Up link', '18+ button', 'browser back button', 'search box with text: laptop', 'email field with text: user@example.com', 'Enter key')",
         "reason": "why this action is needed"
     }},
     "confidence": 0.0-1.0,
@@ -3845,6 +3910,11 @@ Decision: """
                         if not action_desc:
                             action_desc = 'wait a moment for the page to update'
                         action_history.clear()
+                    elif any(keyword in suggestion for keyword in ['press enter', 'hit enter', 'enter key', 'press return', 'hit return']):
+                        print("🔄 [AUTONOMOUS] Overriding stuck state with Enter key press")
+                        action_type = 'press_key'
+                        action_desc = 'Enter'
+                        action_history.clear()
                     elif action_type == 'click':
                         # Generic fallback: if we are stuck repeatedly clicking something,
                         # change to a non-click action so the AI sees a different state.
@@ -4001,6 +4071,14 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                     print(f"✅ [AUTONOMOUS] Clicked by text (fallback): '{exact_text}'")
                                 except:
                                     pass
+
+                        if not clicked and 'search' in action_desc.lower():
+                            try:
+                                await page.keyboard.press('Enter')
+                                clicked = True
+                                print("✅ [AUTONOMOUS] Triggered search via Enter key")
+                            except Exception as enter_error:
+                                print(f"⚠️  [AUTONOMOUS] Enter key press failed: {enter_error}")
                         
                         # Strategy 7: Fallback - try flexible text matching (limit attempts for speed)
                         if not clicked:
@@ -4475,6 +4553,44 @@ If found, return the data. If not found, return {{"field_description": null}}.
                         except Exception as type_error:
                             print(f"⚠️  [AUTONOMOUS] Error during type attempt: {type_error}")
                             consecutive_failures += 1
+
+                elif action_type == 'press_key':
+                    key_description = (action_desc or 'Enter').strip().lower()
+                    key_mappings = {
+                        'enter': 'Enter',
+                        'enter key': 'Enter',
+                        'return': 'Enter',
+                        'return key': 'Enter',
+                        'space': 'Space',
+                        'spacebar': 'Space',
+                        'space key': 'Space',
+                        'tab': 'Tab',
+                        'escape': 'Escape',
+                        'esc': 'Escape',
+                        'arrow down': 'ArrowDown',
+                        'arrow up': 'ArrowUp',
+                        'arrow left': 'ArrowLeft',
+                        'arrow right': 'ArrowRight',
+                    }
+                    key = key_mappings.get(key_description, None)
+                    if key is None:
+                        # Try partial matches
+                        if 'enter' in key_description:
+                            key = 'Enter'
+                        elif 'space' in key_description:
+                            key = 'Space'
+                        elif 'return' in key_description:
+                            key = 'Enter'
+                        else:
+                            key = action_desc.strip() or 'Enter'
+                    try:
+                        print(f"⌨️  [AUTONOMOUS] Pressing key: {key}")
+                        await page.keyboard.press(key)
+                        await page.wait_for_timeout(500)
+                        consecutive_failures = 0
+                    except Exception as key_error:
+                        print(f"⚠️  [AUTONOMOUS] Failed to press key '{key}': {key_error}")
+                        consecutive_failures += 1
             
             except Exception as analysis_error:
                 print(f"⚠️  [AUTONOMOUS] Error in AI analysis: {analysis_error}")
