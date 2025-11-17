@@ -4384,11 +4384,20 @@ Analyze the screenshot now: """
                 if is_stuck:
                     print(f"   ⚠️  Stuck: {recovery_suggestion}")
                 
-                # 🚨 CRITICAL: If AI says goal is achieved but wants to continue, force stop
+                # 🚨 CRITICAL: If AI says goal is achieved but wants to continue, check if action is needed
                 if goal_achieved and next_action.get('type') != 'none':
-                    print(f"⚠️  [AUTONOMOUS] AI marked goal_achieved=True but wants to continue with action: {next_action.get('type')}")
-                    print(f"⚠️  [AUTONOMOUS] Forcing next_action.type='none' to stop immediately")
-                    next_action = {'type': 'none', 'description': 'Goal achieved - stopping', 'reason': 'Goal achieved, stopping as instructed'}
+                    action_type = next_action.get('type')
+                    # If the action is a click/type/press_key (final step), execute it first before stopping
+                    # The AI might be marking goal_achieved=True prematurely, but the final action still needs to happen
+                    if action_type in ['click', 'type', 'press_key']:
+                        print(f"⚠️  [AUTONOMOUS] AI marked goal_achieved=True but has pending {action_type} action - executing it first (may be final step)")
+                        # Don't force to 'none' - let the action execute, then we'll check goal_achieved again after
+                        goal_achieved = False  # Temporarily unset so action executes, will be re-checked after
+                    else:
+                        # For other action types (go_back, scroll, wait), force stop if goal is achieved
+                        print(f"⚠️  [AUTONOMOUS] AI marked goal_achieved=True but wants to continue with action: {action_type}")
+                        print(f"⚠️  [AUTONOMOUS] Forcing next_action.type='none' to stop immediately")
+                        next_action = {'type': 'none', 'description': 'Goal achieved - stopping', 'reason': 'Goal achieved, stopping as instructed'}
                 
                 # 🚨 CRITICAL: Stop immediately if goal is achieved (unless special cases below)
                 should_save_screenshot = False
