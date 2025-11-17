@@ -1132,27 +1132,31 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
                             image_data = part.inline_data.data
                             print(f"🔍 [IMAGE EDIT] Image data type: {type(image_data)}, length: {len(image_data) if isinstance(image_data, (str, bytes)) else 'N/A'}")
                             
-                            # Decode base64 if it's a string
+                            # Gemini returns image data as raw bytes, not base64-encoded
+                            # Only decode if it's a string (base64), otherwise use bytes directly
                             if isinstance(image_data, str):
-                                image_bytes = base64.b64decode(image_data)
-                            elif isinstance(image_data, bytes):
-                                # Try to decode if it looks like base64
+                                # If it's a string, try base64 decode
                                 try:
                                     image_bytes = base64.b64decode(image_data)
-                                except:
-                                    # If it's already bytes, use directly
-                                    image_bytes = image_data
+                                    print(f"🔍 [IMAGE EDIT] Decoded base64 string to bytes: {len(image_bytes)} bytes")
+                                except Exception as decode_error:
+                                    print(f"⚠️  [IMAGE EDIT] Failed to decode base64 string: {decode_error}")
+                                    continue
+                            elif isinstance(image_data, bytes):
+                                # If it's already bytes, use directly (Gemini returns raw image bytes)
+                                image_bytes = image_data
+                                print(f"🔍 [IMAGE EDIT] Using raw bytes directly: {len(image_bytes)} bytes")
                             else:
                                 print(f"⚠️  [IMAGE EDIT] Unexpected image_data type: {type(image_data)}")
                                 continue
                             
-                            print(f"🔍 [IMAGE EDIT] Decoded image_bytes type: {type(image_bytes)}, length: {len(image_bytes)}")
+                            print(f"🔍 [IMAGE EDIT] Final image_bytes type: {type(image_bytes)}, length: {len(image_bytes)}")
                             
                             # Ensure we have raw bytes, not BytesIO
                             if isinstance(image_bytes, BytesIO):
                                 image_bytes = image_bytes.read()
                             
-                            # Open the image
+                            # Open the image - image_bytes should be raw image bytes now
                             result_image = Image.open(BytesIO(image_bytes))
                             print(f"🎉 [IMAGE EDIT] Successfully edited image! Size: {result_image.size[0]}x{result_image.size[1]}")
                             return result_image
@@ -1190,14 +1194,17 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
                             try:
                                 image_data = part.inline_data.data
                                 
-                                # Handle different data types
+                                # Handle different data types - Gemini returns raw bytes
                                 if isinstance(image_data, str):
-                                    image_bytes = base64.b64decode(image_data)
-                                elif isinstance(image_data, bytes):
+                                    # If it's a string, try base64 decode
                                     try:
                                         image_bytes = base64.b64decode(image_data)
                                     except:
-                                        image_bytes = image_data
+                                        print(f"⚠️  [IMAGE EDIT] Failed to decode base64 in alternative")
+                                        continue
+                                elif isinstance(image_data, bytes):
+                                    # If it's already bytes, use directly (Gemini returns raw image bytes)
+                                    image_bytes = image_data
                                 elif isinstance(image_data, BytesIO):
                                     image_bytes = image_data.read()
                                 else:
@@ -8099,7 +8106,8 @@ Now decide: "{message.content}" -> """
                         if edited_image:
                             print(f"✏️  [IMAGE EDIT] ✅ Successfully edited image with Gemini 2.5 Flash Image")
                             # Convert PIL Image to bytes for attachment
-                            img_bytes = BytesIO()
+                            from io import BytesIO as BytesIO_import
+                            img_bytes = BytesIO_import()
                             edited_image.save(img_bytes, format='PNG')
                             img_bytes.seek(0)
                             generated_images = [img_bytes]
