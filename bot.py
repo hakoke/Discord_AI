@@ -2429,7 +2429,20 @@ async def record_video_with_actions(url: str, actions: List[str] = None, duratio
         except:
             pass
 
-async def ensure_media_playback(page, playback_hint: str = ""):
+async def is_video_playing(page) -> bool:
+    """Check if a video element is currently playing."""
+    try:
+        return await page.evaluate("""
+            () => {
+                const video = document.querySelector('video');
+                if (!video) return false;
+                return !video.paused && !video.ended && video.currentTime > 0;
+            }
+        """)
+    except Exception:
+        return False
+
+async def ensure_media_playback(page, playback_hint: str = "") -> bool:
     """Attempt to start playback for generic video players without site-specific logic."""
     try:
         # Give the page a moment to render controls
@@ -2448,7 +2461,8 @@ async def ensure_media_playback(page, playback_hint: str = ""):
                 if box:
                     await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
                     await page.wait_for_timeout(500)
-                    return
+                    if await is_video_playing(page):
+                        return True
             except Exception:
                 pass
 
@@ -2467,15 +2481,8 @@ async def ensure_media_playback(page, playback_hint: str = ""):
                 }
             """)
             await page.wait_for_timeout(300)
-            is_playing = await page.evaluate("""
-                () => {
-                    const video = document.querySelector('video');
-                    if (!video) return false;
-                    return !video.paused && video.currentTime > 0;
-                }
-            """)
-            if is_playing:
-                return
+            if await is_video_playing(page):
+                return True
         except Exception:
             pass
 
@@ -2496,7 +2503,8 @@ async def ensure_media_playback(page, playback_hint: str = ""):
                 if await button.count() > 0:
                     await button.click(timeout=3000)
                     await page.wait_for_timeout(500)
-                    return
+                    if await is_video_playing(page):
+                        return True
             except Exception:
                 continue
 
@@ -2504,24 +2512,21 @@ async def ensure_media_playback(page, playback_hint: str = ""):
         try:
             await page.keyboard.press("k")
             await page.wait_for_timeout(300)
-            is_playing = await page.evaluate("""
-                () => {
-                    const video = document.querySelector('video');
-                    if (!video) return false;
-                    return !video.paused;
-                }
-            """)
-            if is_playing:
-                return
+            if await is_video_playing(page):
+                return True
         except Exception:
             pass
 
         try:
             await page.keyboard.press(" ")
+            await page.wait_for_timeout(300)
+            if await is_video_playing(page):
+                return True
         except Exception:
             pass
     except Exception as playback_error:
         print(f"⚠️  [VIDEO] Unable to auto-play media: {playback_error}")
+    return False
 
 async def record_content_only_video(browser, target_url: str, duration_seconds: int, storage_state = None, playback_hint: str = "") -> Optional[BytesIO]:
     """Record only the final content (e.g., video playback) without the navigation steps."""
@@ -2544,10 +2549,15 @@ async def record_content_only_video(browser, target_url: str, duration_seconds: 
         await page.goto(target_url, wait_until='domcontentloaded', timeout=45000)
         await page.wait_for_timeout(1000)
 
-        # Try to start playback if needed
-        await ensure_media_playback(page, playback_hint)
-        await page.wait_for_timeout(500)
-        await ensure_media_playback(page, playback_hint)
+        # Try to start playback if needed (retry a few times)
+        playback_ready = False
+        for attempt in range(3):
+            if await ensure_media_playback(page, playback_hint):
+                playback_ready = True
+                break
+            await page.wait_for_timeout(500)
+        if not playback_ready:
+            print("⚠️  [VIDEO] Could not confirm playback before recording")
 
         await page.wait_for_timeout(max(1, duration_seconds) * 1000)
 
@@ -3216,6 +3226,7 @@ async def ai_plan_autonomous_goal(goal: str) -> Dict[str, Any]:
         'video_mode': 'off',
         'record_duration_seconds': None,
         'content_only_clip_seconds': 20,
+        'needs_live_play': False,
         'notes': ''
     }
 
@@ -3240,6 +3251,7 @@ Return ONLY valid JSON with this shape:
   "video_mode": "off" | "full_process" | "content_only",
   "record_duration_seconds": number or null,
   "content_only_clip_seconds": number or null,
+  "needs_live_play": true/false,
   "notes": "short reasoning"
 }}
 
@@ -3288,6 +3300,9 @@ Important:
             plan['content_only_clip_seconds'] = max(5, min(180, int(clip_duration)))
         else:
             plan['content_only_clip_seconds'] = None
+
+        needs_live_play = parsed.get('needs_live_play')
+        plan['needs_live_play'] = bool(needs_live_play)
 
         notes = parsed.get('notes')
         if isinstance(notes, str):
@@ -3346,6 +3361,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     interactive_goal = any(keyword in goal_lower for keyword in interactive_goal_keywords)
     if interactive_goal and max_iterations < 10:
         max_iterations = 10
+
+    needs_live_play = bool(goal_plan.get('needs_live_play'))
+    if interactive_goal:
+        needs_live_play = True
 
     video_mode = (goal_plan.get('video_mode') or 'off').lower()
     content_only_video = video_mode == 'content_only'
@@ -3418,7 +3437,9 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         last_significant_state = None
         action_history = []  # Track actions to detect loops
         consecutive_failures = 0  # Track consecutive failed attempts
-        goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
+    goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
+    meaningful_actions = 0
+    obstacle_keywords = ['accept', 'consent', 'cookie', 'privacy', 'gdpr', 'dismiss', 'close popup']
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
@@ -3507,12 +3528,14 @@ VIDEO PLAYBACK TASKS (CRITICAL):
 - If the video is paused, click the play button, use keyboard shortcuts (space, K), or interact with the video viewport until you clearly see playback.
 - Confirm the timecode is moving or the visuals are changing. If not, keep trying (click controls, press space/K, unmute if needed).
 - Only mark goal_achieved once the video is actively playing so the recorded clip shows motion, not a paused frame.
+- Start the recording when the requested content is already visible, and keep the view focused on that content until the requested duration is complete (don't cut away early or keep showing setup steps for content-only clips).
 
 GAMEPLAY / INTERACTIVE TASKS:
 - When the user says "play", "show me you playing", "finish", "complete", "solve", etc., you must actually interact with the game/task (select items, submit answers, make moves).
 - Keep taking meaningful actions (select tiles, press Submit, make guesses) until you clearly demonstrate gameplay progress (solved group, submitted move, etc.).
 - Do NOT stop right after loading the game—show tangible progress before marking the goal complete.
 - If one strategy fails, try different combinations, scroll for other controls, shuffle, etc. Stay persistent within the allotted iterations.
+- When you've selected promising items (e.g., Connections tiles, skribbl guesses), follow through—submit them instead of immediately deselecting. Only deselect/reset if you deliberately want to try a different combination.
 
 GOAL ACHIEVEMENT - BE SMART AND DYNAMIC:
 Analyze what the user actually wants and mark goal_achieved = TRUE when you've achieved what they asked for.
@@ -3562,6 +3585,7 @@ KEY INSIGHT: Understand the USER'S INTENT, not just keywords:
 LOOP DETECTION & RECOVERY:
 Recent actions taken: {action_history_text}
 - If you've tried the SAME action multiple times and it's not working → try a DIFFERENT approach!
+- If an action fails twice, rethink it immediately (press Enter instead of clicking, try a different button, scroll, or choose another element). Do not keep repeating the same failing click.
 - If you're stuck clicking the same button repeatedly → you're in a loop! Try:
   * Going back (browser back button) if you're on the wrong page
   * Clicking a DIFFERENT element that might lead to the goal
@@ -3681,6 +3705,15 @@ Analyze the screenshot now: """
                 
                 # Ask AI if this screenshot is worth showing to the user based on their goal
                 should_save_screenshot = False
+                if goal_achieved and content_only_video:
+                    if not await is_video_playing(page):
+                        goal_achieved = False
+                        print("⚠️  [AUTONOMOUS] Video not playing yet, continuing until playback starts")
+
+                if goal_achieved and needs_live_play and meaningful_actions == 0:
+                    goal_achieved = False
+                    print("⚠️  [AUTONOMOUS] Need to show actual gameplay/interactions before finishing")
+
                 if goal_achieved:
                     # Always ensure we capture at least ONE screenshot of the final goal page,
                     # even if the AI thinks it looks similar to something before. This prevents
@@ -4120,6 +4153,8 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                             except:
                                 # If load-state wait fails, still give the page a brief moment
                                 await page.wait_for_timeout(500)  # Reduced from 1000ms
+                            if not any(keyword in action_desc.lower() for keyword in obstacle_keywords):
+                                meaningful_actions += 1
 
                             # Some sites open links in a NEW TAB or WINDOW. To keep everything
                             # fully AI-driven while still making progress, detect any new page
@@ -4544,6 +4579,16 @@ If found, return the data. If not found, return {{"field_description": null}}.
                             if typed:
                                 # Wait a moment for any auto-complete or page updates
                                 await page.wait_for_timeout(1000)
+                                submit_keywords = ['search', 'submit', 'enter your guess', 'guess', 'chat', 'message', 'comment']
+                                if any(keyword in action_desc_lower for keyword in submit_keywords):
+                                    try:
+                                        await page.keyboard.press('Enter')
+                                        await page.wait_for_timeout(300)
+                                        print("✅ [AUTONOMOUS] Pressed Enter after typing to submit input")
+                                    except Exception as submit_error:
+                                        print(f"⚠️  [AUTONOMOUS] Failed to press Enter after typing: {submit_error}")
+                                if not any(keyword in action_desc_lower for keyword in obstacle_keywords):
+                                    meaningful_actions += 1
                                 consecutive_failures = 0  # Reset on success
                                 print(f"✅ [AUTONOMOUS] Successfully typed: '{text_to_type}'")
                             else:
@@ -4587,6 +4632,8 @@ If found, return the data. If not found, return {{"field_description": null}}.
                         print(f"⌨️  [AUTONOMOUS] Pressing key: {key}")
                         await page.keyboard.press(key)
                         await page.wait_for_timeout(500)
+                        if not any(keyword in key_description for keyword in obstacle_keywords):
+                            meaningful_actions += 1
                         consecutive_failures = 0
                     except Exception as key_error:
                         print(f"⚠️  [AUTONOMOUS] Failed to press key '{key}': {key_error}")
