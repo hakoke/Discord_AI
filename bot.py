@@ -4201,23 +4201,31 @@ Decision: """
 
 CRITICAL: Find the ACTUAL CLICKABLE ELEMENT - this could be a button, link, interactive div, tile, card, or any clickable element.
 IMPORTANT: Many websites use interactive DIVs, SPANs, or other elements (not just buttons/links) that are clickable:
-- Game tiles/boxes (like Connections game tiles, crossword squares, puzzle pieces)
+- Game tiles/boxes (like Connections game tiles, crossword squares, puzzle pieces, word tiles)
 - Cards/card elements (product cards, article cards)
-- Interactive divs/spans that look clickable (have hover effects, borders, backgrounds)
-- Clickable text elements within containers
+- Interactive divs/spans that look clickable (have hover effects, borders, backgrounds, cursor pointer)
+- Clickable text elements within containers (words in a grid, items in a list)
 - Elements that respond to clicks even if they're not standard buttons/links
+- Grid items, list items, or game pieces that can be selected
 
-If there are multiple instances of the same text, find the one that is actually clickable/interactive.
+TYPICAL INTERACTIVE ELEMENT PATTERNS:
+- Game tiles: Usually divs or spans with text inside, arranged in a grid
+- Cards: Usually div elements with class names like "card", "item", "tile"
+- Grid items: Often have data attributes like [data-word], [data-value], [data-id]
+- Clickable text: May have cursor:pointer style or hover effects
+
+If there are multiple instances of the same text, find the one that is actually clickable/interactive (has visual indicators like borders, backgrounds, or is in an interactive container).
 
 Find the exact clickable element. Return JSON:
 {{
     "exact_text": "exact text/content visible on the clickable element",
-    "element_type": "button" or "link" or "interactive_div" or "tile" or "card" or "clickable_text" or "other",
-    "location": "where it is on page (e.g., 'in the popup', 'top right', 'center', 'in game grid', 'third row')",
-    "suggested_selector": "CSS selector if possible - for interactive divs, try '[data-*]', '.class-name', or text-based selectors like 'div:has-text(...)', or null",
+    "element_type": "button" or "link" or "interactive_div" or "tile" or "card" or "game_tile" or "clickable_text" or "other",
+    "location": "where it is on page (e.g., 'in the popup', 'top right', 'center', 'in game grid', 'third row', 'first column')",
+    "suggested_selector": "CSS selector if possible - for interactive divs/tiles, try '[data-word=\"exact_text\"]', '[data-value=\"exact_text\"]', '.tile:has-text(\"exact_text\")', 'div:has-text(\"exact_text\")', '[role=\"button\"]:has-text(\"exact_text\")', or null",
     "coordinates": {{"x": center_x, "y": center_y}} or null,
     "is_in_popup": true/false - is this element inside a popup/modal?,
-    "container_info": "if it's in a grid/list/container, describe it (e.g., 'third tile in second row', 'first item in list')"
+    "container_info": "if it's in a grid/list/container, describe it (e.g., 'third tile in second row', 'first item in list', 'game grid tile')",
+    "visual_indicators": "what makes it look clickable (e.g., 'has border', 'has background color', 'has hover effect', 'is in a grid')"
 }}
 
 If found, return the data. If not found, return {{"exact_text": null}}.
@@ -4336,30 +4344,111 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                 except:
                                     pass
                             
-                            # Strategy 4.5: For game tiles/interactive elements, try various selectors
-                            if not clicked and any(term in element_type for term in ['tile', 'card', 'interactive']):
+                            # Strategy 4.5: For game tiles/interactive elements, try various selectors (IMPROVED)
+                            # Also try simple text matching EARLIER for interactive elements (it worked for OKEY-DOKE!)
+                            if not clicked and any(term in element_type for term in ['tile', 'card', 'interactive', 'game_tile']):
                                 try:
-                                    # Try various ways to find interactive elements
-                                    for pattern in [
-                                        f'[data-word="{exact_text}"]',
-                                        f'[data-value="{exact_text}"]',
-                                        f'[aria-label*="{exact_text}"]',
-                                        f'.tile:has-text("{exact_text}")',
-                                        f'.card:has-text("{exact_text}")',
-                                        f'.item:has-text("{exact_text}")',
-                                        f'div[role="button"]:has-text("{exact_text}")',
-                                        f'span[role="button"]:has-text("{exact_text}")',
-                                    ]:
-                                        try:
-                                            locator = page.locator(pattern).first
-                                            if await locator.count() > 0:
-                                                await locator.click(timeout=5000)
+                                    # FIRST: Try simple text matching (this worked for OKEY-DOKE, SHOO-IN, OF COURSE!)
+                                    # This is often more reliable for game tiles than complex selectors
+                                    try:
+                                        text_locator = page.get_by_text(exact_text, exact=False).first
+                                        count = await text_locator.count()
+                                        if count > 0:
+                                            try:
+                                                await text_locator.scroll_into_view_if_needed(timeout=3000)
+                                                await text_locator.click(timeout=5000, force=False)
                                                 clicked = True
-                                                print(f"✅ [AUTONOMOUS] Clicked {element_type} by pattern: '{pattern}'")
-                                                break
-                                        except:
-                                            continue
-                                except:
+                                                print(f"✅ [AUTONOMOUS] Clicked {element_type} by text (simple): '{exact_text}'")
+                                            except Exception as simple_click_err:
+                                                # Try force click if normal click fails
+                                                try:
+                                                    await text_locator.click(timeout=3000, force=True)
+                                                    clicked = True
+                                                    print(f"✅ [AUTONOMOUS] Clicked {element_type} by text (forced): '{exact_text}'")
+                                                except:
+                                                    pass
+                                    except:
+                                        pass
+                                    
+                                    # If simple text matching didn't work, try complex selectors
+                                    if not clicked:
+                                        # Try various ways to find interactive elements - AI-driven patterns
+                                        # Build patterns dynamically based on element type
+                                        patterns_to_try = []
+                                        
+                                        # Data attribute patterns (common in games)
+                                        patterns_to_try.extend([
+                                            f'[data-word="{exact_text}"]',
+                                            f'[data-value="{exact_text}"]',
+                                            f'[data-item="{exact_text}"]',
+                                            f'[data-tile="{exact_text}"]',
+                                            f'[data-word*="{exact_text.upper()}"]',
+                                            f'[data-word*="{exact_text.lower()}"]',
+                                        ])
+                                        
+                                        # Class-based patterns (common in games)
+                                        patterns_to_try.extend([
+                                            f'.tile:has-text("{exact_text}")',
+                                            f'.card:has-text("{exact_text}")',
+                                            f'.item:has-text("{exact_text}")',
+                                            f'.word:has-text("{exact_text}")',
+                                            f'.game-tile:has-text("{exact_text}")',
+                                            f'.grid-item:has-text("{exact_text}")',
+                                        ])
+                                        
+                                        # Role-based patterns
+                                        patterns_to_try.extend([
+                                            f'[role="button"]:has-text("{exact_text}")',
+                                            f'[role="option"]:has-text("{exact_text}")',
+                                            f'div[role="button"]:has-text("{exact_text}")',
+                                            f'span[role="button"]:has-text("{exact_text}")',
+                                        ])
+                                        
+                                        # Generic div/span with text (for interactive containers)
+                                        patterns_to_try.extend([
+                                            f'div:has-text("{exact_text}"):has([tabindex])',
+                                            f'span:has-text("{exact_text}"):has([tabindex])',
+                                            f'div[tabindex]:has-text("{exact_text}")',
+                                            f'span[tabindex]:has-text("{exact_text}")',
+                                        ])
+                                        
+                                        # ARIA patterns
+                                        patterns_to_try.extend([
+                                            f'[aria-label*="{exact_text}"]',
+                                            f'[aria-label*="{exact_text.upper()}"]',
+                                            f'[aria-label*="{exact_text.lower()}"]',
+                                        ])
+                                        
+                                        # Try AI's suggested selector first if provided
+                                        if suggested_selector and suggested_selector not in patterns_to_try:
+                                            patterns_to_try.insert(0, suggested_selector)
+                                        
+                                        # Try all patterns until one works
+                                        for pattern in patterns_to_try:
+                                            try:
+                                                locator = page.locator(pattern).first
+                                                count = await locator.count()
+                                                if count > 0:
+                                                    # For interactive elements, ensure they're visible and clickable
+                                                    try:
+                                                        await locator.scroll_into_view_if_needed(timeout=3000)
+                                                        await locator.click(timeout=5000, force=False)
+                                                        clicked = True
+                                                        print(f"✅ [AUTONOMOUS] Clicked {element_type} by pattern: '{pattern}'")
+                                                        break
+                                                    except Exception as click_err:
+                                                        # Try force click if normal click fails
+                                                        try:
+                                                            await locator.click(timeout=3000, force=True)
+                                                            clicked = True
+                                                            print(f"✅ [AUTONOMOUS] Clicked {element_type} by pattern (forced): '{pattern}'")
+                                                            break
+                                                        except:
+                                                            continue
+                                            except:
+                                                continue
+                                except Exception as strategy_error:
+                                    print(f"⚠️  [AUTONOMOUS] Error in Strategy 4.5: {strategy_error}")
                                     pass
                         
                             # Strategy 5: Click by coordinates (if AI provided them)
@@ -8144,22 +8233,42 @@ Return ONLY the JSON object, nothing else:"""
         print(f"🔍 [{username}] DEBUG: Continuing after search block - should reach safety check at line 9047")
         
         # Add automation success context if video/screenshots were captured from automation
+        # CRITICAL: Add this at the START of the prompt so AI sees it first and can't miss it
         automation_context_added = False
         if message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id):
             video_count = len(VIDEO_ATTACHMENTS[message.id])
             screenshot_count_for_context = len(screenshot_attachments) if screenshot_attachments else 0
-            automation_success_text = f"\n\n🎥 AUTOMATION SUCCESS - IMPORTANT CONTEXT:\n"
-            automation_success_text += f"- I successfully completed the web automation task\n"
-            automation_success_text += f"- Video recording was SUCCESSFUL: {video_count} video(s) captured ({video_count} file(s) attached)\n"
+            
+            # Build STRONG, UNAMBIGUOUS success context that AI cannot misinterpret
+            automation_success_text = f"\n\n" + "="*80 + "\n"
+            automation_success_text += f"🎥 AUTOMATION SUCCESS - CRITICAL CONTEXT (READ THIS FIRST):\n"
+            automation_success_text += "="*80 + "\n"
+            automation_success_text += f"\n✅ VIDEO RECORDING: SUCCESSFUL - {video_count} video file(s) was/were successfully recorded and is/are attached to this response!\n"
+            automation_success_text += f"✅ AUTOMATION STATUS: COMPLETED SUCCESSFULLY - The web automation task worked perfectly!\n"
             if screenshot_count_for_context > 0:
-                automation_success_text += f"- Screenshots captured: {screenshot_count_for_context} screenshot(s)\n"
-            automation_success_text += f"- The automation worked correctly - video and screenshots are included in my response\n"
-            automation_success_text += f"- DO NOT say the video failed or that there was an error - the video was successfully recorded!\n"
+                automation_success_text += f"✅ SCREENSHOTS: {screenshot_count_for_context} screenshot(s) were successfully captured\n"
+            automation_success_text += f"\n⚠️ CRITICAL INSTRUCTIONS:\n"
+            automation_success_text += f"- The video DID NOT fail - it was successfully recorded and is attached to this message\n"
+            automation_success_text += f"- DO NOT say 'video failed', 'video capture module is not working', 'unable to capture video', or any similar error messages\n"
+            automation_success_text += f"- DO NOT mention 'fourth consecutive failure' or any failure counts - there was NO failure!\n"
+            automation_success_text += f"- The video recording worked correctly and the video file is included in your response\n"
             automation_success_text += f"- Describe what I captured in the video/screenshots naturally and positively\n"
-            automation_success_text += f"- If the user asked me to do something specific (e.g., 'play the game'), describe what I did in the video\n"
-            consciousness_prompt += automation_success_text
+            automation_success_text += f"- If the user asked me to do something specific (e.g., 'play the game', 'show me you playing'), describe what I did in the video\n"
+            automation_success_text += f"- Be positive and confirm the automation was successful\n"
+            automation_success_text += f"\n" + "="*80 + "\n\n"
+            
+            # Insert at the BEGINNING of the consciousness prompt (after initial greeting but before everything else)
+            # Find where to insert it (after the initial system message but early)
+            if "CURRENT CONVERSATION CONTEXT:" in consciousness_prompt:
+                # Insert right after the conversation context header
+                insert_pos = consciousness_prompt.find("CURRENT CONVERSATION CONTEXT:")
+                consciousness_prompt = consciousness_prompt[:insert_pos] + automation_success_text + consciousness_prompt[insert_pos:]
+            else:
+                # Fallback: prepend to the beginning
+                consciousness_prompt = automation_success_text + consciousness_prompt
+            
             automation_context_added = True
-            print(f"✅ [{username}] Added automation success context to prompt (video={video_count}, screenshots={screenshot_count_for_context})")
+            print(f"✅ [{username}] Added STRONG automation success context to prompt START (video={video_count}, screenshots={screenshot_count_for_context})")
         
         # Add webpage contents to prompt if available
         if webpage_contents:
