@@ -1493,6 +1493,7 @@ Capabilities:
 - GENERATE: create NEW images from text prompts using AI image generation (Imagen).
 - EDIT: modify existing images that the user provided.
 - ANALYZE: describe or interpret images the user provided.
+- ATTACH_PROFILE_PICTURE: if user has a profile picture visible and wants to see it attached back (e.g., "can u see my profile picture", "send me my profile picture", "show me my avatar")
 
 CRITICAL DISTINCTION - GENERATE vs SEARCH:
 - GENERATE (set "generate" true): User wants to CREATE/MAKE/DRAW new images that don't exist yet
@@ -1506,19 +1507,22 @@ Return ONLY a JSON object like:
 {{
   "generate": true,
   "edit": false,
-  "analysis": true
+  "analysis": true,
+  "attach_profile_picture": false
 }}
 
 Rules:
 - Set "generate" true ONLY if the user explicitly wants to CREATE/GENERATE/MAKE/DRAW new images (not search for existing ones).
 - Set "edit" true if the user provided images AND wants to modify/change/transform them.
 - Set "analysis" true only if the user wants commentary/description of provided images (without modification requests).
+- Set "attach_profile_picture" true if user asks to see/send their profile picture (e.g., "can u see my profile picture", "send me my profile picture", "show me my avatar", "can you see my pfp")
 - Examples of EDIT: "make this person a woman", "turn this into a cat", "change the background", "edit this image", "transform this"
 - Examples of GENERATE (set true): "create an image of a car", "generate a sunset", "make me a picture", "draw me a dog"
 - Examples of SEARCH (set generate FALSE): "search for images of X", "show me X", "get me images of X", "find pictures of X", "what does X look like", "show us photos of X"
 - Examples of ANALYSIS: "what's in this image?", "describe this", "what do you see?"
+- Examples of ATTACH_PROFILE_PICTURE: "can u see my profile picture" → true (they want to see it), "what's in my profile picture" → false (just wants analysis)
 - Feel free to set multiple flags to true.
-- Defaults: generate=false, edit=false, analysis=false unless the message suggests otherwise.
+- Defaults: generate=false, edit=false, analysis=false, attach_profile_picture=false unless the message suggests otherwise.
 
 Context:
 {json.dumps(metadata, ensure_ascii=False, indent=2)}
@@ -1539,6 +1543,7 @@ Return ONLY the JSON object."""
                 "generate": bool(data.get("generate")) and bool((message.content or "").strip()),
                 "edit": bool(data.get("edit")) and bool(image_parts),
                 "analysis": bool(data.get("analysis")) and bool(image_parts),
+                "attach_profile_picture": bool(data.get("attach_profile_picture", False)),
             }
             print(f"🤖 [INTENTION] ✅ AI decision successful: {result}")
             print(f"🤖 [INTENTION] Parsed JSON: {data}")
@@ -7137,6 +7142,11 @@ CRITICAL FOR STORE_MEMORY:
   * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
   * Store in whatever structure makes sense - be flexible and dynamic!
 
+CRITICAL FOR wants_channels_list:
+- Set "wants_channels_list" true if user asks to see/list channels and/or categories
+- Examples: "can u see the channels and categories", "show me the channels", "list the categories", "what channels are in this server"
+- Set false if user is just asking about a specific channel or normal conversation
+
 Be smart and extract all relevant information. Return needs_discord_action=false if this is just a normal conversation."""
     
     try:
@@ -7186,10 +7196,46 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
                 'store', 'remember', 'save this'
             ])
             
-            if likely_discord_command:
+            # Also check for channels/categories list request (add to heuristic)
+            wants_channels_list_heuristic = any(phrase in content_lower for phrase in [
+                'channels and categories', 'show me the channels', 'list the channels',
+                'can u see the channels', 'what channels', 'list channels'
+            ])
+            
+            if likely_discord_command or wants_channels_list_heuristic:
                 try:
                     # Run in parallel with other processing to reduce latency
                     discord_command = await ai_parse_discord_command(message, guild_id)
+                    wants_channels_list = discord_command.get('wants_channels_list', False)
+                    
+                    # Handle channels/categories list request (from combined AI decision)
+                    if wants_channels_list:
+                        try:
+                            server_structure = await db.get_server_structure(guild_id)
+                            if server_structure:
+                                channels_list = server_structure.get('channels', [])
+                                categories_list = server_structure.get('categories', [])
+                                
+                                # Format the list for the AI to include in response
+                                list_text = "\n\n⚠️ USER REQUESTED CHANNELS/CATEGORIES LIST:\n"
+                                list_text += "The user asked to see the channels and categories. You MUST include a formatted list in your response.\n"
+                                list_text += "Format it clearly with categories and their channels grouped together.\n"
+                                
+                                if categories_list:
+                                    list_text += "\n**Categories:**\n"
+                                    for cat in categories_list[:10]:
+                                        list_text += f"- {cat.get('name', 'Unknown')}\n"
+                                
+                                if channels_list:
+                                    list_text += "\n**Channels:**\n"
+                                    for ch in channels_list[:20]:
+                                        list_text += f"- #{ch.get('name', 'Unknown')}\n"
+                                
+                                consciousness_prompt += list_text
+                                print(f"📋 [{username}] AI decided user wants channels/categories list (from combined Discord command check)")
+                        except Exception as e:
+                            print(f"⚠️  [{username}] Error handling channels list request: {e}")
+                    
                     if discord_command.get('needs_discord_action'):
                         print(f"🎯 [{username}] Discord command detected: {discord_command.get('action_type')}")
                         
@@ -7667,6 +7713,8 @@ CURRENT CONVERSATION CONTEXT:
                         ])
                     
                     if channels_info or categories_info:
+                        # Channels list decision is now handled in ai_parse_discord_command (combined for efficiency)
+                        # We'll check the discord_command result later after the AI call
                         structure_text = "\n\nSERVER STRUCTURE (for reference if needed):\n"
                         if categories_info:
                             structure_text += f"Categories:\n{categories_info}\n"
@@ -7703,18 +7751,24 @@ CURRENT CONVERSATION CONTEXT:
                         print(f"Error downloading image: {e}")
         
         # Extract Discord visual assets (stickers, GIFs, profile pictures, etc.) from current message
+        profile_picture_data = None  # Store profile picture data if found (for potential attachment)
         try:
             discord_assets = await extract_discord_visual_assets(message)
             for asset in discord_assets:
+                asset_type = asset.get('type')
                 image_parts.append({
                     'mime_type': asset['mime_type'],
                     'data': asset['data'],
                     'is_current': True,
-                    'discord_type': asset.get('type'),
+                    'discord_type': asset_type,
                     'discord_name': asset.get('name'),
                     'discord_description': asset.get('description')
                 })
-                print(f"📸 [{username}] Added Discord visual asset: {asset.get('type', 'unknown')} ({len(asset['data'])} bytes)")
+                print(f"📸 [{username}] Added Discord visual asset: {asset_type} ({len(asset['data'])} bytes)")
+                
+                # Store profile picture data for potential attachment (decision made in ai_decide_intentions)
+                if asset_type == 'profile_picture':
+                    profile_picture_data = asset['data']
         except Exception as e:
             print(f"⚠️  [{username}] Error extracting Discord visual assets: {e}")
         
@@ -8211,10 +8265,12 @@ Decision: """
                                 video_attachment = discord.File(video_bytes, filename="recording.mp4")
                                 # Store in global dictionary (Message objects are read-only)
                                 message_id = message.id
-                                if message_id not in VIDEO_ATTACHMENTS:
-                                    VIDEO_ATTACHMENTS[message_id] = []
-                                VIDEO_ATTACHMENTS[message_id].append(video_attachment)
-                                print(f"✅ [{username}] Video recorded from autonomous automation")
+                                # CRITICAL: Clear any previous videos for this message to prevent wrong video attachment
+                                if message_id in VIDEO_ATTACHMENTS:
+                                    print(f"⚠️  [{username}] Clearing previous video(s) for message {message_id} to prevent wrong video attachment")
+                                    del VIDEO_ATTACHMENTS[message_id]
+                                VIDEO_ATTACHMENTS[message_id] = [video_attachment]
+                                print(f"✅ [{username}] Video recorded from autonomous automation ({len(video_bytes.getvalue())} bytes)")
                         else:
                             # Use regular automation with explicit actions
                             screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
@@ -8430,8 +8486,15 @@ Screenshot {idx + 1}:"""
         intention = await ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
-        print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}")
+        should_attach_profile_picture = intention.get('attach_profile_picture', False)
+        print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}, attach_pfp={should_attach_profile_picture}")
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
+        
+        # Set profile_picture_to_attach if AI decided to attach it (from combined intention check)
+        profile_picture_to_attach = None
+        if should_attach_profile_picture and profile_picture_data:
+            profile_picture_to_attach = profile_picture_data
+            print(f"📸 [{username}] AI decided to attach profile picture (from combined intention check)")
         
         # Check for document actions - even if no documents attached (user might want to create one)
         # Skip if image edit is requested (to avoid confusing image edits with document edits)
@@ -9869,6 +9932,17 @@ Now decide: "{message.content}" -> """
         print(f"📤 [{username}]   - Generated documents: {len(generated_documents) if generated_documents else 0}")
         print(f"📤 [{username}]   - Searched images: {len(searched_images) if searched_images else 0}")
         print(f"📤 [{username}]   - Screenshots: {len(screenshot_attachments) if 'screenshot_attachments' in locals() else 0}")
+        
+        # If user wants to see their profile picture, add it to attachments
+        if 'profile_picture_to_attach' in locals() and profile_picture_to_attach:
+            try:
+                from io import BytesIO
+                pfp_bytes = BytesIO(profile_picture_to_attach)
+                pfp_bytes.seek(0)
+                screenshot_attachments.append(pfp_bytes)
+                print(f"📸 [{username}] Added profile picture to attachments for user to see")
+            except Exception as e:
+                print(f"⚠️  [{username}] Error preparing profile picture attachment: {e}")
         
         # Include screenshots in return (screenshots is a list of BytesIO)
         print(f"🔍 [{username}] About to return tuple from generate_response")
