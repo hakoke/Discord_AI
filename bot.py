@@ -3437,9 +3437,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         last_significant_state = None
         action_history = []  # Track actions to detect loops
         consecutive_failures = 0  # Track consecutive failed attempts
-    goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
-    meaningful_actions = 0
-    obstacle_keywords = ['accept', 'consent', 'cookie', 'privacy', 'gdpr', 'dismiss', 'close popup']
+        goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
+        meaningful_actions = 0
+        obstacle_keywords = ['accept', 'consent', 'cookie', 'privacy', 'gdpr', 'dismiss', 'close popup']
+
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
