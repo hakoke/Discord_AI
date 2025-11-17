@@ -3185,11 +3185,28 @@ IMPORTANT - TYPING CAPABILITY:
 CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
-- If you see CAPTCHAs, puzzles, or verification challenges (hCaptcha, reCAPTCHA, "I'm not a robot", image puzzles, etc.) → You CAN solve them! Analyze the challenge and interact with it:
-  * Image selection puzzles → Click the correct images based on the prompt
-  * Checkbox challenges → Click the checkbox
-  * Text/audio challenges → Solve them if possible
-  * Be smart and try to complete the captcha to proceed with the goal
+- If you see CAPTCHAs, puzzles, or verification challenges → You CAN solve them! Be smart and analyze what type it is:
+  * hCaptcha/reCAPTCHA image puzzles:
+    - Read the prompt carefully (e.g., "Select all images with traffic lights", "Click all squares with crosswalks")
+    - Click ALL matching images accurately (be precise - look at each image carefully)
+    - After clicking images, look for a "Verify" or "Submit" button and click it
+    - If more rounds appear, continue selecting images until it's solved
+    - Don't just click once and wait - complete the full process!
+  * Checkbox challenges ("I'm not a robot"):
+    - Click the checkbox
+    - If it expands into an image puzzle, solve that too
+  * Text/audio challenges:
+    - Read or listen to the challenge
+    - Type the answer if it's text-based
+    - Click submit/verify after entering the answer
+  * Slider puzzles:
+    - Drag the slider to align images or complete the puzzle
+  * Math/word puzzles:
+    - Solve the equation or answer the question
+    - Type the answer and submit
+  * Be smart: Different sites use different captcha types - analyze what you see and solve it step-by-step
+  * Be accurate: When clicking images, look carefully at each one - don't guess, be precise!
+  * Complete the process: Don't stop after one click - continue until the captcha is fully solved and you can proceed!
 - Be smart about identifying elements - use visual cues, text, buttons, links
 
 VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
