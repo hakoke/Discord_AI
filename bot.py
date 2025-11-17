@@ -1892,6 +1892,42 @@ def clean_url(url: str) -> str:
     
     return url.strip()
 
+def _matches_keyword_boundary(text: str, keyword: str) -> bool:
+    """Return True if keyword appears in text separated by non-alphanumeric boundaries."""
+    if not text or not keyword:
+        return False
+    text_lower = text.lower()
+    keyword_lower = keyword.lower().strip()
+    if not keyword_lower:
+        return False
+    start = 0
+    while True:
+        idx = text_lower.find(keyword_lower, start)
+        if idx == -1:
+            return False
+        before = text_lower[idx - 1] if idx > 0 else ' '
+        after_index = idx + len(keyword_lower)
+        after = text_lower[after_index] if after_index < len(text_lower) else ' '
+        if not before.isalnum() and not after.isalnum():
+            return True
+        start = idx + 1
+
+def build_response_payload(
+    response_text: str = "",
+    generated_images=None,
+    generated_documents=None,
+    searched_images: Optional[List[Any]] = None,
+    screenshots: Optional[List[Any]] = None,
+):
+    """Normalize response payloads so generate_response always returns the same structure."""
+    return (
+        response_text or "",
+        generated_images if generated_images else None,
+        generated_documents if generated_documents else None,
+        searched_images or [],
+        screenshots or [],
+    )
+
 # ============================================================================
 # Browser Automation and Screenshot Capability
 # ============================================================================
@@ -3380,6 +3416,8 @@ def should_guard_action(action_type: str, action_desc: str, recent_actions: List
         # Allow more freedom during live gameplay; only guard after many repeats
         if repetitions >= 4 and any(keyword in desc_lower for keyword in suspicious_keywords):
             return True
+        if repetitions >= 3:
+            return True
         return False
     if action_type in ('click', 'type', 'press_key'):
         if repetitions >= 2:
@@ -3476,8 +3514,8 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
 
     interactive_goal_keywords = ['play', 'playing', 'game', 'solve', 'complete', 'finish', 'record', 'video', 'watch', 'random video']
     interactive_goal = any(keyword in goal_lower for keyword in interactive_goal_keywords)
-    if interactive_goal and max_iterations < 10:
-        max_iterations = 10
+    if interactive_goal and max_iterations < 12:
+        max_iterations = 12
 
     needs_live_play = bool(goal_plan.get('needs_live_play'))
     if interactive_goal:
@@ -3823,6 +3861,11 @@ Analyze the screenshot now: """
                             guidance_messages,
                             f"You already tried '{last_three[0]}' multiple times without progress—change strategy (submit, new items, or other controls)."
                         )
+                        if needs_live_play:
+                            _append_guidance_message(
+                                guidance_messages,
+                                "Stop toggling the exact same control. Form full groups (e.g., four related tiles) and press Submit, or use Shuffle/Deselect All to reset the board."
+                            )
 
                 # If we have repeated technical failures, also treat as stuck
                 if consecutive_failures >= 3 and not is_stuck:
@@ -3834,6 +3877,11 @@ Analyze the screenshot now: """
                     print(f"🔄 [AUTONOMOUS] AI detected stuck state: {recovery_suggestion}")
                     if recovery_suggestion:
                         _append_guidance_message(guidance_messages, recovery_suggestion)
+                    elif needs_live_play:
+                        _append_guidance_message(
+                            guidance_messages,
+                            "You're still stuck—take a decisive gameplay action like pressing Submit, Shuffle, or Deselect All after changing your selections."
+                        )
                 
                 print(f"🤖 [AUTONOMOUS] Analysis:")
                 print(f"   State: {current_state}")
@@ -4816,8 +4864,17 @@ If found, return the data. If not found, return {{"field_description": null}}.
                 print(f"⚠️  [AUTONOMOUS] Error in AI analysis: {analysis_error}")
                 import traceback
                 print(f"⚠️  [AUTONOMOUS] Traceback: {traceback.format_exc()}")
-                # Take screenshot and continue (might have made progress)
-                await page.wait_for_timeout(1000)
+                error_text = str(analysis_error).lower()
+                handle_rate_limit_error(analysis_error)
+                if any(token in error_text for token in ['rate limit', 'quota', '429', 'resource exhausted']):
+                    cooldown = min(5.0, 0.5 * (consecutive_failures + 1))
+                    print(f"⏳  [AUTONOMOUS] Cooling down for {cooldown:.2f}s due to rate limiting")
+                    await asyncio.sleep(cooldown)
+                else:
+                    # Take screenshot and continue (might have made progress)
+                    await page.wait_for_timeout(1000)
+                consecutive_failures += 1
+                continue
         
         # Take final screenshot only if goal achieved and we don't already have it
         if goal_achieved and (not screenshots or len(screenshots) == 0):
@@ -7693,13 +7750,13 @@ Screenshot {idx + 1}:"""
                 'wikipedia': ['wikipedia', 'on wikipedia'],
             }
             
-            content_lower = message.content.lower()
+            content_for_matching = message.content or ""
             
             # Detect platform
             detected_platform = None
             for platform, keywords in platform_keywords.items():
                 for keyword in keywords:
-                    if keyword in content_lower:
+                    if _matches_keyword_boundary(content_for_matching, keyword):
                         detected_platform = platform
                         break
                 if detected_platform:
@@ -8263,7 +8320,7 @@ Respond with ONLY 'YES' or 'NO'."""
             if 'NO' in decision and not force_response:
                 # Return empty tuple instead of None to maintain consistent return type
                 print(f"🔍 [{username}] DEBUG: Returning early - AI decided not to respond")
-                return ("", None, None, [], [])
+                return build_response_payload("")
         
         # Generate response
         thinking_note = f" [Using {model_name} for this]" if needs_smart_model else ""
@@ -8978,7 +9035,13 @@ Now decide: "{message.content}" -> """
         
         # Include screenshots in return (screenshots is a list of BytesIO)
         print(f"🔍 [{username}] About to return tuple from generate_response")
-        result = (ai_response, generated_images, generated_documents, searched_images, screenshot_attachments)
+        result = build_response_payload(
+            ai_response,
+            generated_images,
+            generated_documents,
+            searched_images,
+            screenshot_attachments,
+        )
         print(f"🔍 [{username}] Returning result type: {type(result)}, length: {len(result) if isinstance(result, tuple) else 'N/A'}")
         return result
         
@@ -9019,7 +9082,7 @@ Now decide: "{message.content}" -> """
                 "Please try again, or rephrase your request if the problem persists."
             )
         
-        return (user_message, None, None, [], [])
+        return build_response_payload(user_message)
 
 @bot.event
 async def on_ready():
