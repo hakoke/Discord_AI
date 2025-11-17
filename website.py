@@ -130,10 +130,44 @@ def tojson_filter(obj):
 # Route for profile picture
 @app.route('/profile.png')
 def profile_picture():
-    """Serve the profile picture"""
+    """Serve the profile picture from images folder"""
     try:
-        return send_from_directory('.', 'profile.png')
-    except:
+        import os
+        from flask import Response
+        
+        images_dir = 'images'
+        # Try different file formats in order of preference
+        profile_files = [
+            ('generated_1.webp', 'image/webp'),
+            ('profile.png', 'image/png'),
+            ('profile.jpg', 'image/jpeg'),
+            ('profile.jpeg', 'image/jpeg'),
+            ('profile.webp', 'image/webp')
+        ]
+        
+        # First try images folder
+        for filename, mimetype in profile_files:
+            filepath = os.path.join(images_dir, filename)
+            if os.path.exists(filepath):
+                response = send_from_directory(images_dir, filename)
+                # Set correct mimetype for .webp files
+                if filename.endswith('.webp'):
+                    response.mimetype = mimetype
+                return response
+        
+        # If not found in images folder, try root
+        for filename, mimetype in profile_files:
+            if os.path.exists(filename):
+                response = send_from_directory('.', filename)
+                if filename.endswith('.webp'):
+                    response.mimetype = mimetype
+                return response
+        
+        return '', 404
+    except Exception as e:
+        print(f"Error serving profile picture: {e}")
+        import traceback
+        traceback.print_exc()
         return '', 404
 
 # Public Homepage

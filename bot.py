@@ -3235,11 +3235,16 @@ Return a JSON object with this exact format:
     "recovery_suggestion": "if stuck, what should be tried instead"
 }}
 
-Examples:
+Examples (be smart and dynamic):
 - Cookie banner visible → {{"next_action": {{"type": "click", "description": "Accept Cookies or Accept All", "reason": "Cookie banner is blocking the page"}}}}
 - Age verification visible → {{"next_action": {{"type": "click", "description": "18+ or Enter or Continue", "reason": "Age verification is blocking access"}}}}
 - Goal "show me sign up" and you see account creation form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up page is visible", "reason": "The sign-up/account creation page is now visible"}}}}
-- Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign in or Create Account", "reason": "Need to navigate to sign-up page"}}}}
+- Goal "show me sign up" and you see homepage → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Sign Up or Create Account or Register", "reason": "Need to navigate to sign-up page"}}}}
+- Goal "show me the page of wordle" and you see wordle game page → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - wordle page is visible", "reason": "User just wants to see the page, not play it"}}}}
+- Goal "show me you playing connections" and you see connections game → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "Start game or Play button", "reason": "Need to start playing the game"}}}}
+- Goal "show me you finishing wordle" and you see wordle game → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "First letter tile or game element", "reason": "Need to play and complete the wordle puzzle"}}}}
+- Goal "show me you signing up" and you see sign-up form → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - sign-up form is visible", "reason": "User wants to see the sign-up form, which is now visible"}}}}
+- Goal "record 30 seconds" and you see video playing → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - video is ready", "reason": "Video is playing, system will record for 30 seconds"}}}}
 - Goal "search for laptop" and you see search box → {{"next_action": {{"type": "type", "description": "search box with text: laptop", "reason": "Need to type 'laptop' into the search box"}}}}
 - Goal "go to amazon and search for headphones" and you see Amazon homepage → {{"next_action": {{"type": "type", "description": "search box with text: headphones", "reason": "Need to type 'headphones' into Amazon search box"}}}}
 - Stuck clicking same button 3+ times → {{"is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
@@ -4232,22 +4237,33 @@ Does the user want AUTONOMOUS browser automation where the AI should:
 4. Continue until the goal is achieved
 
 AUTONOMOUS automation is needed when:
-- User has a GOAL (e.g., "show me sign up", "go to reddit and click sign up", "show me the login page")
-- User wants the AI to figure out how to get there (not just specific instructions)
+- User has a GOAL that requires AI to figure out how to achieve it (e.g., "show me sign up", "go to reddit and click sign up", "show me the login page")
+- User wants to RECORD VIDEO (e.g., "record me completing it", "record 30 seconds", "record the process", "show me video of")
+- User wants to PLAY GAMES or COMPLETE TASKS (e.g., "show me you playing connections", "show me you finishing wordle", "show me you completing [game]")
+- User wants the AI to figure out how to get there (not just specific step-by-step instructions)
 - User mentions obstacles that need handling (e.g., "accept cookies", "handle age verification")
 - User wants dynamic navigation (e.g., "go to reddit and show me sign up" - AI should find sign up button)
+- User wants to interact with content dynamically (e.g., "show me you doing [task]", "show me you signing up")
 
 AUTONOMOUS automation is NOT needed when:
-- User just wants a screenshot of the page as-is
+- User just wants a simple screenshot of the page as-is with no interaction
 - User gives very specific step-by-step instructions (use regular automation)
-- No goal is mentioned, just "show me this website"
+- No goal is mentioned, just "show me this website" (unless it requires navigation/interaction)
 
 If autonomous automation is needed, extract the GOAL (what the user wants to achieve).
-The goal should be a clear objective like:
-- "show me sign up" or "show sign up page"
+The goal should be a clear objective that captures the user's intent:
+- "show me sign up" or "show me you signing up" or "show sign up page"
 - "click on the first video"
 - "go to login page"
 - "show me the registration form"
+- "show me the page of wordle" (just show the page, no interaction needed)
+- "show me you playing connections" (interact and play the game)
+- "show me you finishing wordle" (play and complete the game)
+- "record me completing it" or "record me solving it"
+- "record 30 seconds of the video"
+- "record the process"
+- "complete the game" or "solve the puzzle"
+- ANY task the user wants you to do - be smart and extract the goal dynamically!
 
 Return JSON:
 {{
@@ -4258,7 +4274,14 @@ Return JSON:
 Examples:
 "go to reddit and show me sign up" -> {{"needs_autonomous": true, "goal": "show me sign up"}}
 "go to amazon and click on sign in" -> {{"needs_autonomous": true, "goal": "click on sign in"}}
+"go to connections game and record me completing it" -> {{"needs_autonomous": true, "goal": "record me completing it"}}
+"go to youtube, click video, record 30 seconds" -> {{"needs_autonomous": true, "goal": "record 30 seconds of the video"}}
 "go to reddit click on sign up and show me" -> {{"needs_autonomous": true, "goal": "show me sign up"}}
+"show me you playing connections for 30 seconds" -> {{"needs_autonomous": true, "goal": "show me you playing connections for 30 seconds"}}
+"show me you finishing todays wordle" -> {{"needs_autonomous": true, "goal": "show me you finishing wordle"}}
+"show me you signing up" -> {{"needs_autonomous": true, "goal": "show me you signing up"}}
+"show me the page of wordle" -> {{"needs_autonomous": true, "goal": "show me the page of wordle"}}
+"show me you doing this" -> {{"needs_autonomous": true, "goal": "show me you doing this"}}
 "take a screenshot of reddit.com" -> {{"needs_autonomous": false, "goal": null}}
 "show me this website" -> {{"needs_autonomous": false, "goal": null}}
 
@@ -6589,6 +6612,18 @@ Decision: """
                 # Handle screenshots if needed (separate from text fetching)
                 screenshot_attachments = []
 
+                # FIRST: Check for autonomous goals (including video recording) BEFORE checking screenshot_needed
+                # This ensures that "go to [URL] and record me completing it" triggers automation even without explicit "screenshot"
+                autonomous_goal = None
+                if urls and PLAYWRIGHT_AVAILABLE:
+                    screenshot_url = clean_url(urls[0])
+                    if screenshot_url:
+                        autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
+                        if autonomous_goal:
+                            print(f"🤖 [{username}] Detected autonomous goal (including video recording): '{autonomous_goal}'")
+                            # If autonomous goal detected, we need browser automation (screenshot or video)
+                            screenshot_needed = True
+
                 # Decide screenshot after URLs were gathered or inferred.
                 if screenshot_needed is None:
                     if wants_image_search:
@@ -6613,8 +6648,9 @@ Decision: """
                     
                     try:
                         # AI decides: how many screenshots and what browser actions
-                        # Check if user wants autonomous goal-oriented automation
-                        autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
+                        # Check if user wants autonomous goal-oriented automation (already checked above, but re-check if not set)
+                        if not autonomous_goal:
+                            autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
                         
                         if autonomous_goal:
                             # Use fully autonomous automation - AI will handle everything dynamically
@@ -8105,12 +8141,8 @@ Now decide: "{message.content}" -> """
                         print(f"✏️  [IMAGE EDIT] edit_image_with_prompt() returned: {type(edited_image)}")
                         if edited_image:
                             print(f"✏️  [IMAGE EDIT] ✅ Successfully edited image with Gemini 2.5 Flash Image")
-                            # Convert PIL Image to bytes for attachment
-                            from io import BytesIO as BytesIO_import
-                            img_bytes = BytesIO_import()
-                            edited_image.save(img_bytes, format='PNG')
-                            img_bytes.seek(0)
-                            generated_images = [img_bytes]
+                            # Store PIL Image directly - attachment code will handle conversion to BytesIO
+                            generated_images = [edited_image]
                             ai_response += "\n\n*Edited the image using Gemini 2.5 Flash Image*"
                         else:
                             print(f"❌ [IMAGE EDIT] ❌ Gemini 2.5 Flash Image editing returned no image (None)")
