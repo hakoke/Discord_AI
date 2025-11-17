@@ -1725,23 +1725,24 @@ async def ai_decide_discord_extraction_needed(message: discord.Message) -> tuple
     """AI decides which Discord assets AND metadata to extract - COMBINED for efficiency (ONE AI call instead of two)"""
     content = (message.content or "").strip()
     if not content:
-        # Default: minimal extraction (lightweight)
+        # Default: minimal extraction (lightweight) - only extract what's present in the message itself
+        # No AI call needed for empty messages - just extract what's actually there
         assets = {
-            'profile_picture': True,
-            'sticker': bool(message.stickers),
-            'gif': bool(message.embeds),
-            'server_icon': True,
+            'profile_picture': False,  # Don't extract unless needed
+            'sticker': bool(message.stickers),  # Only if stickers are present
+            'gif': bool(message.embeds),  # Only if GIFs are present
+            'server_icon': False,  # Don't extract unless needed
             'role_icon': False,
-            'mentioned_users_pfps': bool(message.mentions)
+            'mentioned_users_pfps': False  # Don't extract unless needed
         }
         metadata = {
-            'current_channel': True,
+            'current_channel': True,  # Always useful for context
             'all_channels': False,
             'user_roles': False,
             'all_roles': False,
             'mentioned_users': False,
             'server_info': False,
-            'stickers_gifs': bool(message.stickers or message.embeds),
+            'stickers_gifs': bool(message.stickers or message.embeds),  # Only if present
             'profile_pictures_urls': False
         }
         return assets, metadata
@@ -1770,12 +1771,15 @@ METADATA (text information):
 - profile_pictures_urls: Profile picture URLs (only if user asks about profile pictures)
 
 Extract ONLY if needed:
-- User asks about profile pictures → extract profile_picture assets AND profile_pictures_urls metadata
+- User asks about THEIR OWN profile picture → extract profile_picture assets AND profile_pictures_urls metadata
+- User asks about BOT'S profile picture or SERVER ICON → extract mentioned_users_pfps (for bot) AND server_icon assets
 - User asks about channels → extract all_channels metadata (NOT assets)
 - User asks about roles → extract user_roles/all_roles metadata (NOT assets unless role_icon needed)
 - User mentions users → extract mentioned_users metadata AND mentioned_users_pfps assets if editing/analyzing
-- User asks about server → extract server_info metadata (server_icon asset only if needed)
+- User asks about server → extract server_info metadata AND server_icon asset
 - Message has stickers/GIFs → always extract stickers/gifs assets AND metadata
+
+IMPORTANT: If user explicitly asks about "bot's profile picture", "ServerMate's avatar", "server icon", "guild icon", etc., extract those assets!
 
 Do NOT extract if:
 - User is just chatting normally → only current_channel metadata, minimal assets
@@ -1858,23 +1862,24 @@ Be efficient - only extract what's actually needed for the user's request."""
     except Exception as e:
         print(f"⚠️  Error in AI decision for Discord extraction: {e}")
     
-    # Fallback: minimal extraction
+    # Fallback: minimal extraction (conservative - only what's present, not what might be needed)
+    # If AI call fails, be conservative and don't extract unnecessary things
     assets = {
-        'profile_picture': True,
-        'sticker': bool(message.stickers),
-        'gif': bool(message.embeds),
-        'server_icon': True,
+        'profile_picture': False,  # Don't extract unless AI explicitly decided
+        'sticker': bool(message.stickers),  # Only if stickers are present
+        'gif': bool(message.embeds),  # Only if GIFs are present
+        'server_icon': False,  # Don't extract unless AI explicitly decided
         'role_icon': False,
-        'mentioned_users_pfps': bool(message.mentions)
+        'mentioned_users_pfps': False  # Don't extract unless AI explicitly decided
     }
     metadata = {
-        'current_channel': True,
+        'current_channel': True,  # Always useful for context
         'all_channels': False,
         'user_roles': False,
         'all_roles': False,
-        'mentioned_users': bool(message.mentions),
+        'mentioned_users': bool(message.mentions),  # Only if users are mentioned
         'server_info': False,
-        'stickers_gifs': bool(message.stickers or message.embeds),
+        'stickers_gifs': bool(message.stickers or message.embeds),  # Only if present
         'profile_pictures_urls': False
     }
     return assets, metadata
@@ -1971,22 +1976,24 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                 print(f"⚠️  Error extracting profile picture: {e}")
         
         # Extract profile pictures for mentioned users (if needed)
+        # AI already decided in ai_decide_discord_extraction_needed whether to extract bot's profile picture
+        # If mentioned_users_pfps is True, it means AI determined we should extract it
         if assets_needed.get('mentioned_users_pfps', False) and message.mentions:
             for mentioned_user in message.mentions:
                 # Skip if it's the author (already extracted above)
                 if mentioned_user.id == message.author.id:
                     continue
-                # Skip if it's the bot itself (don't extract bot's profile picture unless explicitly needed)
-                # Check if mentioned user is the bot (either by bot flag or by comparing IDs)
+                # AI already decided - if mentioned_users_pfps is True, extract all mentioned users (including bot if AI decided)
+                # No hardcoded checks - trust the AI's decision
+                # Check if mentioned user is the bot
+                is_bot = False
                 if message.guild:
                     bot_member = message.guild.me
                     if bot_member and mentioned_user.id == bot_member.id:
-                        print(f"📸 Skipping bot's profile picture ({mentioned_user.display_name}) - not needed")
-                        continue
+                        is_bot = True
                 elif mentioned_user.bot:
-                    # If no guild context, skip all bots to be safe
-                    print(f"📸 Skipping bot's profile picture ({mentioned_user.display_name}) - not needed")
-                    continue
+                    is_bot = True
+                
                 try:
                     avatar_url = str(mentioned_user.display_avatar.url) if mentioned_user.display_avatar else None
                     if avatar_url:
@@ -2000,7 +2007,7 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                                 'username': mentioned_user.display_name,
                                 'is_author': False,
                                 'is_mentioned': True,
-                                'is_bot': mentioned_user.bot  # Mark if it's a bot
+                                'is_bot': is_bot  # Mark if it's a bot
                             })
                             print(f"📸 Extracted profile picture for mentioned user {mentioned_user.display_name} ({len(image_data)} bytes)")
                 except Exception as e:
@@ -3947,7 +3954,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         original_max_iterations = max_iterations
         user_requested_extension = False
         extension_reason = None
-        
+
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
             print(f"🔄 [AUTONOMOUS] Iteration {iteration}/{max_iterations}")
@@ -7093,15 +7100,15 @@ async def extract_discord_metadata(message: discord.Message, metadata_needed: Di
                             gif_info.append(f"GIF: {embed.image.url}")
                 if gif_info:
                     metadata_parts.append(f"GIFs/Videos in this message: {', '.join(gif_info)}")
-            
-            # Check attachments for GIFs
-            if message.attachments:
-                gif_attachments = []
-                for attachment in message.attachments:
-                    if attachment.filename.lower().endswith('.gif') or 'gif' in (attachment.content_type or '').lower():
-                        gif_attachments.append(f"GIF attachment: {attachment.filename} ({attachment.url})")
-                if gif_attachments:
-                    metadata_parts.extend(gif_attachments)
+        
+        # Check attachments for GIFs
+        if message.attachments:
+            gif_attachments = []
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith('.gif') or 'gif' in (attachment.content_type or '').lower():
+                    gif_attachments.append(f"GIF attachment: {attachment.filename} ({attachment.url})")
+            if gif_attachments:
+                metadata_parts.extend(gif_attachments)
         
         # Extract user roles (if in a guild)
         if message.guild and message.author:
@@ -9619,32 +9626,27 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     
                     image_label_text = "\n".join(image_labels) if image_labels else ""
                     
-                    # Add critical instructions based on what images are present
-                    critical_instructions = ""
-                    user_message_lower = (message.content or "").lower()
-                    asks_about_profile_picture = any(phrase in user_message_lower for phrase in [
-                        'my profile picture', 'my avatar', 'my pfp', 'whats my profile', 'show me my profile',
-                        'my profile pic', 'what is my profile picture', 'can you see my profile picture'
-                    ])
-                    asks_about_channels = any(phrase in user_message_lower for phrase in [
-                        'channel', 'channels', 'which channel', 'what channel', 'best channel'
-                    ])
+                    # Find bot profile picture index if present
+                    bot_profile_picture_idx = None
+                    for idx, img in enumerate(image_parts, start=1):
+                        discord_type = img.get('discord_type')
+                        img_is_bot = img.get('is_bot', False)
+                        if discord_type == 'profile_picture' and img_is_bot:
+                            bot_profile_picture_idx = idx
+                            break
                     
-                    if author_profile_picture_idx and server_icon_idx:
-                        if asks_about_profile_picture:
-                            critical_instructions = f"\n\n🚨🚨🚨 CRITICAL - USER ASKED ABOUT THEIR PROFILE PICTURE:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author) - THIS IS WHAT THEY'RE ASKING ABOUT\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture) - COMPLETELY IGNORE THIS IMAGE\n- YOU MUST ONLY describe Image {author_profile_picture_idx} (the user's profile picture)\n- DO NOT mention, describe, or reference Image {server_icon_idx} (the server icon) AT ALL\n- DO NOT say 'the first image' or 'the second image' - just describe the user's profile picture directly\n- The server icon is completely irrelevant - act as if it doesn't exist"
-                        elif asks_about_channels:
-                            critical_instructions = f"\n\n🚨 CRITICAL - USER ASKED ABOUT CHANNELS:\n- Image {server_icon_idx} is THE SERVER ICON - this is NOT relevant to questions about channels\n- DO NOT mention or describe the server icon when answering about channels\n- Focus ONLY on answering the channel question - ignore all images"
-                        else:
-                            critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture)\n- Only describe images that are relevant to the user's question"
-                    elif author_profile_picture_idx:
-                        if asks_about_profile_picture:
-                            critical_instructions = f"\n\n🚨🚨🚨 CRITICAL - USER ASKED ABOUT THEIR PROFILE PICTURE:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author) - THIS IS WHAT THEY'RE ASKING ABOUT\n- Describe ONLY this image - do not mention any other images"
-                        else:
-                            critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Only describe this image if it's relevant to the user's question"
-                    elif server_icon_idx:
-                        if asks_about_channels:
-                            critical_instructions = f"\n\n🚨 CRITICAL - USER ASKED ABOUT CHANNELS:\n- Image {server_icon_idx} is THE SERVER ICON - this is NOT relevant to questions about channels\n- DO NOT mention or describe the server icon when answering about channels\n- Focus ONLY on answering the channel question - ignore all images"
+                    # AI-driven: Let the AI figure out what the user is asking about based on the message
+                    # Just provide the image labels and let AI decide what to describe - NO HARDCODED CHECKS
+                    image_context = f"\n\nIMAGES AVAILABLE:\n{image_label_text}\n\n"
+                    
+                    if author_profile_picture_idx:
+                        image_context += f"- Image {author_profile_picture_idx} is the message author's (user's) profile picture\n"
+                    if bot_profile_picture_idx:
+                        image_context += f"- Image {bot_profile_picture_idx} is the bot's profile picture\n"
+                    if server_icon_idx:
+                        image_context += f"- Image {server_icon_idx} is the server/guild icon\n"
+                    
+                    critical_instructions = f"{image_context}\n\nCRITICAL: Based on the user's message, intelligently determine what they're asking about:\n- If they ask about THEIR OWN profile picture/avatar/pfp → describe ONLY the user's profile picture (Image {author_profile_picture_idx if author_profile_picture_idx else 'N/A'})\n- If they ask about BOT'S profile picture/avatar or mention the bot → describe ONLY the bot's profile picture (Image {bot_profile_picture_idx if bot_profile_picture_idx else 'N/A'})\n- If they ask about SERVER ICON/guild icon → describe ONLY the server icon (Image {server_icon_idx if server_icon_idx else 'N/A'})\n- If they ask about CHANNELS → ignore all images and focus on answering the channel question\n- Only describe images that are relevant to what the user is actually asking about\n- DO NOT describe irrelevant images - be smart and focus on what the user wants to know\n- Use your understanding of natural language to determine the user's intent - don't rely on exact phrase matching"
                     
                     response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
