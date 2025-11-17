@@ -3185,6 +3185,11 @@ IMPORTANT - TYPING CAPABILITY:
 CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
+- If you see CAPTCHAs, puzzles, or verification challenges (hCaptcha, reCAPTCHA, "I'm not a robot", image puzzles, etc.) → You CAN solve them! Analyze the challenge and interact with it:
+  * Image selection puzzles → Click the correct images based on the prompt
+  * Checkbox challenges → Click the checkbox
+  * Text/audio challenges → Solve them if possible
+  * Be smart and try to complete the captcha to proceed with the goal
 - Be smart about identifying elements - use visual cues, text, buttons, links
 
 VIDEO RECORDING GOALS (if goal contains "record", "video", "recording"):
@@ -3448,14 +3453,20 @@ Decision: """
                     if should_record_video:
                         video_recording_context = f"""
 
-⚠️ IMPORTANT: VIDEO RECORDING IS ACTIVE - The entire process is being recorded as a video!
+⚠️ CRITICAL: VIDEO RECORDING IS ACTIVE - The entire process is being recorded as a video!
 - Screenshots are REDUNDANT when video is recording (the video already shows everything)
-- Only save screenshots if:
-  1. User EXPLICITLY asked for screenshots (e.g., "screenshot AND video")
-  2. OR the screenshot shows something TRULY USEFUL that the video might not capture well (e.g., a specific detail, error message, or static information that needs to be read carefully)
-- DO NOT save screenshots just because it's a milestone or progress - the video already shows that!
-- DO NOT save screenshots of intermediate steps, popups, or navigation - the video shows all of that!
-- When in doubt, return false - the video is enough!
+- BE VERY STRICT: Only save screenshots if:
+  1. User EXPLICITLY asked for screenshots (e.g., "screenshot AND video", "send me screenshots too")
+  2. OR the screenshot shows something TRULY CRITICAL that the video might not capture well (e.g., a specific error message with important details, final confirmation page with account details, or static information that needs careful reading)
+- DO NOT save screenshots just because:
+  * It's a milestone or progress step → video shows that!
+  * Fields are filled → video shows that!
+  * You navigated to a page → video shows that!
+  * It's a "new" step → video shows that!
+  * It shows "progress" → video shows that!
+- DO NOT save multiple screenshots of the same form being filled out → the video shows the entire process!
+- When video is recording, the default should be FALSE - only save if it's truly exceptional and necessary!
+- If you're unsure → return FALSE! The video is enough!
 """
                     
                     screenshot_decision_prompt = f"""Look at this webpage screenshot. The user's goal is: "{goal}"
@@ -3486,7 +3497,10 @@ Examples:
 - Goal: "show me sign up", screenshot shows dismissing a banner → {{"worth_showing": false, "reason": "This is just dismissing a banner, not showing the goal"}}
 - Goal: "record me completing game" + VIDEO RECORDING ACTIVE, screenshot shows game progress → {{"worth_showing": false, "reason": "Video is recording, this progress is already captured in the video"}}
 - Goal: "record me completing game" + VIDEO RECORDING ACTIVE, screenshot shows final completion screen → {{"worth_showing": false, "reason": "Video is recording, the completion is already captured in the video"}}
+- Goal: "fill out form and record video" + VIDEO RECORDING ACTIVE, screenshot shows form with fields filled → {{"worth_showing": false, "reason": "Video is recording, the form filling process is already captured in the video"}}
+- Goal: "fill out form and record video" + VIDEO RECORDING ACTIVE, screenshot shows fields being filled → {{"worth_showing": false, "reason": "Video is recording, all form interactions are already captured in the video"}}
 - Goal: "screenshot AND record video", screenshot shows important detail → {{"worth_showing": true, "reason": "User explicitly asked for screenshots, and this shows an important detail"}}
+- Goal: "record video" + VIDEO RECORDING ACTIVE, screenshot shows intermediate step → {{"worth_showing": false, "reason": "Video is recording, all steps are already captured in the video"}}
 
 Decision: """
                     
