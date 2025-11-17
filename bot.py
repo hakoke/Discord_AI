@@ -3318,6 +3318,7 @@ Important:
     return plan
 
 GUIDANCE_HISTORY_LIMIT = 6
+EXECUTED_HISTORY_LIMIT = 10
 
 def _append_guidance_message(guidance: List[str], message: str) -> None:
     message = (message or "").strip()
@@ -3326,6 +3327,14 @@ def _append_guidance_message(guidance: List[str], message: str) -> None:
     guidance.append(message)
     if len(guidance) > GUIDANCE_HISTORY_LIMIT:
         guidance.pop(0)
+
+def _record_executed_action(history: List[str], label: str) -> None:
+    label = (label or "").strip()
+    if not label:
+        return
+    history.append(label)
+    if len(history) > EXECUTED_HISTORY_LIMIT:
+        history.pop(0)
 
 async def parse_ai_json_response(raw_text: str, context_label: str = "", goal: str = "") -> Optional[Dict[str, Any]]:
     """Best-effort JSON parsing with AI repair fallback."""
@@ -3362,14 +3371,19 @@ def should_guard_action(action_type: str, action_desc: str, recent_actions: List
         return False
     action_type = (action_type or '').lower()
     desc_lower = action_desc.lower()
+    obstacle_terms = ['cookie', 'privacy', 'consent', 'banner', 'gdpr', 'captcha', 'age gate', 'manage preferences']
+    if any(term in desc_lower for term in obstacle_terms):
+        return False
     suspicious_keywords = ['deselect', 'change', 'reset', 'clear', 'shuffle', 'start over', 'undo']
+    repetitions = sum(1 for act in recent_actions if act == action_desc)
     if action_type in ('click', 'type', 'press_key'):
-        if action_desc in recent_actions:
+        if repetitions >= 2:
             return True
-        if any(keyword in desc_lower for keyword in suspicious_keywords):
+        if repetitions >= 1 and any(keyword in desc_lower for keyword in suspicious_keywords):
             return True
     if action_type == 'type' and any(term in desc_lower for term in ['password', 'email', 'username']):
-        if any(term in action.lower() for action in recent_actions for term in ['password', 'email', 'username']):
+        sensitive_reps = sum(1 for act in recent_actions if any(term in act.lower() for term in ['password', 'email', 'username']))
+        if sensitive_reps >= 2:
             return True
     return False
 
@@ -3533,7 +3547,8 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         # The AI will analyze screenshots and dynamically decide what to click
         # No hardcoded lists - everything is determined by AI vision analysis
         last_significant_state = None
-        action_history = []  # Track actions to detect loops
+        proposed_actions = []  # Track AI proposals to detect loops
+        executed_actions: List[str] = []  # Track actions that actually executed
         consecutive_failures = 0  # Track consecutive failed attempts
         goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
         meaningful_actions = 0
@@ -3555,8 +3570,8 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             vision_model = get_vision_model()  # Use faster vision model instead of smart model
             
             # Build action history context for loop detection
-            recent_actions = action_history[-3:] if len(action_history) >= 3 else action_history
-            action_history_text = ", ".join(recent_actions) if recent_actions else "None"
+            recent_action_proposals = proposed_actions[-3:] if proposed_actions else []
+            action_history_text = ", ".join(recent_action_proposals) if recent_action_proposals else "None"
             
             # Check if goal involves video recording
             goal_lower = goal.lower()
@@ -3596,6 +3611,7 @@ IMPORTANT - TYPING & KEYBOARD CAPABILITY:
 CRITICAL RULES:
 - ALWAYS handle obstacles FIRST before working on the goal
 - If you see cookie banners, age verification, or blocking popups → handle them immediately
+- Sometimes text labels share the same wording as nearby buttons (e.g., "Accept all" appears both in explanatory text and on the button). Make sure you actually click the clickable control (look for borders, buttons, hover states). If you clicked the text and nothing changed, deliberately pick a different target (Reject, Manage preferences, close icon, etc.) instead of repeating the same spot.
 - If you see CAPTCHAs, puzzles, or verification challenges → You CAN solve them! Be smart and analyze what type it is:
   * hCaptcha/reCAPTCHA image puzzles:
     - Read the prompt carefully (e.g., "Select all images with traffic lights", "Click all squares with crosswalks")
@@ -3788,14 +3804,13 @@ Analyze the screenshot now: """
                 # Track action for loop detection
                 action_desc = next_action.get('description', '')
                 if action_desc:
-                    action_history.append(action_desc)
-                    # Keep only last 5 actions
-                    if len(action_history) > 5:
-                        action_history.pop(0)
+                    proposed_actions.append(action_desc)
+                    if len(proposed_actions) > 10:
+                        proposed_actions.pop(0)
                 
-                # Detect loops: same action 3+ times in a row
-                if len(action_history) >= 3:
-                    last_three = action_history[-3:]
+                # Detect loops: same proposed action 3+ times in a row
+                if len(proposed_actions) >= 3:
+                    last_three = proposed_actions[-3:]
                     if len(set(last_three)) == 1:  # All same action
                         is_stuck = True
                         print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{last_three[0]}' repeated 3+ times")
@@ -4040,12 +4055,13 @@ Decision: """
                 action_desc = next_action.get('description', '')
 
                 guard_result = None
-                if should_guard_action(action_type, action_desc, recent_actions):
+                recent_executed_actions = executed_actions[-EXECUTED_HISTORY_LIMIT:] if executed_actions else []
+                if should_guard_action(action_type, action_desc, recent_executed_actions):
                     guard_result = await ai_validate_proposed_action(
                         goal,
                         current_state,
                         next_action,
-                        recent_actions,
+                        recent_executed_actions,
                         needs_live_play
                     )
                     if guard_result:
@@ -4073,7 +4089,7 @@ Decision: """
                         print("🔄 [AUTONOMOUS] Overriding stuck state with browser back navigation")
                         action_type = 'go_back'
                         action_desc = 'browser back button'
-                        action_history.clear()
+                        proposed_actions.clear()
                     elif 'scroll' in suggestion:
                         print("🔄 [AUTONOMOUS] Overriding stuck state with scroll action")
                         action_type = 'scroll'
@@ -4081,25 +4097,25 @@ Decision: """
                         # default to scrolling down to look for alternatives.
                         if not action_desc:
                             action_desc = 'scroll down to look for alternatives'
-                        action_history.clear()
+                        proposed_actions.clear()
                     elif 'wait' in suggestion or 'pause' in suggestion:
                         print("🔄 [AUTONOMOUS] Overriding stuck state with wait action")
                         action_type = 'wait'
                         if not action_desc:
                             action_desc = 'wait a moment for the page to update'
-                        action_history.clear()
+                        proposed_actions.clear()
                     elif any(keyword in suggestion for keyword in ['press enter', 'hit enter', 'enter key', 'press return', 'hit return']):
                         print("🔄 [AUTONOMOUS] Overriding stuck state with Enter key press")
                         action_type = 'press_key'
                         action_desc = 'Enter'
-                        action_history.clear()
+                        proposed_actions.clear()
                     elif action_type == 'click':
                         # Generic fallback: if we are stuck repeatedly clicking something,
                         # change to a non-click action so the AI sees a different state.
                         print("🔄 [AUTONOMOUS] Stuck on click; switching to scroll to change context")
                         action_type = 'scroll'
                         action_desc = 'scroll down to explore other options'
-                        action_history.clear()
+                        proposed_actions.clear()
                 
                 if action_type == 'none':
                     print(f"⏸️  [AUTONOMOUS] No action needed, stopping")
@@ -4112,7 +4128,8 @@ Decision: """
                         await page.go_back()
                         await page.wait_for_timeout(2000)
                         consecutive_failures = 0  # Reset failure count
-                        action_history.clear()  # Clear history after going back
+                        proposed_actions.clear()  # Clear history after going back
+                        _record_executed_action(executed_actions, action_desc or 'browser back button')
                         print(f"✅ [AUTONOMOUS] Went back successfully")
                     except Exception as back_error:
                         print(f"⚠️  [AUTONOMOUS] Error going back: {back_error}")
@@ -4288,6 +4305,8 @@ If found, return the data. If not found, return {{"exact_text": null}}.
                                     continue
                         
                         if clicked:
+                            executed_label = action_desc or exact_text or "click action"
+                            _record_executed_action(executed_actions, executed_label)
                             # Wait for page to respond (reduced wait time for speed)
                             await page.wait_for_timeout(1000)  # Reduced from 2000ms
                             try:
@@ -4516,6 +4535,7 @@ Analysis: """
                             else:
                                 await page.evaluate('window.scrollBy(0, window.innerHeight * 0.6)')
                                 print("📜 [AUTONOMOUS] Scrolled down (incremental)")
+                        _record_executed_action(executed_actions, action_desc or 'scroll action')
                         await page.wait_for_timeout(900)
                         consecutive_failures = 0
                     except Exception as scroll_error:
@@ -4530,6 +4550,7 @@ Analysis: """
                         wait_time = int(wait_match.group(1)) * 1000
                     await page.wait_for_timeout(wait_time)
                     print(f"⏳ [AUTONOMOUS] Waited {wait_time}ms")
+                    _record_executed_action(executed_actions, action_desc or f"wait:{wait_time}ms")
                     consecutive_failures = 0  # Reset on wait
                 
                 elif action_type == 'type':
@@ -4723,6 +4744,7 @@ If found, return the data. If not found, return {{"field_description": null}}.
                             
                             if typed:
                                 # Wait a moment for any auto-complete or page updates
+                                _record_executed_action(executed_actions, action_desc or f"type:{text_to_type}")
                                 await page.wait_for_timeout(1000)
                                 submit_keywords = ['search', 'submit', 'enter your guess', 'guess', 'chat', 'message', 'comment']
                                 if any(keyword in action_desc_lower for keyword in submit_keywords):
@@ -4779,6 +4801,7 @@ If found, return the data. If not found, return {{"field_description": null}}.
                         await page.wait_for_timeout(500)
                         if not any(keyword in key_description for keyword in obstacle_keywords):
                             meaningful_actions += 1
+                        _record_executed_action(executed_actions, action_desc or f"press_key:{key}")
                         consecutive_failures = 0
                     except Exception as key_error:
                         print(f"⚠️  [AUTONOMOUS] Failed to press key '{key}': {key_error}")
@@ -7372,6 +7395,7 @@ Decision: """
                         if autonomous_goal:
                             # Use fully autonomous automation - AI will handle everything dynamically
                             print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
+                            setattr(message, "_servermate_force_fast_model", True)
                             screenshot_images, video_bytes = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
                             screenshot_attachments.extend(screenshot_images)
                             # Set screenshot_count for logging (autonomous mode returns variable number)
@@ -8139,16 +8163,22 @@ Now decide: "{message.content}" -> """
                 handle_rate_limit_error(e)
                 return False
         
-        decision_start = time.time()
-        # For summaries, always use fast model (summaries don't need deep reasoning)
-        if wants_summary:
-            needs_smart_model = False
-            decision_time = 0  # Skip decision for summaries
-        # If screenshots were taken, let AI decide if it's a simple request or needs complex analysis
-        elif screenshot_attachments and len(screenshot_attachments) > 0:
-            async def decide_screenshot_complexity():
-                """AI decides if screenshot request is simple or needs complex analysis"""
-                decision_prompt = f"""User message: "{message.content}"
+        needs_smart_model = False
+        decision_time = 0.0
+        force_fast_due_to_automation = getattr(message, "_servermate_force_fast_model", False)
+        if force_fast_due_to_automation:
+            print(f"⚡ [{username}] Forced fast model for autonomous web automation reply")
+        else:
+            decision_start = time.time()
+            # For summaries, always use fast model (summaries don't need deep reasoning)
+            if wants_summary:
+                needs_smart_model = False
+                decision_time = 0  # Skip decision for summaries
+            # If screenshots were taken, let AI decide if it's a simple request or needs complex analysis
+            elif screenshot_attachments and len(screenshot_attachments) > 0:
+                async def decide_screenshot_complexity():
+                    """AI decides if screenshot request is simple or needs complex analysis"""
+                    decision_prompt = f"""User message: "{message.content}"
 
 Screenshots were taken. Is this a simple request or does it need complex analysis?
 
@@ -8186,17 +8216,17 @@ Now decide: "{message.content}" -> """
                     handle_rate_limit_error(e)
                     return False  # Fallback to smart model if uncertain
             
-            is_simple = await decide_screenshot_complexity()
-            if is_simple:
-                needs_smart_model = False
-                decision_time = 0  # Skip decision for simple screenshots
-                print(f"⚡ [{username}] AI decided: simple screenshot request - using fast model")
+                is_simple = await decide_screenshot_complexity()
+                if is_simple:
+                    needs_smart_model = False
+                    decision_time = 0  # Skip decision for simple screenshots
+                    print(f"⚡ [{username}] AI decided: simple screenshot request - using fast model")
+                else:
+                    needs_smart_model = await decide_model()
+                    decision_time = time.time() - decision_start
             else:
                 needs_smart_model = await decide_model()
                 decision_time = time.time() - decision_start
-        else:
-            needs_smart_model = await decide_model()
-            decision_time = time.time() - decision_start
         
         # Choose model based on AI decision (create fresh instance for thread safety)
         active_model = get_smart_model() if needs_smart_model else get_fast_model()
