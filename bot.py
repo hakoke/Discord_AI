@@ -3465,7 +3465,7 @@ Decision: """
                             should_save_screenshot = True
                             print(f"📸 [AUTONOMOUS] Saving first screenshot of achieved goal")
                 else:
-                    # Ask AI if this screenshot shows progress toward the user's goal
+                    # Ask AI if this screenshot shows progress toward the user's goals
                     video_recording_context = ""
                     if should_record_video:
                         video_recording_context = f"""
