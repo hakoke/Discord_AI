@@ -1721,62 +1721,153 @@ async def download_image(url: str) -> bytes:
     """Download image from URL"""
     return await download_bytes(url)
 
-async def ai_decide_discord_assets_needed(message: discord.Message) -> Dict[str, bool]:
-    """AI decides which Discord visual assets are needed based on user's message"""
-    content = (message.content or "").strip().lower()
-    
-    # Quick heuristic check first
-    needs_profile_picture = any(phrase in content for phrase in [
-        'profile picture', 'profile pic', 'avatar', 'my picture', 'my avatar',
-        'send me my', 'show me my', 'get my', 'my pfp', 'pfp'
-    ])
-    
-    needs_sticker = bool(message.stickers) or any(phrase in content for phrase in [
-        'sticker', 'analyze sticker', 'this sticker'
-    ])
-    
-    needs_gif = bool(message.embeds) or any(phrase in content for phrase in [
-        'gif', 'analyze gif', 'this gif'
-    ])
-    
-    needs_server_icon = any(phrase in content for phrase in [
-        'server icon', 'server picture', 'server avatar', 'guild icon'
-    ])
-    
-    needs_role_icon = any(phrase in content for phrase in [
-        'role icon', 'role picture'
-    ])
-    
-    # If user explicitly mentions something, always extract it
-    # Otherwise, let AI make the final decision
-    if needs_profile_picture or needs_sticker or needs_gif or needs_server_icon or needs_role_icon:
-        return {
-            'profile_picture': needs_profile_picture,
-            'sticker': needs_sticker or bool(message.stickers),
-            'gif': needs_gif or bool(message.embeds),
-            'server_icon': needs_server_icon,
-            'role_icon': needs_role_icon
-        }
-    
-    # If message has stickers/GIFs, always extract them (user sent them)
-    if message.stickers or message.embeds:
-        return {
-            'profile_picture': False,
+async def ai_decide_discord_extraction_needed(message: discord.Message) -> tuple[Dict[str, bool], Dict[str, bool]]:
+    """AI decides which Discord assets AND metadata to extract - COMBINED for efficiency (ONE AI call instead of two)"""
+    content = (message.content or "").strip()
+    if not content:
+        # Default: minimal extraction (lightweight)
+        assets = {
+            'profile_picture': True,
             'sticker': bool(message.stickers),
             'gif': bool(message.embeds),
-            'server_icon': False,
-            'role_icon': False
+            'server_icon': True,
+            'role_icon': False,
+            'mentioned_users_pfps': bool(message.mentions)
         }
+        metadata = {
+            'current_channel': True,
+            'all_channels': False,
+            'user_roles': False,
+            'all_roles': False,
+            'mentioned_users': False,
+            'server_info': False,
+            'stickers_gifs': bool(message.stickers or message.embeds),
+            'profile_pictures_urls': False
+        }
+        return assets, metadata
     
-    # Default: extract profile picture and server icon for context (lightweight)
-    # But let AI decide if it needs them based on the conversation
-    return {
-        'profile_picture': True,  # Always available for context
+    # Use AI to decide BOTH assets and metadata in ONE call (efficient!)
+    prompt = f"""You are deciding which Discord visual assets AND metadata to extract for a message.
+
+User message: "{content}"
+
+VISUAL ASSETS (images to download):
+- profile_picture: User's profile picture/avatar
+- mentioned_users_pfps: Profile pictures of mentioned users (e.g., @william)
+- sticker: Stickers in the message
+- gif: GIFs/videos in embeds
+- server_icon: Server/guild icon
+- role_icon: Role icons
+
+METADATA (text information):
+- current_channel: Current channel name and info (always useful)
+- all_channels: List of ALL server channels (only if user asks about channels)
+- user_roles: User's roles (only if user asks about their roles)
+- all_roles: List of ALL server roles (only if user asks about server roles)
+- mentioned_users: Info about mentioned users (only if users are mentioned)
+- server_info: Server name, icon, description (only if user asks about server)
+- stickers_gifs: Stickers/GIFs metadata (always if present)
+- profile_pictures_urls: Profile picture URLs (only if user asks about profile pictures)
+
+Extract ONLY if needed:
+- User asks about profile pictures → extract profile_picture assets AND profile_pictures_urls metadata
+- User asks about channels → extract all_channels metadata (NOT assets)
+- User asks about roles → extract user_roles/all_roles metadata (NOT assets unless role_icon needed)
+- User mentions users → extract mentioned_users metadata AND mentioned_users_pfps assets if editing/analyzing
+- User asks about server → extract server_info metadata (server_icon asset only if needed)
+- Message has stickers/GIFs → always extract stickers/gifs assets AND metadata
+
+Do NOT extract if:
+- User is just chatting normally → only current_channel metadata, minimal assets
+- User doesn't ask about something → don't extract it
+
+Return JSON:
+{{
+    "assets": {{
+        "profile_picture": true/false,
+        "mentioned_users_pfps": true/false,
+        "sticker": true/false,
+        "gif": true/false,
+        "server_icon": true/false,
+        "role_icon": true/false
+    }},
+    "metadata": {{
+        "current_channel": true/false,
+        "all_channels": true/false,
+        "user_roles": true/false,
+        "all_roles": true/false,
+        "mentioned_users": true/false,
+        "server_info": true/false,
+        "stickers_gifs": true/false,
+        "profile_pictures_urls": true/false
+    }}
+}}
+
+Be efficient - only extract what's actually needed for the user's request."""
+    
+    try:
+        decision_model = get_fast_model()
+        response = await queued_generate_content(decision_model, prompt)
+        response_text = response.text.strip()
+        
+        # Parse JSON
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0]
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0]
+        
+        parsed = await parse_ai_json_response(response_text, context_label="discord-extraction-needed", goal=content)
+        
+        if parsed:
+            assets_data = parsed.get('assets', {})
+            metadata_data = parsed.get('metadata', {})
+            
+            # Build assets dict
+            assets = {
+                'profile_picture': bool(assets_data.get('profile_picture', False)),
+                'mentioned_users_pfps': bool(assets_data.get('mentioned_users_pfps', False)) or bool(message.mentions),
+                'sticker': bool(assets_data.get('sticker', False)) or bool(message.stickers),
+                'gif': bool(assets_data.get('gif', False)) or bool(message.embeds),
+                'server_icon': bool(assets_data.get('server_icon', False)),
+                'role_icon': bool(assets_data.get('role_icon', False))
+            }
+            
+            # Build metadata dict
+            metadata = {
+                'current_channel': True,  # Always useful
+                'all_channels': bool(metadata_data.get('all_channels', False)),
+                'user_roles': bool(metadata_data.get('user_roles', False)),
+                'all_roles': bool(metadata_data.get('all_roles', False)),
+                'mentioned_users': bool(metadata_data.get('mentioned_users', False)) or bool(message.mentions),
+                'server_info': bool(metadata_data.get('server_info', False)),
+                'stickers_gifs': bool(metadata_data.get('stickers_gifs', False)) or bool(message.stickers or message.embeds),
+                'profile_pictures_urls': bool(metadata_data.get('profile_pictures_urls', False))
+            }
+            
+            return assets, metadata
+    except Exception as e:
+        print(f"⚠️  Error in AI decision for Discord extraction: {e}")
+    
+    # Fallback: minimal extraction
+    assets = {
+        'profile_picture': True,
         'sticker': bool(message.stickers),
         'gif': bool(message.embeds),
-        'server_icon': True,  # Always available for context
-        'role_icon': False  # Only when explicitly needed
+        'server_icon': True,
+        'role_icon': False,
+        'mentioned_users_pfps': bool(message.mentions)
     }
+    metadata = {
+        'current_channel': True,
+        'all_channels': False,
+        'user_roles': False,
+        'all_roles': False,
+        'mentioned_users': bool(message.mentions),
+        'server_info': False,
+        'stickers_gifs': bool(message.stickers or message.embeds),
+        'profile_pictures_urls': False
+    }
+    return assets, metadata
 
 async def extract_discord_visual_assets(message: discord.Message, assets_needed: Dict[str, bool] = None) -> List[Dict[str, Any]]:
     """Extract Discord visual assets based on what's needed (AI-decided)"""
@@ -1850,7 +1941,7 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                 except Exception as e:
                     print(f"⚠️  Error extracting GIF from embed: {e}")
         
-        # Extract profile picture/avatar (only if needed)
+        # Extract profile picture/avatar for message author
         if assets_needed.get('profile_picture', False) and message.author:
             try:
                 avatar_url = str(message.author.display_avatar.url) if message.author.display_avatar else None
@@ -1862,11 +1953,36 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                             'data': image_data,
                             'type': 'profile_picture',
                             'user_id': str(message.author.id),
-                            'username': message.author.display_name
+                            'username': message.author.display_name,
+                            'is_author': True
                         })
                         print(f"📸 Extracted profile picture for {message.author.display_name} ({len(image_data)} bytes)")
             except Exception as e:
                 print(f"⚠️  Error extracting profile picture: {e}")
+        
+        # Extract profile pictures for mentioned users (if needed)
+        if assets_needed.get('mentioned_users_pfps', False) and message.mentions:
+            for mentioned_user in message.mentions:
+                # Skip if it's the author (already extracted above)
+                if mentioned_user.id == message.author.id:
+                    continue
+                try:
+                    avatar_url = str(mentioned_user.display_avatar.url) if mentioned_user.display_avatar else None
+                    if avatar_url:
+                        image_data = await download_image(avatar_url)
+                        if image_data:
+                            visual_assets.append({
+                                'mime_type': 'image/png',
+                                'data': image_data,
+                                'type': 'profile_picture',
+                                'user_id': str(mentioned_user.id),
+                                'username': mentioned_user.display_name,
+                                'is_author': False,
+                                'is_mentioned': True
+                            })
+                            print(f"📸 Extracted profile picture for mentioned user {mentioned_user.display_name} ({len(image_data)} bytes)")
+                except Exception as e:
+                    print(f"⚠️  Error extracting profile picture for {mentioned_user.display_name}: {e}")
         
         # Extract server icon (only if needed)
         if assets_needed.get('server_icon', False) and message.guild and message.guild.icon:
@@ -6900,52 +7016,70 @@ async def manage_typing_indicator(channel: discord.TextChannel, stop_event: asyn
         except asyncio.TimeoutError:
             continue
 
-async def extract_discord_metadata(message: discord.Message) -> str:
+# Removed - now combined with ai_decide_discord_extraction_needed for efficiency
+
+async def extract_discord_metadata(message: discord.Message, metadata_needed: Dict[str, bool] = None) -> str:
     """Extract Discord-specific metadata from a message (stickers, GIFs, roles, channels, profile pictures, etc.)
     
     Returns a formatted string with Discord context that the AI can see and use when relevant.
+    Only extracts what's needed based on metadata_needed dict (AI-decided).
     """
+    if metadata_needed is None:
+        # Default: minimal metadata
+        metadata_needed = {
+            'current_channel': True,
+            'all_channels': False,
+            'user_roles': False,
+            'all_roles': False,
+            'mentioned_users': False,
+            'server_info': False,
+            'stickers_gifs': True,
+            'profile_pictures_urls': False
+        }
+    
     metadata_parts = []
     
     try:
-        # Extract stickers
-        if message.stickers:
-            sticker_info = []
-            for sticker in message.stickers:
-                sticker_name = sticker.name
-                sticker_desc = f"Sticker: {sticker_name}"
-                if hasattr(sticker, 'description') and sticker.description:
-                    sticker_desc += f" ({sticker.description})"
-                # Get sticker image URL if available
-                if hasattr(sticker, 'url') and sticker.url:
-                    sticker_desc += f" [Image URL: {sticker.url}]"
-                sticker_info.append(sticker_desc)
-            if sticker_info:
-                metadata_parts.append(f"Stickers in this message: {', '.join(sticker_info)}")
-        
-        # Extract GIFs from embeds
-        if message.embeds:
-            gif_info = []
-            for embed in message.embeds:
-                if embed.type == 'gifv' or (embed.video and embed.video.url):
-                    gif_url = embed.video.url if embed.video else None
-                    if gif_url:
-                        gif_info.append(f"GIF/Video: {gif_url}")
-                elif embed.image:
-                    # Check if it's a GIF
-                    if embed.image.url and ('.gif' in embed.image.url.lower() or 'giphy' in embed.image.url.lower()):
-                        gif_info.append(f"GIF: {embed.image.url}")
-            if gif_info:
-                metadata_parts.append(f"GIFs/Videos in this message: {', '.join(gif_info)}")
-        
-        # Check attachments for GIFs
-        if message.attachments:
-            gif_attachments = []
-            for attachment in message.attachments:
-                if attachment.filename.lower().endswith('.gif') or 'gif' in (attachment.content_type or '').lower():
-                    gif_attachments.append(f"GIF attachment: {attachment.filename} ({attachment.url})")
-            if gif_attachments:
-                metadata_parts.extend(gif_attachments)
+        # Extract stickers/GIFs (only if needed)
+        if metadata_needed.get('stickers_gifs', False):
+            # Extract stickers
+            if message.stickers:
+                sticker_info = []
+                for sticker in message.stickers:
+                    sticker_name = sticker.name
+                    sticker_desc = f"Sticker: {sticker_name}"
+                    if hasattr(sticker, 'description') and sticker.description:
+                        sticker_desc += f" ({sticker.description})"
+                    # Get sticker image URL if available
+                    if hasattr(sticker, 'url') and sticker.url:
+                        sticker_desc += f" [Image URL: {sticker.url}]"
+                    sticker_info.append(sticker_desc)
+                if sticker_info:
+                    metadata_parts.append(f"Stickers in this message: {', '.join(sticker_info)}")
+            
+            # Extract GIFs from embeds
+            if message.embeds:
+                gif_info = []
+                for embed in message.embeds:
+                    if embed.type == 'gifv' or (embed.video and embed.video.url):
+                        gif_url = embed.video.url if embed.video else None
+                        if gif_url:
+                            gif_info.append(f"GIF/Video: {gif_url}")
+                    elif embed.image:
+                        # Check if it's a GIF
+                        if embed.image.url and ('.gif' in embed.image.url.lower() or 'giphy' in embed.image.url.lower()):
+                            gif_info.append(f"GIF: {embed.image.url}")
+                if gif_info:
+                    metadata_parts.append(f"GIFs/Videos in this message: {', '.join(gif_info)}")
+            
+            # Check attachments for GIFs
+            if message.attachments:
+                gif_attachments = []
+                for attachment in message.attachments:
+                    if attachment.filename.lower().endswith('.gif') or 'gif' in (attachment.content_type or '').lower():
+                        gif_attachments.append(f"GIF attachment: {attachment.filename} ({attachment.url})")
+                if gif_attachments:
+                    metadata_parts.extend(gif_attachments)
         
         # Extract user roles (if in a guild)
         if message.guild and message.author:
@@ -6977,8 +7111,8 @@ async def extract_discord_metadata(message: discord.Message) -> str:
                 # Silently fail if we can't get roles
                 pass
         
-        # Extract channel information
-        if message.channel:
+        # Extract channel information (always include current channel for context)
+        if metadata_needed.get('current_channel', True) and message.channel:
             channel_info = []
             channel_info.append(f"Channel: #{message.channel.name}")
             if hasattr(message.channel, 'category') and message.channel.category:
@@ -6988,14 +7122,46 @@ async def extract_discord_metadata(message: discord.Message) -> str:
             if channel_info:
                 metadata_parts.append(" | ".join(channel_info))
         
-        # Extract profile picture/avatar
-        if message.author:
-            avatar_url = str(message.author.display_avatar.url) if message.author.display_avatar else None
-            if avatar_url:
-                metadata_parts.append(f"User profile picture: {avatar_url}")
+        # Extract ALL channels (only if needed)
+        if metadata_needed.get('all_channels', False) and message.guild:
+            try:
+                all_channels = [ch for ch in message.guild.channels if hasattr(ch, 'name')][:50]  # Limit to 50
+                if all_channels:
+                    channel_names = [f"#{ch.name}" for ch in all_channels]
+                    metadata_parts.append(f"All server channels: {', '.join(channel_names)}")
+            except:
+                pass
         
-        # Extract server/guild information
-        if message.guild:
+        # Extract profile picture URLs (only if needed)
+        if metadata_needed.get('profile_pictures_urls', False):
+            # Extract profile picture/avatar for author
+            if message.author:
+                avatar_url = str(message.author.display_avatar.url) if message.author.display_avatar else None
+                if avatar_url:
+                    metadata_parts.append(f"User profile picture: {avatar_url}")
+            
+            # Extract profile pictures for mentioned users
+            if message.mentions:
+                mentioned_users_info = []
+                for mentioned_user in message.mentions:
+                    if mentioned_user.id != message.author.id:  # Skip author (already listed above)
+                        avatar_url = str(mentioned_user.display_avatar.url) if mentioned_user.display_avatar else None
+                        if avatar_url:
+                            mentioned_users_info.append(f"{mentioned_user.display_name}: {avatar_url}")
+                if mentioned_users_info:
+                    metadata_parts.append(f"Mentioned users' profile pictures: {'; '.join(mentioned_users_info)}")
+        
+        # Extract mentioned users info (only if needed)
+        if metadata_needed.get('mentioned_users', False) and message.mentions:
+            mentioned_info = []
+            for mentioned_user in message.mentions:
+                if mentioned_user.id != message.author.id:
+                    mentioned_info.append(f"{mentioned_user.display_name} (ID: {mentioned_user.id})")
+            if mentioned_info:
+                metadata_parts.append(f"Mentioned users: {', '.join(mentioned_info)}")
+        
+        # Extract server/guild information (only if needed)
+        if metadata_needed.get('server_info', False) and message.guild:
             guild_info = []
             guild_info.append(f"Server: {message.guild.name}")
             if message.guild.icon:
@@ -7004,6 +7170,16 @@ async def extract_discord_metadata(message: discord.Message) -> str:
                 guild_info.append(f"Server description: {message.guild.description[:100]}...")
             if guild_info:
                 metadata_parts.append(" | ".join(guild_info))
+        
+        # Extract ALL server roles (only if needed)
+        if metadata_needed.get('all_roles', False) and message.guild:
+            try:
+                all_roles = [role for role in message.guild.roles if role.name != '@everyone'][:50]  # Limit to 50
+                if all_roles:
+                    role_names = [role.name for role in all_roles]
+                    metadata_parts.append(f"All server roles: {', '.join(role_names)}")
+            except:
+                pass
         
         # Extract message reactions (if any)
         if message.reactions:
@@ -7099,9 +7275,11 @@ Available roles in this server:
 COMMAND TYPES:
 
 1. SEND MESSAGE TO CHANNEL:
-   - User wants you to send a message to a channel (possibly with mentions)
+   - User wants you to SEND a message to a DIFFERENT channel (not just respond in the current channel)
    - Examples: "go to announcements @ everyone and talk about our future plans", "make a short announcement @ing everyone in announcements about the future of this server"
+   - CRITICAL: "can you see the channels" or "what channel is good for X" is NOT a send_message action - those are just questions, respond normally
    - YOU MUST: Intelligently pick the BEST channel, GENERATE the actual message content (don't just copy user's words), determine mentions
+   - ONLY set action_type="send_message" if user explicitly wants you to POST/SEND a message to another channel
    
 2. STORE MEMORY:
    - User wants to store ANY information for the server
@@ -7143,9 +7321,15 @@ CRITICAL FOR STORE_MEMORY:
   * Store in whatever structure makes sense - be flexible and dynamic!
 
 CRITICAL FOR wants_channels_list:
-- Set "wants_channels_list" true if user asks to see/list channels and/or categories
-- Examples: "can u see the channels and categories", "show me the channels", "list the categories", "what channels are in this server"
+- Set "wants_channels_list" true if user asks to see/list channels and/or categories (just a question, NOT sending a message)
+- Examples: "can u see the channels and categories", "show me the channels", "list the categories", "what channels are in this server", "can you see the channels"
 - Set false if user is just asking about a specific channel or normal conversation
+- IMPORTANT: If wants_channels_list=true, ALWAYS set needs_discord_action=false (it's just a question, not an action to send messages)
+
+CRITICAL RULES:
+- If wants_channels_list=true, ALWAYS set needs_discord_action=false (it's just a question, not an action)
+- If user asks "can you see channels" or "what channel is good for X", set wants_channels_list=true and needs_discord_action=false
+- Only set needs_discord_action=true if user wants you to DO something (send message, store memory, query memory)
 
 Be smart and extract all relevant information. Return needs_discord_action=false if this is just a normal conversation."""
     
@@ -7209,6 +7393,8 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
                     wants_channels_list = discord_command.get('wants_channels_list', False)
                     
                     # Handle channels/categories list request (from combined AI decision)
+                    # NOTE: This is NOT a send_message action - user just wants to know what channels exist
+                    # Don't send to another channel, just provide info in the response
                     if wants_channels_list:
                         try:
                             server_structure = await db.get_server_structure(guild_id)
@@ -7216,27 +7402,26 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
                                 channels_list = server_structure.get('channels', [])
                                 categories_list = server_structure.get('categories', [])
                                 
-                                # Format the list for the AI to include in response
-                                list_text = "\n\n⚠️ USER REQUESTED CHANNELS/CATEGORIES LIST:\n"
-                                list_text += "The user asked to see the channels and categories. You MUST include a formatted list in your response.\n"
-                                list_text += "Format it clearly with categories and their channels grouped together.\n"
+                                # Give AI the channel info and let IT decide how to respond (fully dynamic, no hardcoding)
+                                list_text = "\n\n⚠️ USER ASKED ABOUT CHANNELS/CATEGORIES:\n"
+                                list_text += "The user asked if you can see the channels/categories in this server.\n"
+                                list_text += "You have access to the channel information. Respond naturally - you can mention some channel names as examples (like 'general', 'announcements', etc.) but DON'T provide a full hardcoded list.\n"
+                                list_text += "Just confirm you can see them and maybe mention a few examples naturally in your response.\n"
+                                list_text += "Keep it conversational - don't format it as a list unless the user explicitly asks for a full list.\n"
                                 
-                                if categories_list:
-                                    list_text += "\n**Categories:**\n"
-                                    for cat in categories_list[:10]:
-                                        list_text += f"- {cat.get('name', 'Unknown')}\n"
-                                
+                                # Provide channel names for AI to reference (but don't force it to list them all)
                                 if channels_list:
-                                    list_text += "\n**Channels:**\n"
-                                    for ch in channels_list[:20]:
-                                        list_text += f"- #{ch.get('name', 'Unknown')}\n"
+                                    channel_names = [ch.get('name', 'Unknown') for ch in channels_list[:30]]
+                                    list_text += f"\nAvailable channels (for reference): {', '.join(channel_names)}\n"
                                 
                                 consciousness_prompt += list_text
-                                print(f"📋 [{username}] AI decided user wants channels/categories list (from combined Discord command check)")
+                                print(f"📋 [{username}] AI decided user wants channels/categories info (from combined Discord command check)")
                         except Exception as e:
                             print(f"⚠️  [{username}] Error handling channels list request: {e}")
                     
-                    if discord_command.get('needs_discord_action'):
+                    # Only execute Discord actions if it's NOT just a channels list query
+                    # Channels list query should just respond normally, not send messages to other channels
+                    if discord_command.get('needs_discord_action') and not wants_channels_list:
                         print(f"🎯 [{username}] Discord command detected: {discord_command.get('action_type')}")
                         
                         # Handle send_message action - AI decides channel and generates message
@@ -7336,7 +7521,8 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
                     print(f"⚠️  Error handling Discord command: {e}")
         
         # If Discord command was executed, add result to context for AI to respond
-        if discord_command_result:
+        # BUT: Don't add it if it was just a channels list query (that should be handled naturally in response)
+        if discord_command_result and discord_command and not discord_command.get('wants_channels_list', False):
             # Add to message content so AI can acknowledge it
             message.content = (message.content or "") + f"\n\n[System: {discord_command_result}]"
         
@@ -7688,10 +7874,8 @@ CURRENT CONVERSATION CONTEXT:
         
         consciousness_prompt += f"\n\n{username}: {message.content}"
         
-        # Extract Discord-specific metadata (stickers, GIFs, roles, channels, profile pictures, etc.)
-        discord_metadata = await extract_discord_metadata(message)
-        if discord_metadata:
-            consciousness_prompt += f"\n\nDISCORD CONTEXT (you can see and reference these when relevant):\n{discord_metadata}"
+        # Note: Discord metadata extraction happens AFTER assets extraction (below)
+        # This allows us to reuse the AI decision from assets extraction (one AI call for both - efficient!)
         
         # Add server structure info if available (optional, no latency - only if already cached)
         if message.guild:
@@ -7751,9 +7935,13 @@ CURRENT CONVERSATION CONTEXT:
                         print(f"Error downloading image: {e}")
         
         # Extract Discord visual assets (stickers, GIFs, profile pictures, etc.) from current message
+        # AI decides what to extract based on the message content (ONE call for both assets and metadata - efficient!)
         profile_picture_data = None  # Store profile picture data if found (for potential attachment)
+        metadata_needed = None  # Will be set by the AI decision (reused for metadata extraction)
         try:
-            discord_assets = await extract_discord_visual_assets(message)
+            # ONE AI call decides both assets AND metadata (efficient!)
+            assets_needed, metadata_needed = await ai_decide_discord_extraction_needed(message)
+            discord_assets = await extract_discord_visual_assets(message, assets_needed)
             for asset in discord_assets:
                 asset_type = asset.get('type')
                 image_parts.append({
@@ -7771,6 +7959,17 @@ CURRENT CONVERSATION CONTEXT:
                     profile_picture_data = asset['data']
         except Exception as e:
             print(f"⚠️  [{username}] Error extracting Discord visual assets: {e}")
+        
+        # Extract Discord metadata (reusing the decision from assets extraction - efficient!)
+        # This happens after assets extraction so we can reuse the metadata_needed variable
+        discord_metadata = None
+        if metadata_needed is None:
+            # Fallback: if assets extraction didn't happen, decide metadata separately
+            _, metadata_needed = await ai_decide_discord_extraction_needed(message)
+        
+        discord_metadata = await extract_discord_metadata(message, metadata_needed)
+        if discord_metadata:
+            consciousness_prompt += f"\n\nDISCORD CONTEXT - FULL SERVER ACCESS (you have access to ALL of this information and can use it when needed):\n{discord_metadata}\n\nYou can:\n- Reference any channels, roles, stickers, GIFs, profile pictures, etc. when relevant\n- Edit profile pictures of mentioned users (e.g., 'edit @william's profile picture to be a black guy')\n- Use any server information to answer questions or perform actions\n- Access all visual assets (stickers, GIFs, profile pictures) that are available\n- Make decisions about what to do with this information based on the user's request"
         
         # If replying to a message, also get images from that message
         if message.reference and not image_parts:  # Only if user didn't send their own images
@@ -8670,7 +8869,23 @@ Now decide: "{message.content}" -> """
             
             # Check if there are images attached - if so, include that context
             has_images = len(image_parts) > 0
-            image_context = f"\n\nIMPORTANT: The user has attached {len(image_parts)} image(s) with this message. If you need to identify something in the image (a person, place, object, etc.) and you're not certain, you should search for it." if has_images else ""
+            # Build image context with labels for Discord assets (profile picture, server icon, etc.)
+            image_context = ""
+            if has_images:
+                discord_image_labels = []
+                for idx, img in enumerate(image_parts, start=1):
+                    discord_type = img.get('discord_type')
+                    if discord_type == 'profile_picture':
+                        discord_image_labels.append(f"Image {idx}: User's profile picture/avatar")
+                    elif discord_type == 'server_icon':
+                        discord_image_labels.append(f"Image {idx}: Server icon/guild icon")
+                    elif discord_type:
+                        discord_image_labels.append(f"Image {idx}: {discord_type}")
+                
+                if discord_image_labels:
+                    image_context = f"\n\nIMPORTANT: The user has attached {len(image_parts)} image(s) with this message:\n" + "\n".join(discord_image_labels) + "\n\nIf you need to identify something in the image (a person, place, object, etc.) and you're not certain, you should search for it."
+                else:
+                    image_context = f"\n\nIMPORTANT: The user has attached {len(image_parts)} image(s) with this message. If you need to identify something in the image (a person, place, object, etc.) and you're not certain, you should search for it."
             
             search_decision_prompt = f"""User message: "{message.content}"{image_context}
 
@@ -9341,7 +9556,32 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 else:
                     # No new screenshots, just regular image analysis
                     print(f"🔍 [{username}] DEBUG: No new screenshots, adding regular image analysis prompt")
-                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+                    
+                    # Build image labels for Discord assets (profile picture, server icon, etc.)
+                    image_labels = []
+                    for idx, img in enumerate(image_parts, start=1):
+                        discord_type = img.get('discord_type')
+                        username = img.get('username')
+                        is_author = img.get('is_author', False)
+                        is_mentioned = img.get('is_mentioned', False)
+                        
+                        if discord_type == 'profile_picture':
+                            if is_author:
+                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar (message author) - this is what {username} looks like")
+                            elif is_mentioned:
+                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar (mentioned user) - this is what {username} looks like")
+                            else:
+                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar - this is what {username} looks like")
+                        elif discord_type == 'server_icon':
+                            image_labels.append(f"- Image {idx}: Server icon/guild icon - this is the server's icon, NOT a user's profile picture")
+                        elif discord_type:
+                            image_labels.append(f"- Image {idx}: {discord_type}" + (f" ({username})" if username else ""))
+                        else:
+                            image_labels.append(f"- Image {idx}: User-shared image")
+                    
+                    image_label_text = "\n".join(image_labels) if image_labels else ""
+                    
+                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: If the user asks about their profile picture, you're seeing Image 1 (the profile picture). The server icon is a different image. Don't confuse them!\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
             except Exception as prompt_error:
                 print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
