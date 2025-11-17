@@ -3317,6 +3317,104 @@ Important:
 
     return plan
 
+GUIDANCE_HISTORY_LIMIT = 6
+
+def _append_guidance_message(guidance: List[str], message: str) -> None:
+    message = (message or "").strip()
+    if not message:
+        return
+    guidance.append(message)
+    if len(guidance) > GUIDANCE_HISTORY_LIMIT:
+        guidance.pop(0)
+
+async def parse_ai_json_response(raw_text: str, context_label: str = "", goal: str = "") -> Optional[Dict[str, Any]]:
+    """Best-effort JSON parsing with AI repair fallback."""
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError as primary_error:
+        print(f"⚠️  [AI JSON] Malformed JSON for {context_label}: {primary_error}")
+        repair_prompt = f"""You are repairing malformed JSON emitted by another model.
+
+Goal (for context): "{goal}"
+The JSON should describe an action plan for a browser automation agent.
+
+Original text (possibly broken JSON):
+```
+{raw_text}
+```
+
+Return ONLY valid JSON. Do not add commentary."""
+        try:
+            repair_model = get_fast_model()
+            repair_response = await queued_generate_content(repair_model, repair_prompt)
+            repaired_text = repair_response.text.strip()
+            if '```json' in repaired_text:
+                repaired_text = repaired_text.split('```json')[1].split('```')[0].strip()
+            elif '```' in repaired_text:
+                repaired_text = repaired_text.split('```')[1].split('```')[0].strip()
+            return json.loads(repaired_text)
+        except Exception as repair_error:
+            print(f"⚠️  [AI JSON] Repair failed: {repair_error}")
+            return None
+
+def should_guard_action(action_type: str, action_desc: str, recent_actions: List[str]) -> bool:
+    if not action_desc:
+        return False
+    action_type = (action_type or '').lower()
+    desc_lower = action_desc.lower()
+    suspicious_keywords = ['deselect', 'change', 'reset', 'clear', 'shuffle', 'start over', 'undo']
+    if action_type in ('click', 'type', 'press_key'):
+        if action_desc in recent_actions:
+            return True
+        if any(keyword in desc_lower for keyword in suspicious_keywords):
+            return True
+    if action_type == 'type' and any(term in desc_lower for term in ['password', 'email', 'username']):
+        if any(term in action.lower() for action in recent_actions for term in ['password', 'email', 'username']):
+            return True
+    return False
+
+async def ai_validate_proposed_action(goal: str, current_state: str, next_action: Dict[str, Any], recent_actions: List[str], needs_live_play: bool) -> Optional[Dict[str, Any]]:
+    """Ask a fast model to sanity-check the proposed action."""
+    if not next_action:
+        return None
+    validation_prompt = f"""You are reviewing the next step for an autonomous browsing agent.
+
+Goal: "{goal}"
+Current state summary: "{current_state}"
+Needs live interaction/play: {needs_live_play}
+Recent actions (oldest→newest): {recent_actions or "None"}
+
+Proposed next action JSON:
+{json.dumps(next_action, ensure_ascii=False)}
+
+Rules:
+- APPROVE only if this action clearly progresses toward the goal.
+- REJECT if it repeats an action that already failed, undoes progress (e.g., deselecting correct tiles, clicking "Change" after fields are filled), or wastes iterations.
+- For gameplay, if they've already selected some items, encourage submitting/completing instead of re-clicking the same tile endlessly.
+- For form-filling goals ("show me you entering username/password", etc.), once the requested fields are filled, mark the goal complete instead of editing again.
+- If the goal already appears satisfied given the state, set force_goal=true so the agent stops.
+
+Return ONLY JSON:
+{{
+  "proceed": true/false,
+  "force_goal": true/false,
+  "reason": "brief explanation",
+  "guidance": "short instruction to get back on track (if any)"
+}}"""
+
+    try:
+        validation_model = get_fast_model()
+        response = await queued_generate_content(validation_model, validation_prompt)
+        validation_text = response.text.strip()
+        if '```json' in validation_text:
+            validation_text = validation_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in validation_text:
+            validation_text = validation_text.split('```')[1].split('```')[0].strip()
+        return json.loads(validation_text)
+    except Exception as validation_error:
+        print(f"⚠️  [ACTION GUARD] Validation failed: {validation_error}")
+        return None
+
 async def autonomous_browser_automation(url: str, goal: str, max_iterations: int = 10) -> Tuple[List[BytesIO], Optional[BytesIO]]:
     """Fully autonomous browser automation - AI dynamically analyzes pages and works towards goals
     
@@ -3440,6 +3538,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
         meaningful_actions = 0
         obstacle_keywords = ['accept', 'consent', 'cookie', 'privacy', 'gdpr', 'dismiss', 'close popup']
+        credentials_goal = any(keyword in goal_lower for keyword in ['username', 'user name', 'password', 'sign up', 'signup', 'sign-up', 'create account', 'register'])
+        credential_progress = {'user': False, 'pass': False}
+        username_keywords = ['username', 'user name', 'email', 'e-mail', 'mobile', 'phone', 'number', 'name', 'contact']
+        guidance_messages: List[str] = []
 
         while iteration < max_iterations and not goal_achieved:
             iteration += 1
@@ -3460,6 +3562,15 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
             goal_lower = goal.lower()
             is_recording_goal = any(keyword in goal_lower for keyword in ['record', 'video', 'recording', 'screen record'])
             
+            guidance_block = ""
+            if guidance_messages:
+                recent_guidance = "\n".join(f"- {msg}" for msg in guidance_messages[-GUIDANCE_HISTORY_LIMIT:])
+                guidance_block = f"""
+
+ADDITIONAL FEEDBACK FROM EARLIER STEPS (DO NOT IGNORE):
+{recent_guidance}
+"""
+
             analysis_prompt = f"""You are an autonomous browser agent. Your goal is: "{goal}"
 
 Look at this webpage screenshot and analyze:
@@ -3537,6 +3648,7 @@ GAMEPLAY / INTERACTIVE TASKS:
 - Do NOT stop right after loading the game—show tangible progress before marking the goal complete.
 - If one strategy fails, try different combinations, scroll for other controls, shuffle, etc. Stay persistent within the allotted iterations.
 - When you've selected promising items (e.g., Connections tiles, skribbl guesses), follow through—submit them instead of immediately deselecting. Only deselect/reset if you deliberately want to try a different combination.
+{guidance_block}
 
 GOAL ACHIEVEMENT - BE SMART AND DYNAMIC:
 Analyze what the user actually wants and mark goal_achieved = TRUE when you've achieved what they asked for.
@@ -3661,7 +3773,9 @@ Analyze the screenshot now: """
                     json_end = analysis_text.find('```', json_start)
                     analysis_text = analysis_text[json_start:json_end].strip()
                 
-                analysis_data = json.loads(analysis_text)
+                analysis_data = await parse_ai_json_response(analysis_text, context_label="autonomous-analysis", goal=goal)
+                if not analysis_data:
+                    raise ValueError("Unable to parse AI analysis JSON")
                 
                 goal_achieved = analysis_data.get('goal_achieved', False)
                 current_state = analysis_data.get('current_state', 'Unknown')
@@ -3685,6 +3799,10 @@ Analyze the screenshot now: """
                     if len(set(last_three)) == 1:  # All same action
                         is_stuck = True
                         print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{last_three[0]}' repeated 3+ times")
+                        _append_guidance_message(
+                            guidance_messages,
+                            f"You already tried '{last_three[0]}' multiple times without progress—change strategy (submit, new items, or other controls)."
+                        )
 
                 # If we have repeated technical failures, also treat as stuck
                 if consecutive_failures >= 3 and not is_stuck:
@@ -3694,6 +3812,8 @@ Analyze the screenshot now: """
                 
                 if is_stuck:
                     print(f"🔄 [AUTONOMOUS] AI detected stuck state: {recovery_suggestion}")
+                    if recovery_suggestion:
+                        _append_guidance_message(guidance_messages, recovery_suggestion)
                 
                 print(f"🤖 [AUTONOMOUS] Analysis:")
                 print(f"   State: {current_state}")
@@ -3918,6 +4038,30 @@ Decision: """
                 # Perform next action
                 action_type = next_action.get('type', 'none')
                 action_desc = next_action.get('description', '')
+
+                guard_result = None
+                if should_guard_action(action_type, action_desc, recent_actions):
+                    guard_result = await ai_validate_proposed_action(
+                        goal,
+                        current_state,
+                        next_action,
+                        recent_actions,
+                        needs_live_play
+                    )
+                    if guard_result:
+                        if not guard_result.get('proceed', True):
+                            reason = guard_result.get('reason', 'Action rejected')
+                            print(f"⚠️  [ACTION GUARD] Blocking action '{action_desc}': {reason}")
+                            _append_guidance_message(guidance_messages, guard_result.get('guidance') or reason)
+                            if guard_result.get('force_goal'):
+                                goal_achieved = True
+                                print("✅ [ACTION GUARD] Goal considered complete by validator")
+                                continue
+                            consecutive_failures += 1
+                            await page.wait_for_timeout(800)
+                            continue
+                        elif guard_result.get('guidance'):
+                            _append_guidance_message(guidance_messages, guard_result['guidance'])
 
                 # If the AI reports being stuck, respect its recovery suggestion and
                 # change strategy instead of blindly repeating the same action.
