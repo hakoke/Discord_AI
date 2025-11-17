@@ -276,7 +276,17 @@ NOW: What did you learn from {username}? Be honest and specific."""
             elif '```' in behavior_text:
                 behavior_text = behavior_text.split('```')[1].split('```')[0]
             
-            behavior = json.loads(behavior_text.strip())
+            behavior_text = behavior_text.strip()
+            if not behavior_text:
+                print(f"⚠️  Error learning behavior: Empty response from AI")
+                return
+            
+            try:
+                behavior = json.loads(behavior_text)
+            except json.JSONDecodeError as e:
+                print(f"⚠️  Error learning behavior: Invalid JSON - {e}")
+                print(f"⚠️  Raw response: {behavior_text[:200]}")
+                return
             
             # Extract description from whatever field the AI used
             description = (

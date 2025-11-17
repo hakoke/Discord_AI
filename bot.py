@@ -1823,9 +1823,19 @@ Be efficient - only extract what's actually needed for the user's request."""
             metadata_data = parsed.get('metadata', {})
             
             # Build assets dict
+            # Only extract mentioned users' profile pictures if they're NOT the bot
+            has_non_bot_mentions = False
+            if message.mentions and message.guild and message.guild.me:
+                has_non_bot_mentions = any(
+                    m.id != message.guild.me.id for m in message.mentions
+                )
+            elif message.mentions:
+                # If no guild context, check if any mentioned user is not a bot
+                has_non_bot_mentions = any(not m.bot for m in message.mentions)
+            
             assets = {
                 'profile_picture': bool(assets_data.get('profile_picture', False)),
-                'mentioned_users_pfps': bool(assets_data.get('mentioned_users_pfps', False)) or bool(message.mentions),
+                'mentioned_users_pfps': bool(assets_data.get('mentioned_users_pfps', False)) or has_non_bot_mentions,
                 'sticker': bool(assets_data.get('sticker', False)) or bool(message.stickers),
                 'gif': bool(assets_data.get('gif', False)) or bool(message.embeds),
                 'server_icon': bool(assets_data.get('server_icon', False)),
@@ -1966,6 +1976,17 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                 # Skip if it's the author (already extracted above)
                 if mentioned_user.id == message.author.id:
                     continue
+                # Skip if it's the bot itself (don't extract bot's profile picture unless explicitly needed)
+                # Check if mentioned user is the bot (either by bot flag or by comparing IDs)
+                if message.guild:
+                    bot_member = message.guild.me
+                    if bot_member and mentioned_user.id == bot_member.id:
+                        print(f"📸 Skipping bot's profile picture ({mentioned_user.display_name}) - not needed")
+                        continue
+                elif mentioned_user.bot:
+                    # If no guild context, skip all bots to be safe
+                    print(f"📸 Skipping bot's profile picture ({mentioned_user.display_name}) - not needed")
+                    continue
                 try:
                     avatar_url = str(mentioned_user.display_avatar.url) if mentioned_user.display_avatar else None
                     if avatar_url:
@@ -1978,7 +1999,8 @@ async def extract_discord_visual_assets(message: discord.Message, assets_needed:
                                 'user_id': str(mentioned_user.id),
                                 'username': mentioned_user.display_name,
                                 'is_author': False,
-                                'is_mentioned': True
+                                'is_mentioned': True,
+                                'is_bot': mentioned_user.bot  # Mark if it's a bot
                             })
                             print(f"📸 Extracted profile picture for mentioned user {mentioned_user.display_name} ({len(image_data)} bytes)")
                 except Exception as e:
@@ -9599,12 +9621,32 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     
                     # Add critical instructions based on what images are present
                     critical_instructions = ""
-                    if author_profile_picture_idx and server_icon_idx:
-                        critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture)\n- If the user asks about 'my profile picture', 'my avatar', or 'my pfp', they mean Image {author_profile_picture_idx} ONLY\n- DO NOT mention or describe Image {server_icon_idx} (the server icon) when the user asks about their own profile picture\n- The server icon is irrelevant to questions about the user's profile picture - IGNORE IT in those cases"
-                    elif author_profile_picture_idx:
-                        critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- If the user asks about 'my profile picture', 'my avatar', or 'my pfp', they mean Image {author_profile_picture_idx}"
+                    user_message_lower = (message.content or "").lower()
+                    asks_about_profile_picture = any(phrase in user_message_lower for phrase in [
+                        'my profile picture', 'my avatar', 'my pfp', 'whats my profile', 'show me my profile',
+                        'my profile pic', 'what is my profile picture', 'can you see my profile picture'
+                    ])
+                    asks_about_channels = any(phrase in user_message_lower for phrase in [
+                        'channel', 'channels', 'which channel', 'what channel', 'best channel'
+                    ])
                     
-                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+                    if author_profile_picture_idx and server_icon_idx:
+                        if asks_about_profile_picture:
+                            critical_instructions = f"\n\n🚨🚨🚨 CRITICAL - USER ASKED ABOUT THEIR PROFILE PICTURE:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author) - THIS IS WHAT THEY'RE ASKING ABOUT\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture) - COMPLETELY IGNORE THIS IMAGE\n- YOU MUST ONLY describe Image {author_profile_picture_idx} (the user's profile picture)\n- DO NOT mention, describe, or reference Image {server_icon_idx} (the server icon) AT ALL\n- DO NOT say 'the first image' or 'the second image' - just describe the user's profile picture directly\n- The server icon is completely irrelevant - act as if it doesn't exist"
+                        elif asks_about_channels:
+                            critical_instructions = f"\n\n🚨 CRITICAL - USER ASKED ABOUT CHANNELS:\n- Image {server_icon_idx} is THE SERVER ICON - this is NOT relevant to questions about channels\n- DO NOT mention or describe the server icon when answering about channels\n- Focus ONLY on answering the channel question - ignore all images"
+                        else:
+                            critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture)\n- Only describe images that are relevant to the user's question"
+                    elif author_profile_picture_idx:
+                        if asks_about_profile_picture:
+                            critical_instructions = f"\n\n🚨🚨🚨 CRITICAL - USER ASKED ABOUT THEIR PROFILE PICTURE:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author) - THIS IS WHAT THEY'RE ASKING ABOUT\n- Describe ONLY this image - do not mention any other images"
+                        else:
+                            critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Only describe this image if it's relevant to the user's question"
+                    elif server_icon_idx:
+                        if asks_about_channels:
+                            critical_instructions = f"\n\n🚨 CRITICAL - USER ASKED ABOUT CHANNELS:\n- Image {server_icon_idx} is THE SERVER ICON - this is NOT relevant to questions about channels\n- DO NOT mention or describe the server icon when answering about channels\n- Focus ONLY on answering the channel question - ignore all images"
+                    
+                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
             except Exception as prompt_error:
                 print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
@@ -10790,13 +10832,17 @@ Response: """
                 # Prepare files to attach (searched images + generated images + screenshots - these go with the text response)
                 # Try without compression first (original quality)
                 files_to_attach = []
+                DISCORD_ATTACHMENT_LIMIT = 10  # Discord's maximum attachments per message
                 
-                # Add video attachments first (if any)
+                # Add video attachments first (if any) - prioritize videos
                 message_id = message.id
                 if message_id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS[message_id]:
                     video_list = VIDEO_ATTACHMENTS[message_id]
                     print(f"📎 [{message.author.display_name}] Adding {len(video_list)} video(s) to attachments")
                     for idx, video_file in enumerate(video_list):
+                        if len(files_to_attach) >= DISCORD_ATTACHMENT_LIMIT:
+                            print(f"⚠️  [{message.author.display_name}] Reached Discord attachment limit ({DISCORD_ATTACHMENT_LIMIT}), skipping remaining videos")
+                            break
                         try:
                             files_to_attach.append(video_file)
                             print(f"📎 [{message.author.display_name}] ✅ Video {idx+1} added")
@@ -10805,10 +10851,14 @@ Response: """
                     # Clean up after use
                     del VIDEO_ATTACHMENTS[message_id]
                 
-                # Add screenshots (they're already compressed)
+                # Add screenshots (they're already compressed) - limit to stay under Discord's 10 attachment limit
                 if 'screenshots' in locals() and screenshots:
-                    print(f"📎 [{message.author.display_name}] Adding {len(screenshots)} screenshot(s) to attachments")
-                    for idx, screenshot_bytes in enumerate(screenshots):
+                    remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
+                    screenshots_to_add = screenshots[:remaining_slots] if remaining_slots > 0 else []
+                    if len(screenshots) > remaining_slots:
+                        print(f"⚠️  [{message.author.display_name}] Limiting screenshots to {remaining_slots} (Discord attachment limit: {DISCORD_ATTACHMENT_LIMIT}, had {len(screenshots)})")
+                    print(f"📎 [{message.author.display_name}] Adding {len(screenshots_to_add)} screenshot(s) to attachments")
+                    for idx, screenshot_bytes in enumerate(screenshots_to_add):
                         try:
                             screenshot_bytes.seek(0)
                             file = discord.File(fp=screenshot_bytes, filename=f'screenshot_{idx+1}.png')
@@ -10817,11 +10867,16 @@ Response: """
                         except Exception as screenshot_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to prepare screenshot {idx+1}: {screenshot_error}")
                 
+                # Add searched images - limit to stay under Discord's 10 attachment limit
                 if searched_images:
-                    for idx, img in enumerate(searched_images):
+                    remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
+                    searched_images_to_add = searched_images[:remaining_slots] if remaining_slots > 0 else []
+                    if len(searched_images) > remaining_slots:
+                        print(f"⚠️  [{message.author.display_name}] Limiting searched images to {remaining_slots} (Discord attachment limit: {DISCORD_ATTACHMENT_LIMIT})")
+                    for idx, img in enumerate(searched_images_to_add):
                         try:
                             # Compress large images to prevent blocking the event loop
-                            print(f"📎 [{message.author.display_name}] Preparing searched image {idx+1}/{len(searched_images)}...")
+                            print(f"📎 [{message.author.display_name}] Preparing searched image {idx+1}/{len(searched_images_to_add)}...")
                             # Use compression for large images to prevent blocking
                             img_bytes = compress_image_for_discord(img, max_width=1920, max_height=1920, quality=85)
                             img_bytes.seek(0)
@@ -10837,15 +10892,19 @@ Response: """
                             import traceback
                             print(f"📎 [{message.author.display_name}] Traceback: {traceback.format_exc()}")
                 
-                # Add generated images to files_to_attach (attach to same message)
+                # Add generated images to files_to_attach (attach to same message) - limit to stay under Discord's 10 attachment limit
                 print(f"📎 [{message.author.display_name}] Checking generated_images: {generated_images}")
                 print(f"📎 [{message.author.display_name}] generated_images type: {type(generated_images)}, truthy: {bool(generated_images)}")
                 if generated_images:
-                    print(f"📎 [{message.author.display_name}] ✅ Adding {len(generated_images)} generated image(s) to attachments")
-                    for idx, img in enumerate(generated_images):
+                    remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
+                    generated_images_to_add = generated_images[:remaining_slots] if remaining_slots > 0 else []
+                    if len(generated_images) > remaining_slots:
+                        print(f"⚠️  [{message.author.display_name}] Limiting generated images to {remaining_slots} (Discord attachment limit: {DISCORD_ATTACHMENT_LIMIT})")
+                    print(f"📎 [{message.author.display_name}] ✅ Adding {len(generated_images_to_add)} generated image(s) to attachments")
+                    for idx, img in enumerate(generated_images_to_add):
                         try:
                             # Save as PNG (original quality, no compression)
-                            print(f"📎 [{message.author.display_name}] Preparing generated image {idx+1}/{len(generated_images)} (original quality)...")
+                            print(f"📎 [{message.author.display_name}] Preparing generated image {idx+1}/{len(generated_images_to_add)} (original quality)...")
                             img_bytes = BytesIO()
                             img.save(img_bytes, format='PNG', optimize=True)
                             img_bytes.seek(0)
