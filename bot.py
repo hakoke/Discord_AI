@@ -3222,9 +3222,17 @@ UNDERSTANDING USER INTENT:
 * "show me you playing connections" / "show me you completing connections" → goal_achieved when you've started playing or completed the game
 * "show me you finishing wordle" → goal_achieved when you've completed/solved the wordle puzzle
 * "show me you doing [task]" → goal_achieved when you've completed the task
-* "filling out username and password" → goal_achieved when BOTH are filled (or password page is visible with username already filled - you're on the right path!)
+* "filling out username and password" / "just fill out email and password" → goal_achieved when BOTH fields are FILLED (stop there, don't submit/continue!)
+* "fill out [fields]" → goal_achieved when the requested fields are filled (the filling IS the goal, not submitting)
 * "record X seconds" of video → goal_achieved when video is on screen and ready to play (system will record after)
 * "record me completing [game]" → goal_achieved when you've completed the game (system will record the process)
+
+CRITICAL: Understand the difference between "filling out" vs "submitting":
+- If user says "just fill out email and password" → The GOAL is to FILL the fields, not submit the form!
+- Once both email AND password are filled → goal_achieved = TRUE, STOP! Don't click submit/continue!
+- If user says "fill out and submit" → Then filling + submitting is the goal
+- If user says "just fill out" or "fill out [fields]" → The filling itself is the goal, stop after filling!
+- Be smart: "just fill out" means "only fill out, nothing more" - stop when fields are filled!
 
 KEY INSIGHT: Understand the USER'S INTENT, not just keywords:
 - If user says "show me the page" → they just want to SEE it (screenshot is enough)
@@ -6099,24 +6107,31 @@ SLASH COMMANDS AVAILABLE:
   - What it does: Cancels any active AI response, screenshot run, or browser automation that I'm currently doing for your latest message
   - When to use: When I'm taking too long, stuck on a website, or you simply changed your mind and want me to stop what I'm doing for you
 
+- `/website` - Visit the ServerMate website
+  - What it does: Opens an embed with a link to the ServerMate website (https://perfect-gratitude-production.up.railway.app/) where users can learn more about features, view server stats, and see what the bot can do
+  - When to use: When someone asks "where's your website?", "what's your website?", "show me your site", or wants to learn more about ServerMate online
+
 CRITICAL - COMMAND ACCURACY:
-- The slash commands that exist are: `/profile`, `/help`, and `/stop`. DO NOT invent or mention any others.
+- The slash commands that exist are: `/profile`, `/help`, `/stop`, and `/website`. DO NOT invent or mention any others.
 - You MUST know what each command does:
   - `/profile` = Shows personality profile/memory data (summary, history, interests, communication style, impressions, patterns)
   - `/help` = Shows help embed with how to use the bot, capabilities list, commands, and examples
   - `/stop` = Stops your current in-progress response or automation (ONLY for your prompts)
+  - `/website` = Opens an embed with link to the ServerMate website
 - If someone asks "how do I view my memory?", "how can I see what you remember about me?", "what do you know about me?", tell them to use `/profile` to view their memory/profile.
 - If someone asks "how do I get help?", "how do I use you?", "what commands are available?", "what can you do?", tell them to use `/help` to see the help information.
 - If someone asks "how do I stop you" or "cancel this" or "you're stuck", tell them to use `/stop` to cancel their current request.
-- If someone asks "what commands do you have?", mention `/profile`, `/help`, and `/stop` and explain what each does.
+- If someone asks "where's your website?" or "what's your website?", tell them to use `/website` to get a link to the ServerMate website.
+- If someone asks "what commands do you have?", mention `/profile`, `/help`, `/stop`, and `/website` and explain what each does.
 - DO NOT invent or mention commands like `/memory`, `/remember`, `/forget`, `/stats`, `/imagine`, or any other commands that don't exist.
 
 Examples of correct responses:
 - "You can use `/profile` to see your detailed personality profile and what I remember about you!"
 - "Try `/help` to see all available commands, how to use me, and what I can do!"
 - "To view your memory/profile, use `/profile` - it shows everything I remember about you including your interests, communication style, and interaction history!"
-- "I have two slash commands: `/profile` to view personality profiles and memory data, and `/help` to see a guide on how to use me and what I can do!"
+- "I have slash commands: `/profile` to view personality profiles and memory data, `/help` to see a guide on how to use me and what I can do, `/stop` to cancel your current request, and `/website` to visit my website!"
 - "Use `/help` to see a complete guide with all my capabilities and how to interact with me!"
+- "Check out my website with `/website` to learn more about ServerMate features and stats!"
 
 If someone asks "can you make images?" or "generate an image" - say yes and help them shape the prompt.
 If someone asks for a PDF/Word document (new or edited) - say yes, read any provided materials, and deliver a polished document.
@@ -9582,7 +9597,8 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
-            "`/stop` - Stop my current response or automation for you"
+            "`/stop` - Stop my current response or automation for you\n"
+            "`/website` - Visit the ServerMate website"
         ),
         inline=False
     )
@@ -9640,6 +9656,24 @@ async def stop_command(interaction: discord.Interaction):
         await interaction.response.send_message(
             "Your responses already finished – there's nothing left to stop.", ephemeral=True
         )
+
+@bot.tree.command(name='website', description='Visit the ServerMate website')
+async def website_command(interaction: discord.Interaction):
+    """Slash command to open the ServerMate website"""
+    embed = discord.Embed(
+        title="🌐 ServerMate Website",
+        description="Visit the ServerMate website to learn more about features, view server stats, and see what the bot can do!",
+        color=0x5865F2,
+        url="https://perfect-gratitude-production.up.railway.app/"
+    )
+    embed.add_field(
+        name="🔗 Link",
+        value="[Open ServerMate Website](https://perfect-gratitude-production.up.railway.app/)",
+        inline=False
+    )
+    embed.set_footer(text="Complete AI assistant for Discord. Images, search, documents, memory and more!")
+    
+    await interaction.response.send_message(embed=embed)
 
 @bot.command(name='memory')
 async def show_memory(ctx):
