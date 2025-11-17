@@ -3366,7 +3366,7 @@ Return ONLY valid JSON. Do not add commentary."""
             print(f"⚠️  [AI JSON] Repair failed: {repair_error}")
             return None
 
-def should_guard_action(action_type: str, action_desc: str, recent_actions: List[str]) -> bool:
+def should_guard_action(action_type: str, action_desc: str, recent_actions: List[str], needs_live_play: bool = False) -> bool:
     if not action_desc:
         return False
     action_type = (action_type or '').lower()
@@ -3376,6 +3376,11 @@ def should_guard_action(action_type: str, action_desc: str, recent_actions: List
         return False
     suspicious_keywords = ['deselect', 'change', 'reset', 'clear', 'shuffle', 'start over', 'undo']
     repetitions = sum(1 for act in recent_actions if act == action_desc)
+    if needs_live_play and action_type == 'click':
+        # Allow more freedom during live gameplay; only guard after many repeats
+        if repetitions >= 4 and any(keyword in desc_lower for keyword in suspicious_keywords):
+            return True
+        return False
     if action_type in ('click', 'type', 'press_key'):
         if repetitions >= 2:
             return True
@@ -3404,7 +3409,7 @@ Proposed next action JSON:
 Rules:
 - APPROVE only if this action clearly progresses toward the goal.
 - REJECT if it repeats an action that already failed, undoes progress (e.g., deselecting correct tiles, clicking "Change" after fields are filled), or wastes iterations.
-- For gameplay, if they've already selected some items, encourage submitting/completing instead of re-clicking the same tile endlessly.
+- For gameplay (`needs_live_play=true`), repeated clicks can be necessary, but push for tangible progress (select four tiles, hit Submit, clear mistakes) instead of toggling the exact same tile forever. Only reject when it's truly looping with zero new progress.
 - For form-filling goals ("show me you entering username/password", etc.), once the requested fields are filled, mark the goal complete instead of editing again.
 - If the goal already appears satisfied given the state, set force_goal=true so the agent stops.
 
@@ -4056,7 +4061,7 @@ Decision: """
 
                 guard_result = None
                 recent_executed_actions = executed_actions[-EXECUTED_HISTORY_LIMIT:] if executed_actions else []
-                if should_guard_action(action_type, action_desc, recent_executed_actions):
+                if should_guard_action(action_type, action_desc, recent_executed_actions, needs_live_play):
                     guard_result = await ai_validate_proposed_action(
                         goal,
                         current_state,
