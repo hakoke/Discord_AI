@@ -1529,6 +1529,13 @@ CRITICAL DISTINCTION - GENERATE vs SEARCH:
   Examples: "search for images of X", "show me X", "get me images of X", "find pictures of X", "what does X look like"
   These should use Google image search, NOT image generation.
 
+🚨 CRITICAL: DO NOT EDIT IMAGES FOR BROWSER AUTOMATION TASKS 🚨
+- If the user is asking for browser automation (e.g., "go to youtube", "take a video", "search for", "click on", "watch", "browse", "navigate to", "show me you going to", "record", etc.), set "edit" to FALSE
+- Profile pictures or other images extracted for context should NOT be edited when the user wants browser automation
+- Only set "edit" true if the user EXPLICITLY asks to edit/modify/change an image they provided
+- Examples where edit should be FALSE: "take a video of you going to youtube", "go to youtube and search", "click on a video", "show me you browsing", "record yourself"
+- Examples where edit should be TRUE: "edit my profile picture to be X", "make this person bald", "change the background of this image"
+
 Return ONLY a JSON object like:
 {{
   "generate": true,
@@ -1539,10 +1546,11 @@ Return ONLY a JSON object like:
 
 Rules:
 - Set "generate" true ONLY if the user explicitly wants to CREATE/GENERATE/MAKE/DRAW new images (not search for existing ones).
-- Set "edit" true if the user provided images AND wants to modify/change/transform them.
+- Set "edit" true ONLY if the user EXPLICITLY asks to edit/modify/change an image AND the message is NOT about browser automation/videos/navigation
 - Set "analysis" true only if the user wants commentary/description of provided images (without modification requests).
 - Set "attach_profile_picture" true if user asks to see/send their profile picture (e.g., "can u see my profile picture", "send me my profile picture", "show me my avatar", "can you see my pfp")
 - Examples of EDIT: "make this person a woman", "turn this into a cat", "change the background", "edit this image", "transform this"
+- Examples where edit should be FALSE (browser automation): "take a video", "go to youtube", "search for", "click on", "watch", "browse", "navigate", "show me you going to", "record yourself"
 - Examples of GENERATE (set true): "create an image of a car", "generate a sunset", "make me a picture", "draw me a dog"
 - Examples of SEARCH (set generate FALSE): "search for images of X", "show me X", "get me images of X", "find pictures of X", "what does X look like", "show us photos of X"
 - Examples of ANALYSIS: "what's in this image?", "describe this", "what do you see?"
@@ -1805,11 +1813,18 @@ Extract ONLY if needed:
 - User asks about server → extract server_info metadata AND server_icon asset
 - Message has stickers/GIFs → always extract stickers/gifs assets AND metadata
 
+🚨 CRITICAL: DO NOT EXTRACT PROFILE PICTURES FOR BROWSER AUTOMATION 🚨
+- If the user is asking for browser automation (e.g., "go to youtube", "take a video", "search for", "click on", "watch", "browse", "navigate to", "show me you going to", "record", etc.), DO NOT extract profile pictures
+- Profile pictures are NOT relevant for browser automation tasks
+- Only extract profile pictures if the user explicitly asks about them or wants to edit/see them
+- Examples where profile pictures should NOT be extracted: "take a video of you going to youtube", "go to youtube and search", "click on a video", "show me you browsing"
+
 IMPORTANT: If user explicitly asks about "bot's profile picture", "ServerMate's avatar", "server icon", "guild icon", etc., extract those assets!
 
 Do NOT extract if:
 - User is just chatting normally → only current_channel metadata, minimal assets
 - User doesn't ask about something → don't extract it
+- User is asking for browser automation/videos → don't extract profile pictures (they're not relevant)
 
 Return JSON:
 {{
@@ -4186,6 +4201,15 @@ UNDERSTANDING USER INTENT:
 * "fill out [fields]" → goal_achieved when the requested fields are filled (the filling IS the goal, not submitting)
 * "record X seconds" of video → goal_achieved when video is on screen and ready to play (system will record after)
 * "record me completing [game]" → goal_achieved when you've completed the game (system will record the process)
+
+🚨 CRITICAL FOR VIDEO-WATCHING TASKS 🚨
+* "click on a video" / "click a random video" / "watch a video" / "click on videos" → goal_achieved ONLY when you have ACTUALLY CLICKED on a video AND the video page is loaded (not just search results!)
+* "search for X and click a video" → goal_achieved when you've searched, found results, AND clicked on a video (the video page must be visible, not just search results)
+* "go to youtube and click on a video" → goal_achieved when the video page is visible and playing (not just the homepage or search results)
+* "watch 10 seconds per video" / "watch videos" → goal_achieved when you've actually clicked on and started watching videos (not just searched)
+* DO NOT mark goal_achieved when you only see search results - you must actually CLICK on a video first!
+* DO NOT mark goal_achieved when you're still on the search results page - the video page must be visible!
+* If the goal says "click on" or "watch" or "play" a video, you MUST actually click on a video before marking goal_achieved!
 
 CRITICAL: Understand the difference between "filling out" vs "submitting":
 - If user says "just fill out email and password" → The GOAL is to FILL the fields, not submit the form!
@@ -9672,9 +9696,9 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     if server_icon_idx:
                         image_context += f"- Image {server_icon_idx} is the server/guild icon\n"
                     
-                    critical_instructions = f"{image_context}\n\nCRITICAL: Based on the user's message, intelligently determine what they're asking about:\n- If they ask about THEIR OWN profile picture/avatar/pfp → describe ONLY the user's profile picture (Image {author_profile_picture_idx if author_profile_picture_idx else 'N/A'})\n- If they ask about BOT'S profile picture/avatar or mention the bot → describe ONLY the bot's profile picture (Image {bot_profile_picture_idx if bot_profile_picture_idx else 'N/A'})\n- If they ask about SERVER ICON/guild icon → describe ONLY the server icon (Image {server_icon_idx if server_icon_idx else 'N/A'})\n- If they ask about CHANNELS → ignore all images and focus on answering the channel question\n- Only describe images that are relevant to what the user is actually asking about\n- DO NOT describe irrelevant images - be smart and focus on what the user wants to know\n- Use your understanding of natural language to determine the user's intent - don't rely on exact phrase matching"
+                    critical_instructions = f"{image_context}\n\nCRITICAL: Based on the user's message, intelligently determine what they're asking about:\n- If they ask about THEIR OWN profile picture/avatar/pfp → describe ONLY the user's profile picture (Image {author_profile_picture_idx if author_profile_picture_idx else 'N/A'})\n- If they ask about BOT'S profile picture/avatar or mention the bot → describe ONLY the bot's profile picture (Image {bot_profile_picture_idx if bot_profile_picture_idx else 'N/A'})\n- If they ask about SERVER ICON/guild icon → describe ONLY the server icon (Image {server_icon_idx if server_icon_idx else 'N/A'})\n- If they ask about CHANNELS → ignore all images and focus on answering the channel question\n- 🚨 If they ask for BROWSER AUTOMATION/VIDEOS (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record') → IGNORE ALL PROFILE PICTURES AND SERVER ICONS - they are NOT relevant to browser automation tasks - DO NOT mention them in your response\n- Only describe images that are relevant to what the user is actually asking about\n- DO NOT describe irrelevant images - be smart and focus on what the user wants to know\n- Use your understanding of natural language to determine the user's intent - don't rely on exact phrase matching"
                     
-                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\n🚨 CRITICAL FOR BROWSER AUTOMATION: If the user is asking for browser automation/videos (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record'), DO NOT mention or describe profile pictures or server icons in your response - they are completely irrelevant to browser automation tasks. Focus ONLY on the automation task and any screenshots/videos that were captured.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
             except Exception as prompt_error:
                 print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
