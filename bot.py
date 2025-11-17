@@ -8018,7 +8018,19 @@ Return ONLY the JSON object, nothing else:"""
                 print(f"⚠️  [{username}] Image search found no results - disabling image generation, AI will inform user")
                 wants_image = False
         
-        if await decide_if_search_needed():
+        # Call decide_if_search_needed() and ensure we NEVER return its result directly
+        search_needed_result = await decide_if_search_needed()
+        print(f"🔍 [{username}] DEBUG: decide_if_search_needed() returned: {search_needed_result} (type: {type(search_needed_result)})")
+        
+        # Safety check: ensure search_needed_result is a boolean, not something else
+        if not isinstance(search_needed_result, bool):
+            print(f"❌ [{username}] ⚠️  CRITICAL: decide_if_search_needed() returned non-bool: {type(search_needed_result)} = {search_needed_result}")
+            import traceback
+            print(f"❌ [{username}] ⚠️  Stack trace:\n{traceback.format_stack()[-10:]}")
+            # Convert to bool to prevent issues
+            search_needed_result = bool(search_needed_result)
+        
+        if search_needed_result:
             print(f"🌐 [{username}] Performing internet search for: {message.content[:50]}...")
             search_start = time.time()
             
@@ -8046,6 +8058,11 @@ Return ONLY the JSON object, nothing else:"""
                     consciousness_prompt += f"\n\nINTERNET SEARCH RESULTS:\n{search_results}{link_instruction}"
                 else:
                     print(f"⚠️  [{username}] Search returned no results or was not configured")
+        
+        # Safety check after search: ensure no early return happened
+        # This catches any case where decide_if_search_needed() might have returned False incorrectly
+        # and was somehow returned from generate_response directly (which should never happen)
+        print(f"🔍 [{username}] DEBUG: Continuing after search block - should reach safety check at line 9047")
         
         # Add webpage contents to prompt if available
         if webpage_contents:
@@ -8269,16 +8286,16 @@ Examples:
 "go to X.com and explain the design" -> COMPLEX
 
 Now decide: "{message.content}" -> """
+                    
+                    try:
+                        decision_model = get_fast_model()
+                        decision_response = await queued_generate_content(decision_model, decision_prompt)
+                        decision = decision_response.text.strip().upper()
+                        return 'SIMPLE' in decision
+                    except Exception as e:
+                        handle_rate_limit_error(e)
+                        return False  # Fallback to smart model if uncertain
                 
-                try:
-                    decision_model = get_fast_model()
-                    decision_response = await queued_generate_content(decision_model, decision_prompt)
-                    decision = decision_response.text.strip().upper()
-                    return 'SIMPLE' in decision
-                except Exception as e:
-                    handle_rate_limit_error(e)
-                    return False  # Fallback to smart model if uncertain
-            
                 is_simple = await decide_screenshot_complexity()
                 if is_simple:
                     needs_smart_model = False
