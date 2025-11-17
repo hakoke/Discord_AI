@@ -8247,7 +8247,10 @@ Now decide: "{message.content}" -> """
         decision_time = 0.0
         force_fast_due_to_automation = getattr(message, "_servermate_force_fast_model", False)
         if force_fast_due_to_automation:
-            print(f"⚡ [{username}] Forced fast model for autonomous web automation reply")
+            # ALWAYS use fast model for automation - no decision needed, saves time
+            needs_smart_model = False
+            decision_time = 0
+            print(f"⚡ [{username}] ⚡ FORCED FAST MODEL for autonomous web automation (skipping all decision logic)")
         else:
             decision_start = time.time()
             # For summaries, always use fast model (summaries don't need deep reasoning)
@@ -8499,8 +8502,14 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             # Decide which model to use for images
             # If we already decided on smart model (complex reasoning), use it for images too (2.5 Pro has vision!)
             # Otherwise, check if images need deep analysis
-            print(f"🔍 [{username}] DEBUG: Deciding which model to use for images, needs_smart_model={needs_smart_model}")
-            if needs_smart_model:
+            # BUT: If automation forced fast model, ALWAYS use fast model for images too (saves time!)
+            print(f"🔍 [{username}] DEBUG: Deciding which model to use for images, needs_smart_model={needs_smart_model}, force_fast_due_to_automation={force_fast_due_to_automation}")
+            if force_fast_due_to_automation:
+                # ALWAYS use fast model for automation - no decision needed, saves time
+                print(f"⚡ [{username}] ⚡ FORCED FAST MODEL for images (automation detected)")
+                image_model = get_vision_model()
+                vision_model_name = VISION_MODEL
+            elif needs_smart_model:
                 print(f"🔍 [{username}] DEBUG: Using smart model for images (already decided)")
                 # Already using smart model for complex reasoning - use it for images too (2.5 Pro is multimodal)
                 image_model = active_model
