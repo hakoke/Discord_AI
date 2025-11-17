@@ -7948,18 +7948,24 @@ CURRENT CONVERSATION CONTEXT:
             discord_assets = await extract_discord_visual_assets(message, assets_needed)
             for asset in discord_assets:
                 asset_type = asset.get('type')
-                image_parts.append({
+                # Include ALL metadata from asset so AI can properly identify which image is which
+                image_part = {
                     'mime_type': asset['mime_type'],
                     'data': asset['data'],
                     'is_current': True,
                     'discord_type': asset_type,
                     'discord_name': asset.get('name'),
-                    'discord_description': asset.get('description')
-                })
+                    'discord_description': asset.get('description'),
+                    'username': asset.get('username'),  # Include username for labeling
+                    'is_author': asset.get('is_author', False),  # Include is_author flag
+                    'is_mentioned': asset.get('is_mentioned', False),  # Include is_mentioned flag
+                    'user_id': asset.get('user_id')  # Include user_id for identification
+                }
+                image_parts.append(image_part)
                 print(f"📸 [{username}] Added Discord visual asset: {asset_type} ({len(asset['data'])} bytes)")
                 
                 # Store profile picture data for potential attachment (decision made in ai_decide_intentions)
-                if asset_type == 'profile_picture':
+                if asset_type == 'profile_picture' and asset.get('is_author', False):
                     profile_picture_data = asset['data']
         except Exception as e:
             print(f"⚠️  [{username}] Error extracting Discord visual assets: {e}")
@@ -9563,29 +9569,42 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     
                     # Build image labels for Discord assets (profile picture, server icon, etc.)
                     image_labels = []
+                    author_profile_picture_idx = None
+                    server_icon_idx = None
+                    
                     for idx, img in enumerate(image_parts, start=1):
                         discord_type = img.get('discord_type')
-                        username = img.get('username')
+                        img_username = img.get('username')
                         is_author = img.get('is_author', False)
                         is_mentioned = img.get('is_mentioned', False)
                         
                         if discord_type == 'profile_picture':
                             if is_author:
-                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar (message author) - this is what {username} looks like")
+                                image_labels.append(f"- Image {idx}: THE USER'S PROFILE PICTURE ({img_username}'s avatar) - THIS IS THE MESSAGE AUTHOR'S PROFILE PICTURE - this is what {img_username} looks like")
+                                author_profile_picture_idx = idx
                             elif is_mentioned:
-                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar (mentioned user) - this is what {username} looks like")
+                                image_labels.append(f"- Image {idx}: {img_username}'s profile picture/avatar (mentioned user) - this is what {img_username} looks like")
                             else:
-                                image_labels.append(f"- Image {idx}: {username}'s profile picture/avatar - this is what {username} looks like")
+                                # Bot's profile picture or unknown user
+                                image_labels.append(f"- Image {idx}: Profile picture/avatar ({img_username if img_username else 'unknown user'}) - NOT the message author's profile picture - IGNORE when user asks about their own profile picture")
                         elif discord_type == 'server_icon':
-                            image_labels.append(f"- Image {idx}: Server icon/guild icon - this is the server's icon, NOT a user's profile picture")
+                            image_labels.append(f"- Image {idx}: SERVER ICON/GUILD ICON - THIS IS THE SERVER'S ICON, NOT A USER'S PROFILE PICTURE - IGNORE THIS when user asks about their own profile picture")
+                            server_icon_idx = idx
                         elif discord_type:
-                            image_labels.append(f"- Image {idx}: {discord_type}" + (f" ({username})" if username else ""))
+                            image_labels.append(f"- Image {idx}: {discord_type}" + (f" ({img_username})" if img_username else ""))
                         else:
                             image_labels.append(f"- Image {idx}: User-shared image")
                     
                     image_label_text = "\n".join(image_labels) if image_labels else ""
                     
-                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: If the user asks about their profile picture, you're seeing Image 1 (the profile picture). The server icon is a different image. Don't confuse them!\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
+                    # Add critical instructions based on what images are present
+                    critical_instructions = ""
+                    if author_profile_picture_idx and server_icon_idx:
+                        critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- Image {server_icon_idx} is THE SERVER ICON (NOT a user's profile picture)\n- If the user asks about 'my profile picture', 'my avatar', or 'my pfp', they mean Image {author_profile_picture_idx} ONLY\n- DO NOT mention or describe Image {server_icon_idx} (the server icon) when the user asks about their own profile picture\n- The server icon is irrelevant to questions about the user's profile picture - IGNORE IT in those cases"
+                    elif author_profile_picture_idx:
+                        critical_instructions = f"\n\n🚨 CRITICAL INSTRUCTIONS:\n- Image {author_profile_picture_idx} is THE USER'S PROFILE PICTURE (the message author)\n- If the user asks about 'my profile picture', 'my avatar', or 'my pfp', they mean Image {author_profile_picture_idx}"
+                    
+                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
             except Exception as prompt_error:
                 print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
