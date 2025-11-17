@@ -9525,14 +9525,13 @@ async def on_message(message: discord.Message):
                         searched_images = []
                         screenshots = []
                 else:
-                    # Handle case where generate_response returned False, None, or non-tuple
+                    # Handle case where generate_response returned unexpected type (e.g., False)
                     print(f"⚠️  [{message.author.display_name}] generate_response returned non-tuple: {type(result)} = {result}")
-                    error_msg = "Sorry, I encountered an issue generating a response. Please try again."
-                    try:
-                        await message.channel.send(error_msg, reference=message)
-                    except Exception as send_error:
-                        print(f"❌ [{message.author.display_name}] Failed to send error message: {send_error}")
-                    return
+                    fallback_text = (
+                        "I captured what you asked for, but the response formatter hit an unexpected issue. "
+                        "Sharing the media I collected so you can still see the results."
+                    )
+                    response, generated_images, generated_documents, searched_images, screenshots = build_response_payload(fallback_text)
                 
                 # Prepare files to attach (searched images + generated images + screenshots - these go with the text response)
                 # Try without compression first (original quality)
