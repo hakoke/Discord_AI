@@ -4189,6 +4189,18 @@ CRITICAL FOR MULTI-STEP PROCESSES:
   * If you see "sign in" but you just filled username for sign-up → Check if there's a "Create account" link or if this is part of the sign-up flow
   * Be smart: Some sites show "sign in" page but it's actually part of sign-up (they ask email first, then password)
 
+🚨 CRITICAL: COMPLETE ALL EXPLICIT ACTIONS IN THE GOAL 🚨
+- When the user explicitly mentions MULTIPLE actions in their goal, you MUST complete ALL of them before marking goal_achieved = true
+- DO NOT hardcode or assume - analyze the goal dynamically and identify EVERY action the user mentioned
+- Examples of goals with multiple explicit actions:
+  * "go to forgot password, put email and enter, and click send reset link" → ALL steps: (1) navigate to forgot password, (2) enter email, (3) click send reset link → goal_achieved = true ONLY after clicking send reset link
+  * "fill out form and click submit" → ALL steps: (1) fill form, (2) click submit → goal_achieved = true ONLY after clicking submit
+  * "search for X and click on the first result" → ALL steps: (1) search, (2) click first result → goal_achieved = true ONLY after clicking the result
+- If the goal says "and click [button]" or "and enter" or "and submit" → That action is PART OF THE GOAL, not optional!
+- If you've completed some steps but the goal mentions more actions → Keep going! Don't mark goal_achieved until ALL mentioned actions are done!
+- Be AI-driven: Parse the goal dynamically - if it contains "and [action]", that action must be completed!
+- Example: Goal "put email and click send" → After entering email, you MUST click send before marking goal_achieved = true
+
 UNDERSTANDING USER INTENT:
 * "show me sign up" / "show me you signing up" → goal_achieved when you see sign-up/registration/account creation form/page OR when you've filled the required fields
 * "show me login" → goal_achieved when you see login page/form
@@ -4280,6 +4292,8 @@ Examples (be smart and dynamic):
 - Goal "search for laptop" and you've typed "laptop" and see results → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - search completed", "reason": "You've searched for 'laptop' and results are shown - STOP IMMEDIATELY"}}}}
 - Goal "go to amazon and search for headphones" and you see Amazon homepage → {{"goal_achieved": false, "next_action": {{"type": "type", "description": "search box with text: headphones", "reason": "Need to type 'headphones' into Amazon search box"}}}}
 - Goal "fill out email and password" and you've filled both fields → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - fields filled", "reason": "Both email and password fields are filled as requested - STOP IMMEDIATELY"}}}}
+- Goal "go to forgot password, put email and click send reset link" and you've entered email → {{"goal_achieved": false, "next_action": {{"type": "click", "description": "SEND RESET LINK or Send Reset Link button", "reason": "User explicitly said 'click send reset link' - this action must be completed before goal is achieved"}}}}
+- Goal "go to forgot password, put email and click send reset link" and you've clicked send reset link → {{"goal_achieved": true, "next_action": {{"type": "none", "description": "Goal achieved - all actions completed", "reason": "All explicit actions completed: navigated to forgot password, entered email, and clicked send reset link - STOP IMMEDIATELY"}}}}
 - Stuck clicking same button 3+ times → {{"goal_achieved": false, "is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "Stuck in loop, going back to try different approach"}}, "recovery_suggestion": "Try clicking a different element or going back"}}
 - On wrong website → {{"goal_achieved": false, "is_stuck": true, "next_action": {{"type": "go_back", "description": "browser back button", "reason": "On wrong website, need to go back"}}, "recovery_suggestion": "Navigate to correct website"}}
 
