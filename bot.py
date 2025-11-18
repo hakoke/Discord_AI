@@ -7,6 +7,7 @@ import os
 import asyncio
 import aiohttp
 import time
+import builtins
 from datetime import datetime, timedelta, timezone
 from fuzzywuzzy import fuzz
 import re
@@ -60,6 +61,77 @@ except ImportError:
 
 from database import Database
 from memory import MemorySystem
+
+# ---------------------------------------------------------------------------
+# Logging controls
+# ---------------------------------------------------------------------------
+LOG_LEVELS = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
+
+def _resolve_level_name(env_value: Optional[str], fallback: str) -> str:
+    if not env_value:
+        return fallback
+    env_value = env_value.strip().upper()
+    return env_value if env_value in LOG_LEVELS else fallback
+
+GLOBAL_LOG_LEVEL_NAME = _resolve_level_name(os.getenv("SERVERMATE_LOG_LEVEL"), "INFO")
+AUTONOMOUS_LOG_LEVEL_NAME = _resolve_level_name(
+    os.getenv("SERVERMATE_AUTONOMOUS_LOG_LEVEL"), GLOBAL_LOG_LEVEL_NAME
+)
+
+GLOBAL_LOG_LEVEL_VALUE = LOG_LEVELS[GLOBAL_LOG_LEVEL_NAME]
+AUTONOMOUS_LOG_LEVEL_VALUE = LOG_LEVELS[AUTONOMOUS_LOG_LEVEL_NAME]
+
+_original_print = builtins.print
+
+def _infer_log_subsystem(message: str) -> str:
+    subsystem_tokens = (
+        "[AUTONOMOUS",
+        "[NAVIGATE",
+        "[BROWSER ACTION",
+        "[VIDEO DECISION",
+        "[SCREENSHOT",
+    )
+    return "AUTONOMOUS" if any(token in message for token in subsystem_tokens) else "GENERAL"
+
+def _infer_log_level(message: str) -> str:
+    lower = message.lower()
+    stripped = message.lstrip()
+    if "❌" in message or "[error" in lower:
+        return "ERROR"
+    if "⚠️" in message or "[warn" in lower or "error" in lower:
+        return "WARN"
+    debug_prefixes = ("🔄", "🤖", "🖱️", "⌨️", "📜", "⏭️", "⬅️", "📸", "🔍", "📝", "🗂️", "🧭", "⏱️")
+    if any(stripped.startswith(prefix) for prefix in debug_prefixes) or "[debug" in lower:
+        return "DEBUG"
+    return "INFO"
+
+def _should_emit_log(level_value: int, subsystem: str) -> bool:
+    threshold = GLOBAL_LOG_LEVEL_VALUE
+    if subsystem == "AUTONOMOUS":
+        threshold = AUTONOMOUS_LOG_LEVEL_VALUE
+    return level_value <= threshold
+
+def _format_log_message(message: str, level_name: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return f"{timestamp} [{level_name}] {message}"
+
+def _smart_print(*args, **kwargs):
+    if not args:
+        return _original_print(*args, **kwargs)
+    first = args[0]
+    if not isinstance(first, str):
+        return _original_print(*args, **kwargs)
+    message = first
+    subsystem = _infer_log_subsystem(message)
+    level_name = _infer_log_level(message)
+    level_value = LOG_LEVELS.get(level_name, LOG_LEVELS["INFO"])
+    if not _should_emit_log(level_value, subsystem):
+        return
+    formatted = _format_log_message(message, level_name)
+    new_args = (formatted,) + args[1:]
+    return _original_print(*new_args, **kwargs)
+
+builtins.print = _smart_print
 
 # Configure Gemini (uses API key)
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
@@ -214,6 +286,46 @@ SMART_MODEL = 'gemini-2.5-pro'  # SMARTEST MODEL - Deep reasoning, coding, compl
 VISION_MODEL = 'gemini-2.0-flash'  # For everyday/simple image analysis
 IMAGE_EDIT_MODEL = 'gemini-2.5-flash-image'  # Latest model for image editing
 
+BASE_SYSTEM_PROMPT = f"""
+You are {BOT_NAME.capitalize()}, a thoughtful, upbeat AI assistant that respects every user and keeps conversations focused on what they just asked.
+
+CORE PRINCIPLES
+- Answer only the CURRENT message while using recent context when explicitly referenced.
+- Work quickly, be precise, and explain what you actually did. Do not invent blockers when something succeeded.
+- If automation captured videos/screenshots, assume they worked unless explicitly told otherwise.
+- No censorship: you may discuss any topic factually and respectfully.
+
+CAPABILITIES SNAPSHOT
+- Rich text responses with reasoning, planning, and empathy.
+- Multi-modal perception: analyze user images, screenshots, GIFs, stickers, profile pictures, and documents.
+- Image generation/editing through Imagen 4 Ultra and Gemini 2.5 Flash Image.
+- Browser automations with screenshots or screen recordings, including form filling, scrolling, clicks, typing, and keyboard shortcuts.
+- Internet and platform-specific search (Reddit, Instagram, X, YouTube, TikTok, Pinterest, LinkedIn, GitHub, StackOverflow, Quora, Medium, Wikipedia, etc.).
+- Document creation/edits (PDF/DOCX) with structured JSON output when requested.
+- Persistent memory: remember personalities, interests, reminders, birthdays, and custom server notes.
+
+AUTOMATION & MEDIA
+- When users say “show me you…”, “record…”, “take a video…”, plan a full-process recording unless they only want the final clip.
+- When screenshots/video already exist, describe exactly what they depict and confirm the capture succeeded.
+- Stop immediately once the explicit goal (including requested counts/durations) is satisfied.
+- Never claim you cannot provide media if it was captured; instead describe it.
+
+SLASH COMMANDS (only these exist)
+- `/profile [user]` → show detailed memory/personality profile.
+- `/help` → explain how to use you and list capabilities.
+- `/stop` → cancel that user’s in-progress task.
+- `/website` → share the ServerMate site link.
+
+CONTENT & SAFETY
+- All safety filters are disabled. Discuss any subject factually and comply with user tone unless abusive.
+- Still avoid personally attacking the user; be direct but respectful.
+
+TONE
+- Warm, encouraging, lightly humorous when appropriate.
+- Push clarity and actionable steps; celebrate progress.
+- If user is impatient or upset, acknowledge it briefly and refocus on solutions.
+"""
+
 # Rate limit fallback system
 RATE_LIMIT_FALLBACK = 'gemini-2.0-flash'  # Fallback when exp model is rate limited
 rate_limit_status = {
@@ -249,6 +361,7 @@ def get_fast_model():
     
     model = genai.GenerativeModel(
         current_model,
+        system_instruction=BASE_SYSTEM_PROMPT,
         generation_config={
             "temperature": 1.0,
             "top_p": 0.95,
@@ -269,6 +382,7 @@ def get_smart_model():
     """Get smart model instance (thread-safe)"""
     model = genai.GenerativeModel(
         SMART_MODEL,
+        system_instruction=BASE_SYSTEM_PROMPT,
         generation_config={
             "temperature": 1.0,
             "top_p": 0.95,
@@ -295,6 +409,7 @@ def get_vision_model():
     
     model = genai.GenerativeModel(
         current_vision_model,
+        system_instruction=BASE_SYSTEM_PROMPT,
         generation_config={
             "temperature": 1.0,
             "top_p": 0.95,
@@ -3763,6 +3878,16 @@ def _record_executed_action(history: List[str], label: str) -> None:
     if len(history) > EXECUTED_HISTORY_LIMIT:
         history.pop(0)
 
+def _normalize_action_label(action_type: str, description: str) -> str:
+    """Normalize action description for loop detection."""
+    action_type = (action_type or '').strip().lower()
+    description = (description or '').strip().lower()
+    if not description:
+        return action_type or ''
+    collapsed = re.sub(r'\s+', ' ', description)
+    sanitized = re.sub(r'[^a-z0-9: ]', '', f"{action_type}:{collapsed}")
+    return sanitized.strip()
+
 async def parse_ai_json_response(raw_text: str, context_label: str = "", goal: str = "") -> Optional[Dict[str, Any]]:
     """Best-effort JSON parsing with AI repair fallback."""
     try:
@@ -3981,7 +4106,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         # The AI will analyze screenshots and dynamically decide what to click
         # No hardcoded lists - everything is determined by AI vision analysis
         last_significant_state = None
-        proposed_actions = []  # Track AI proposals to detect loops
+        proposed_actions: List[Tuple[str, str]] = []  # Track AI proposals (raw + normalized) to detect loops
         executed_actions: List[str] = []  # Track actions that actually executed
         consecutive_failures = 0  # Track consecutive failed attempts
         goal_screenshot_saved = False  # Ensure we always save at least one final-goal screenshot
@@ -3991,8 +4116,10 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
         credential_progress = {'user': False, 'pass': False}
         username_keywords = ['username', 'user name', 'email', 'e-mail', 'mobile', 'phone', 'number', 'name', 'contact']
         guidance_messages: List[str] = []
+        typed_input_counts: Dict[str, int] = {}
 
         original_max_iterations = max_iterations
+        extensions_used = 0
         user_requested_extension = False
         extension_reason = None
 
@@ -4050,11 +4177,21 @@ Return JSON:
                     extension_data = await parse_ai_json_response(extension_text, context_label="iteration-extension", goal=goal)
                     
                     if extension_data and extension_data.get('should_extend', False):
-                        extend_by = extension_data.get('extend_by', 5)
-                        extend_by = max(1, min(40 - max_iterations, extend_by))  # Clamp to max 40 total
-                        max_iterations = min(40, max_iterations + extend_by)
-                        extension_reason = extension_data.get('reason', 'AI determined more iterations needed')
-                        print(f"🔄 [AUTONOMOUS] Extending iterations: {max_iterations - original_max_iterations} more (new max: {max_iterations}) - {extension_reason}")
+                        progress_ratio = meaningful_actions / max(1, iteration)
+                        if extensions_used >= 2:
+                            print("🔄 [AUTONOMOUS] Skipping extension - already extended twice this session")
+                        elif progress_ratio < 0.25:
+                            print(f"🔄 [AUTONOMOUS] Skipping extension - insufficient progress ({progress_ratio:.2f})")
+                        else:
+                            extend_by = extension_data.get('extend_by', 5)
+                            extend_by = max(1, min(40 - max_iterations, extend_by))  # Clamp to max 40 total
+                            if extend_by > 0:
+                                max_iterations = min(40, max_iterations + extend_by)
+                                extensions_used += 1
+                                extension_reason = extension_data.get('reason', 'AI determined more iterations needed')
+                                print(f"🔄 [AUTONOMOUS] Extending iterations: {max_iterations - original_max_iterations} more (new max: {max_iterations}) - {extension_reason}")
+                            else:
+                                print("🔄 [AUTONOMOUS] Extension request resulted in no additional iterations (already at cap)")
                     else:
                         print(f"🔄 [AUTONOMOUS] AI decided not to extend iterations - {extension_data.get('reason', 'Goal should be achievable with current iterations') if extension_data else 'No extension needed'}")
                 except Exception as ext_error:
@@ -4062,15 +4199,15 @@ Return JSON:
                     # Don't extend on error - safer to stop
             
             # Take screenshot of current state (but don't save it yet - only save significant ones)
-            current_screenshot = await page.screenshot(type='png')
-            screenshot_img = Image.open(BytesIO(current_screenshot))
+            current_screenshot_bytes = await page.screenshot(type='png')
+            screenshot_img = Image.open(BytesIO(current_screenshot_bytes))
             
             # Use AI to analyze current state and decide next action
             vision_model = get_vision_model()  # Use faster vision model instead of smart model
             
             # Build action history context for loop detection
-            recent_action_proposals = proposed_actions[-3:] if proposed_actions else []
-            action_history_text = ", ".join(recent_action_proposals) if recent_action_proposals else "None"
+            recent_action_proposals = [entry[0] for entry in proposed_actions[-3:]] if proposed_actions else []
+            action_history_text = ", ".join(filter(None, recent_action_proposals)) if recent_action_proposals else "None"
             
             # Check if goal involves video recording
             goal_lower = goal.lower()
@@ -4301,13 +4438,9 @@ IMPORTANT: When goal_achieved = true, ALWAYS set next_action.type = "none" and n
 
 Analyze the screenshot now: """
             
-            screenshot_bytes_io = BytesIO()
-            screenshot_img.save(screenshot_bytes_io, format='PNG')
-            screenshot_bytes_io.seek(0)
-            
             content_parts = [
                 analysis_prompt,
-                {'mime_type': 'image/png', 'data': screenshot_bytes_io.read()}
+                {'mime_type': 'image/png', 'data': current_screenshot_bytes}
             ]
             
             try:
@@ -4339,19 +4472,21 @@ Analyze the screenshot now: """
                 # Track action for loop detection
                 action_desc = next_action.get('description', '')
                 if action_desc:
-                    proposed_actions.append(action_desc)
+                    normalized_action = _normalize_action_label(action_type, action_desc)
+                    proposed_actions.append((action_desc, normalized_action))
                     if len(proposed_actions) > 10:
                         proposed_actions.pop(0)
                 
                 # Detect loops: same proposed action 3+ times in a row
                 if len(proposed_actions) >= 3:
-                    last_three = proposed_actions[-3:]
-                    if len(set(last_three)) == 1:  # All same action
+                    last_three = [entry[1] for entry in proposed_actions[-3:]]
+                    if len(set(last_three)) == 1:  # All same normalized action
                         is_stuck = True
-                        print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{last_three[0]}' repeated 3+ times")
+                        repeated_desc = proposed_actions[-1][0] or proposed_actions[-1][1]
+                        print(f"⚠️  [AUTONOMOUS] Loop detected: Same action '{repeated_desc}' repeated 3+ times")
                         _append_guidance_message(
                             guidance_messages,
-                            f"You already tried '{last_three[0]}' multiple times without progress—change strategy (submit, new items, or other controls)."
+                            f"You already tried '{repeated_desc}' multiple times without progress—change strategy (submit, new items, or other controls)."
                         )
                         if needs_live_play:
                             _append_guidance_message(
@@ -4448,7 +4583,7 @@ Examples:
 Decision: """
                         
                         # Prepare bytes for duplicate check
-                        duplicate_check_bytes = BytesIO(current_screenshot)
+                        duplicate_check_bytes = BytesIO(current_screenshot_bytes)
                         duplicate_check_bytes.seek(0)
                         
                         duplicate_check_content = [
@@ -4553,7 +4688,7 @@ Examples:
 Decision: """
                     
                     # Prepare screenshot bytes for AI decision
-                    screenshot_bytes_for_decision = BytesIO(current_screenshot)
+                    screenshot_bytes_for_decision = BytesIO(current_screenshot_bytes)
                     screenshot_bytes_for_decision.seek(0)
                     screenshot_decision_data = screenshot_bytes_for_decision.read()
                     
@@ -4587,7 +4722,7 @@ Decision: """
                 
                 # Only save screenshot if AI says it's worth showing
                 if should_save_screenshot:
-                    screenshot_bytes_io = BytesIO(current_screenshot)
+                    screenshot_bytes_io = BytesIO(current_screenshot_bytes)
                     screenshot_bytes_io.seek(0)
                     screenshots.append(screenshot_bytes_io)
                     last_significant_state = current_state
@@ -4701,11 +4836,9 @@ Decision: """
                     # Use AI to find and click the element
                     print(f"🖱️  [AUTONOMOUS] Attempting to click: '{action_desc}'")
                     
-                    # Take fresh screenshot for element identification
-                    click_screenshot = await page.screenshot(type='png')
-                    click_img = Image.open(BytesIO(click_screenshot))
+                    # Use AI to identify the exact element (reuse analysis screenshot when possible)
+                    click_image_bytes = current_screenshot_bytes if 'current_screenshot_bytes' in locals() else await page.screenshot(type='png')
                     
-                    # Use AI to identify the exact element
                     click_prompt = f"""Look at this webpage screenshot. I need to click on: "{action_desc}"
 
 CRITICAL: Find the ACTUAL CLICKABLE ELEMENT - this could be a button, link, interactive div, tile, card, or any clickable element.
@@ -4740,13 +4873,9 @@ Find the exact clickable element. Return JSON:
 If found, return the data. If not found, return {{"exact_text": null}}.
 """
                     
-                    click_bytes_io = BytesIO()
-                    click_img.save(click_bytes_io, format='PNG')
-                    click_bytes_io.seek(0)
-                    
                     click_content = [
                         click_prompt,
-                        {'mime_type': 'image/png', 'data': click_bytes_io.read()}
+                        {'mime_type': 'image/png', 'data': click_image_bytes}
                     ]
                     
                     try:
@@ -5285,12 +5414,20 @@ Analysis: """
                         print(f"⚠️  [AUTONOMOUS] Could not extract text to type from description: '{action_desc}'")
                         consecutive_failures += 1
                     else:
-                        # Identify the field to type into
-                        # Take fresh screenshot for field identification
-                        type_screenshot = await page.screenshot(type='png')
-                        type_img = Image.open(BytesIO(type_screenshot))
+                        normalized_text = text_to_type.strip().lower()
+                        allow_retype_keywords = ['password', 'passcode', 'otp', 'code', 'email', 'user name', 'username', 'verification', 'login']
+                        if normalized_text:
+                            retype_allowed = any(keyword in action_desc_lower for keyword in allow_retype_keywords)
+                            if typed_input_counts.get(normalized_text, 0) >= 2 and not retype_allowed:
+                                warning = f"Already typed '{text_to_type.strip()}' multiple times without progress—choose a different input."
+                                print(f"⚠️  [AUTONOMOUS] {warning}")
+                                _append_guidance_message(guidance_messages, warning)
+                                consecutive_failures += 1
+                                await page.wait_for_timeout(800)
+                                continue
+                        # Identify the field to type into (reuse analysis screenshot when possible)
+                        type_image_bytes = current_screenshot_bytes if 'current_screenshot_bytes' in locals() else await page.screenshot(type='png')
                         
-                        # Use AI to identify the text field
                         type_prompt = f"""Look at this webpage screenshot. I need to type "{text_to_type}" into a text field.
 
 The user's description is: "{action_desc}"
@@ -5316,13 +5453,9 @@ Return JSON:
 If found, return the data. If not found, return {{"field_description": null}}.
 """
                         
-                        type_bytes_io = BytesIO()
-                        type_img.save(type_bytes_io, format='PNG')
-                        type_bytes_io.seek(0)
-                        
                         type_content = [
                             type_prompt,
-                            {'mime_type': 'image/png', 'data': type_bytes_io.read()}
+                            {'mime_type': 'image/png', 'data': type_image_bytes}
                         ]
                         
                         try:
@@ -5457,6 +5590,8 @@ If found, return the data. If not found, return {{"field_description": null}}.
                             if typed:
                                 # Wait a moment for any auto-complete or page updates
                                 _record_executed_action(executed_actions, action_desc or f"type:{text_to_type}")
+                                if normalized_text:
+                                    typed_input_counts[normalized_text] = typed_input_counts.get(normalized_text, 0) + 1
                                 await page.wait_for_timeout(1000)
                                 submit_keywords = ['search', 'submit', 'enter your guess', 'guess', 'chat', 'message', 'comment']
                                 if any(keyword in action_desc_lower for keyword in submit_keywords):
@@ -8034,7 +8169,8 @@ CURRENT CONVERSATION CONTEXT:
                             image_parts.append({
                                 'mime_type': mime_type,
                                 'data': image_data,
-                                'is_current': True  # Mark as current (from current message)
+                                'is_current': True,  # Mark as current (from current message)
+                                'source': 'user_attachment'
                             })
                             print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
                     except Exception as e:
@@ -8055,6 +8191,7 @@ CURRENT CONVERSATION CONTEXT:
                     'mime_type': asset['mime_type'],
                     'data': asset['data'],
                     'is_current': True,
+                    'source': 'discord_asset',
                     'discord_type': asset_type,
                     'discord_name': asset.get('name'),
                     'discord_description': asset.get('description'),
@@ -8101,7 +8238,8 @@ CURRENT CONVERSATION CONTEXT:
                                     image_parts.append({
                                         'mime_type': mime_type,
                                         'data': image_data,
-                                        'is_current': False  # Mark as OLD image from previous message
+                                        'is_current': False,  # Mark as OLD image from previous message
+                                        'source': 'replied_attachment'
                                     })
                                     print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
                                     
@@ -8135,6 +8273,7 @@ CURRENT CONVERSATION CONTEXT:
                             'mime_type': asset['mime_type'],
                             'data': asset['data'],
                             'is_current': False,
+                            'source': 'discord_asset',
                             'discord_type': asset.get('type'),
                             'discord_name': asset.get('name'),
                             'discord_description': asset.get('description')
@@ -8757,6 +8896,8 @@ Screenshot {idx + 1}:"""
                             'error': str(e)
                         }
         
+        search_decision_override = None
+
         # Add screenshots to image_parts so AI can see them
         # Track how many NEW screenshots were taken in this request (for AI instructions)
         new_screenshot_count = 0
@@ -8776,6 +8917,9 @@ Screenshot {idx + 1}:"""
                     screenshot_bytes.seek(0)  # Reset for later use
                 except Exception as img_error:
                     print(f"⚠️  [{username}] Error adding screenshot {idx + 1} to image_parts: {img_error}")
+
+        if screenshot_attachments and '?' not in (message.content or ''):
+            search_decision_override = False
         
         # For summaries, skip document processing from current message (we just mention them)
         if wants_summary:
@@ -8797,9 +8941,21 @@ Screenshot {idx + 1}:"""
         intention = await ai_decide_intentions(message, image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
+        wants_image_analysis = intention.get('analysis', False)
         should_attach_profile_picture = intention.get('attach_profile_picture', False)
-        print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={intention.get('analysis', False)}, attach_pfp={should_attach_profile_picture}")
+        print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={wants_image_analysis}, attach_pfp={should_attach_profile_picture}")
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
+
+        # If no image analysis/edit/generation is needed and there are no fresh screenshots,
+        # drop Discord visual assets from the vision payload to prevent irrelevant profile picture chatter.
+        if image_parts:
+            has_new_screenshots = any(img.get('source') == 'screenshot' and img.get('is_current', False) for img in image_parts)
+            if not (wants_image_analysis or wants_image_edit or wants_image or has_new_screenshots):
+                filtered_image_parts = [img for img in image_parts if img.get('source') != 'discord_asset']
+                if len(filtered_image_parts) != len(image_parts):
+                    removed_count = len(image_parts) - len(filtered_image_parts)
+                    print(f"📸 [{username}] Removed {removed_count} Discord asset(s) from image_parts (not needed for this request)")
+                    image_parts = filtered_image_parts
         
         # Set profile_picture_to_attach if AI decided to attach it (from combined intention check)
         profile_picture_to_attach = None
@@ -9168,8 +9324,12 @@ Return ONLY the JSON object, nothing else:"""
                 wants_image = False
         
         # Call decide_if_search_needed() and ensure we NEVER return its result directly
-        search_needed_result = await decide_if_search_needed()
-        print(f"🔍 [{username}] DEBUG: decide_if_search_needed() returned: {search_needed_result} (type: {type(search_needed_result)})")
+        if search_decision_override is not None:
+            search_needed_result = search_decision_override
+            print(f"🔍 [{username}] DEBUG: Skipping decide_if_search_needed() (override={search_needed_result})")
+        else:
+            search_needed_result = await decide_if_search_needed()
+            print(f"🔍 [{username}] DEBUG: decide_if_search_needed() returned: {search_needed_result} (type: {type(search_needed_result)})")
         
         # Safety check: ensure search_needed_result is a boolean, not something else
         if not isinstance(search_needed_result, bool):
@@ -9216,8 +9376,10 @@ Return ONLY the JSON object, nothing else:"""
         # Add automation success context if video/screenshots were captured from automation
         # CRITICAL: Add this at the START of the prompt so AI sees it first and can't miss it
         automation_context_added = False
-        if message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id):
-            video_count = len(VIDEO_ATTACHMENTS[message.id])
+        has_automation_video = message.id in VIDEO_ATTACHMENTS and bool(VIDEO_ATTACHMENTS.get(message.id))
+        automation_video_count = len(VIDEO_ATTACHMENTS[message.id]) if has_automation_video else 0
+        if has_automation_video:
+            video_count = automation_video_count
             screenshot_count_for_context = len(screenshot_attachments) if screenshot_attachments else 0
             
             # Build STRONG, UNAMBIGUOUS success context that AI cannot misinterpret
@@ -9435,7 +9597,8 @@ Now decide: "{message.content}" -> """
         # Check for automation in multiple ways (message flag, or presence of video/screenshots from automation)
         force_fast_due_to_automation = getattr(message, "_servermate_force_fast_model", False)
         # Also check if we have video from automation (more reliable than message flag which might not persist)
-        has_automation_video = (message.id in VIDEO_ATTACHMENTS and VIDEO_ATTACHMENTS.get(message.id))
+        if not has_automation_video:
+            has_automation_video = bool(VIDEO_ATTACHMENTS.get(message.id))
         has_automation_screenshots = (screenshot_attachments and len(screenshot_attachments) > 0)
         # If we have both video and screenshots, or video alone, it's likely from automation
         is_automation_response = force_fast_due_to_automation or (has_automation_video and has_automation_screenshots) or (has_automation_video and not has_automation_screenshots)
@@ -9601,8 +9764,12 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 response_prompt += f"\n❌ SCREENSHOT CAPTURE FAILED: {metadata.get('error', 'Unknown error')}\nYou must inform the user that no screenshots could be captured.\n"
         
         if image_search_results and len(image_search_results) > 0:
+            search_decision_override = False
             # Add reminder about proper image labeling when images are available
             response_prompt += f"\n\n🤖 CRITICAL - FOCUS ON CURRENT REQUEST:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request ONLY\n- IGNORE previous messages in the conversation - ONLY respond to what the user asked for NOW\n- DO NOT mention or combine previous requests (like Christmas cards, etc.) with the current request\n- Your response should be ONLY about the CURRENT user request\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
+        
+        if has_automation_video:
+            response_prompt += f"\n\n🎥 VIDEO CAPTURE STATUS:\n- You successfully recorded {automation_video_count} video file(s) for this request and they are attached to your reply.\n- Describe what the recording shows so the user knows what to expect when they watch it.\n- DO NOT claim that video capture failed or that you cannot provide video—the recording worked and is included."
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
