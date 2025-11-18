@@ -9051,7 +9051,7 @@ Screenshot {idx + 1}:"""
             else:
                 document_assets = []
             
-        # Determine user intentions FIRST (before document check)
+        # Determine user intentions FIRST (before document check)s
         def _profile_asset_is_relevant(asset: Dict[str, Any]) -> bool:
             if not _is_profile_picture_asset(asset):
                 return True
