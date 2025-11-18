@@ -9052,12 +9052,15 @@ Screenshot {idx + 1}:"""
                 document_assets = []
             
         # Determine user intentions FIRST (before document check)
+        def _profile_asset_is_relevant(asset: Dict[str, Any]) -> bool:
+            if not _is_profile_picture_asset(asset):
+                return True
+            return profile_request_detected or asset.get("is_author") or asset.get("is_mentioned")
+
         if profile_request_detected:
             intention_image_parts = image_parts
         else:
-            intention_image_parts = [
-                img for img in image_parts if not _is_profile_picture_asset(img)
-            ]
+            intention_image_parts = [img for img in image_parts if _profile_asset_is_relevant(img)]
         intention = await ai_decide_intentions(message, intention_image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
@@ -9067,10 +9070,10 @@ Screenshot {idx + 1}:"""
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
 
         # Remove Discord profile pictures from the vision payload unless explicitly requested.
-        keep_profile_assets = profile_request_detected or should_attach_profile_picture
+        keep_profile_assets = profile_request_detected or should_attach_profile_picture or wants_image_edit
         if image_parts and not keep_profile_assets:
             filtered_profile_parts = [
-                img for img in image_parts if not _is_profile_picture_asset(img)
+                img for img in image_parts if _profile_asset_is_relevant(img)
             ]
             if len(filtered_profile_parts) != len(image_parts):
                 removed_profiles = len(image_parts) - len(filtered_profile_parts)
