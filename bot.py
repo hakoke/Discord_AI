@@ -8151,6 +8151,31 @@ CURRENT CONVERSATION CONTEXT:
                 # Silently fail - this is optional info
                 pass
         
+        plain_message = (message.content or "").strip()
+        simple_small_talk_candidate = (
+            plain_message
+            and len(plain_message) <= 20
+            and not message.attachments
+            and not message.reference
+            and not wants_summary
+            and not extract_urls(plain_message)
+            and '?' not in plain_message
+        )
+
+        if simple_small_talk_candidate:
+            print(f"💬 [{username}] Early small-talk shortcut triggered")
+            minimal_prompt = f"""You are Servermate. The user just said "{plain_message}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
+            try:
+                fast_model = get_fast_model()
+                minimal_response = await queued_generate_content(fast_model, minimal_prompt)
+                minimal_text = (minimal_response.text or "").strip()
+                if not minimal_text:
+                    minimal_text = "Hey there! Hope everything's going well."
+            except Exception as small_talk_error:
+                print(f"⚠️  [{username}] Early small-talk error: {small_talk_error}")
+                minimal_text = "Hey there! Hope everything's going well."
+            return build_response_payload(minimal_text)
+
         # Process images if present (from current message OR replied message)
         image_parts = []
         
