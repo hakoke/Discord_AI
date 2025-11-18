@@ -8994,7 +8994,7 @@ Screenshot {idx + 1}:"""
         small_talk = reply_style == 'SMALL_TALK'
         detailed_reply = reply_style == 'DETAILED'
         print(f"💬 [{username}] Reply style selected: {reply_style}")
-        if small_talk and not context_messages and not wants_summary:
+        if small_talk and not wants_summary:
             message_clean = (message.content or "").strip()
             if len(message_clean) <= 20 and not document_assets and not image_parts:
                 print(f"💬 [{username}] Minimal small-talk shortcut triggered")
