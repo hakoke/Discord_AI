@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 import time
 import builtins
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from fuzzywuzzy import fuzz
 import re
 import io
@@ -259,7 +259,8 @@ MAX_DOCUMENT_PROMPT_CHARS_PER_DOC = 16000
 
 SERVER_MEMORY_POLICY_LIMIT = _env_int('SERVER_MEMORY_POLICY_LIMIT', 12)
 SERVER_AUTOMATION_ENTRY_LIMIT = _env_int('SERVER_AUTOMATION_ENTRY_LIMIT', 8)
-SERVER_AUTOMATION_INTERVAL = _env_int('SERVER_AUTOMATION_INTERVAL', 60)
+SERVER_AUTOMATION_INTERVAL = _env_int('SERVER_AUTOMATION_INTERVAL', 10)
+REMINDER_POLL_INTERVAL = _env_int('REMINDER_POLL_INTERVAL', 3)
 
 # Bot configuration
 BOT_NAME = os.getenv('BOT_NAME', 'servermate').lower()
@@ -317,6 +318,7 @@ AUTOMATION & MEDIA
 SLASH COMMANDS (only these exist)
 - `/profile [user]` → show detailed memory/personality profile.
 - `/help` → explain how to use you and list capabilities.
+- `/servermemory [type] [limit]` → list stored server-wide memories/reminders/policies for the current guild.
 - `/stop` → cancel that user’s in-progress task.
 - `/website` → share the ServerMate site link.
 
@@ -2458,6 +2460,162 @@ def _extract_json_object(text: str) -> Optional[str]:
     if match:
         return match.group(0)
     return None
+
+
+def _serialize_for_ai(value: Any) -> Any:
+    """Recursively convert datetime-like objects so json.dumps never fails."""
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc).isoformat()
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_serialize_for_ai(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serialize_for_ai(val) for key, val in value.items()}
+    return value
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse ISO timestamps (with optional Z suffix) into timezone-aware datetimes."""
+    if not value or not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _extract_numeric_id(value: Any) -> Optional[int]:
+    """Extract an integer ID from raw values or mention strings."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        match = re.search(r'\d+', value)
+        if match:
+            try:
+                return int(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _prepare_native_reminder_payload(memory_type: Optional[str],
+                                     memory_key: Optional[str],
+                                     memory_data: Any,
+                                     source_message: Optional[discord.Message]) -> Optional[dict]:
+    """Derive reminder metadata for the built-in reminder scheduler."""
+    if not isinstance(memory_data, dict):
+        return None
+    normalized_type = (memory_type or "").lower()
+    intent = str(memory_data.get('intent') or memory_data.get('action') or "").lower()
+    schedule_block = memory_data.get('schedule') if isinstance(memory_data.get('schedule'), dict) else {}
+    if (
+        'reminder' not in normalized_type
+        and 'reminder' not in intent
+        and not schedule_block
+    ):
+        return None
+
+    # Determine trigger time
+    trigger_at = None
+    iso_candidates = [
+        schedule_block.get('time_iso'),
+        schedule_block.get('iso'),
+        schedule_block.get('timestamp'),
+        schedule_block.get('next_run_iso'),
+        memory_data.get('time_iso'),
+        memory_data.get('trigger_iso'),
+        memory_data.get('next_trigger_iso'),
+    ]
+    for candidate in iso_candidates:
+        trigger_at = _parse_iso_datetime(candidate)
+        if trigger_at:
+            break
+
+    if not trigger_at:
+        seconds = None
+        relative_keys = (
+            'seconds', 'relative_seconds', 'offset_seconds',
+            'minutes', 'relative_minutes',
+            'hours', 'relative_hours',
+            'days', 'relative_days'
+        )
+        accum_seconds = 0.0
+        for key in relative_keys:
+            value = schedule_block.get(key)
+            if isinstance(value, (int, float)):
+                if 'minute' in key:
+                    accum_seconds += float(value) * 60.0
+                elif 'hour' in key:
+                    accum_seconds += float(value) * 3600.0
+                elif 'day' in key:
+                    accum_seconds += float(value) * 86400.0
+                else:
+                    accum_seconds += float(value)
+        if accum_seconds > 0:
+            seconds = max(5.0, accum_seconds)
+        if seconds:
+            trigger_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+    if not trigger_at:
+        return None
+
+    reminder_text = (
+        memory_data.get('reminder_text') or
+        memory_data.get('task') or
+        memory_data.get('message') or
+        memory_data.get('description') or
+        memory_data.get('content') or
+        memory_key or
+        "Reminder"
+    )
+
+    channel_id = (
+        _extract_numeric_id(memory_data.get('channel_id')) or
+        _extract_numeric_id(memory_data.get('channel')) or
+        _extract_numeric_id(memory_data.get('channel_mention')) or
+        (source_message.channel.id if source_message and source_message.channel else None)
+    )
+
+    target_user_id = (
+        _extract_numeric_id(memory_data.get('target_user_id')) or
+        _extract_numeric_id(memory_data.get('user_id')) or
+        _extract_numeric_id(memory_data.get('mention_user_id')) or
+        _extract_numeric_id(memory_data.get('assignee')) or
+        (source_message.author.id if source_message and source_message.author else None)
+    )
+
+    target_role_id = (
+        _extract_numeric_id(memory_data.get('target_role_id')) or
+        _extract_numeric_id(memory_data.get('role_id')) or
+        _extract_numeric_id(memory_data.get('mention_role_id'))
+    )
+
+    mention_everyone = bool(memory_data.get('mention_everyone'))
+
+    return {
+        "trigger_at": trigger_at,
+        "reminder_text": reminder_text,
+        "channel_id": channel_id,
+        "target_user_id": target_user_id,
+        "target_role_id": target_role_id,
+        "mention_everyone": mention_everyone,
+    }
 
 
 def _default_message_meta() -> Dict[str, Any]:
@@ -7646,12 +7804,21 @@ async def ai_parse_discord_command(message: discord.Message, guild_id: str = Non
     except:
         pass
     
+    current_channel = getattr(message.channel, "name", "direct-message")
+    current_channel_id = getattr(message.channel, "id", "N/A")
+    current_user = message.author.display_name if message.author else "Unknown User"
+    current_user_id = message.author.id if message.author else "N/A"
+
     prompt = f"""You are parsing a Discord command to determine if the user wants you to:
 1. Send a message to a specific channel (possibly mentioning roles/users)
 2. Store server memory (reminders, birthdays, events, channel instructions)
 3. Query/retrieve server memory (show reminders, birthdays, etc.)
 
 User message: "{content}"
+
+Conversation context:
+- Current channel: #{current_channel} (ID: {current_channel_id})
+- Current user: {current_user} (ID: {current_user_id})
 
 Available channels in this server:
 {channels_info if channels_info else "No channel info available"}
@@ -7725,6 +7892,23 @@ CRITICAL FOR STORE_MEMORY:
   * "save hourly reminder" → memory_type: "reminder", memory_data: {{"frequency": "hourly"}}
   * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
   * Store in whatever structure makes sense - be flexible and dynamic!
+
+REMINDER/SCHEDULE FORMAT:
+- When user says "remind me...", "set a reminder", "schedule a post", etc., include a detailed schedule object so downstream systems can run it automatically.
+- Example memory_data for a one-off reminder:
+  {{
+      "intent": "reminder",
+      "reminder_text": "Take out the garbage",
+      "channel_id": "{current_channel_id}",
+      "channel_name": "{current_channel}",
+      "target_user_id": "{current_user_id}",
+      "schedule": {{
+          "type": "relative",
+          "seconds": 20
+      }}
+  }}
+- Use `"schedule": {{"type": "absolute", "time_iso": "2025-01-01T15:00:00Z"}}` for explicit timestamps, or `"type": "recurring"` with fields like `"cron"` / `"every_days"` when repeating.
+- ALWAYS include channel + user identifiers when possible so the automation knows where to post the reminder.
 
 CRITICAL FOR wants_channels_list:
 - Set "wants_channels_list" true if user asks to see/list channels and/or categories (just a question, NOT sending a message)
@@ -7936,14 +8120,16 @@ async def evaluate_server_policies(message: discord.Message, server_memories: Li
     trimmed = server_memories[:SERVER_MEMORY_POLICY_LIMIT]
     formatted_entries = []
     for entry in trimmed:
-        formatted_entries.append({
+        formatted_entries.append(_serialize_for_ai({
             "id": entry.get('id'),
             "memory_type": entry.get('memory_type'),
             "memory_key": entry.get('memory_key'),
             "memory_data": entry.get('memory_data'),
             "system_state": entry.get('system_state'),
-            "last_executed_at": entry.get('last_executed_at')
-        })
+            "last_executed_at": entry.get('last_executed_at'),
+            "next_check_at": entry.get('next_check_at'),
+            "updated_at": entry.get('updated_at'),
+        }))
     current_time = datetime.now(timezone.utc).isoformat()
     channel_name = getattr(message.channel, "name", "direct-message")
     prompt = f"""You enforce per-server policies for ServerMate.
@@ -7999,20 +8185,30 @@ async def evaluate_server_automations(guild: discord.Guild, entries: List[dict],
         return {}
     formatted_entries = []
     for entry in entries:
-        formatted_entries.append({
+        formatted_entries.append(_serialize_for_ai({
             "memory_id": entry.get('id'),
             "memory_type": entry.get('memory_type'),
             "memory_key": entry.get('memory_key'),
             "memory_data": entry.get('memory_data'),
             "system_state": entry.get('system_state'),
             "last_executed_at": entry.get('last_executed_at'),
-            "updated_at": entry.get('updated_at')
-        })
+            "updated_at": entry.get('updated_at'),
+            "next_check_at": entry.get('next_check_at'),
+        }))
     prompt = f"""You orchestrate scheduled automations for server "{guild.name}" (ID: {guild.id}).
 
 Current UTC time: {now.isoformat()}
 Automation entries:
 {json.dumps(formatted_entries, ensure_ascii=False)}
+
+GUIDANCE:
+- Interpret `memory_data` + `system_state` to understand what needs to happen (channel restrictions, scheduled posts, recurring reminders, etc.).
+- If `memory_data.delivery == "native_reminder"`, SKIP it (it is handled by a dedicated reminder engine). Just set `should_execute=false` and `next_check_seconds` to something large.
+- When executing:
+    * Build concrete `channel_actions` with finalized message copy (mention roles/users as needed).
+    * Update `state` with whatever you need persisted (next due time, completion flags, counters). Downstream storage is literal.
+    * One-off tasks should mark `state` like `{{"completed": true}}` and return a very large `next_check_seconds` so they don't re-run.
+- Use `reason` to briefly explain why you executed or skipped the entry.
 
 For each entry decide whether it should execute right now. If not, provide how long until the next check.
 Return ONLY JSON:
@@ -8059,6 +8255,12 @@ async def run_server_automation_scheduler():
     while not bot.is_closed():
         try:
             candidate_entries = await memory.get_server_memories_needing_check(SERVER_AUTOMATION_ENTRY_LIMIT)
+            if candidate_entries:
+                candidate_entries = [
+                    entry for entry in candidate_entries
+                    if not isinstance(entry.get('memory_data'), dict)
+                    or entry['memory_data'].get('delivery') != 'native_reminder'
+                ]
             if candidate_entries:
                 now = datetime.now(timezone.utc)
                 entries_by_guild: Dict[str, List[dict]] = {}
@@ -8117,6 +8319,82 @@ async def run_server_automation_scheduler():
             print(f"⚠️  [AUTOMATION] Scheduler error: {scheduler_error}")
             await asyncio.sleep(SERVER_AUTOMATION_INTERVAL)
 
+
+async def _deliver_native_reminder(reminder: dict):
+    """Send a reminder message to the appropriate channel or user."""
+    reminder_id = reminder.get('id')
+    reminder_text = reminder.get('reminder_text') or "Reminder"
+    channel_id = _extract_numeric_id(reminder.get('channel_id'))
+    target_user_id = _extract_numeric_id(reminder.get('target_user_id'))
+    target_role_id = _extract_numeric_id(reminder.get('target_role_id'))
+    requester_id = _extract_numeric_id(reminder.get('user_id'))
+
+    mention_parts = []
+    if target_user_id:
+        mention_parts.append(f"<@{target_user_id}>")
+    if target_role_id:
+        mention_parts.append(f"<@&{target_role_id}>")
+
+    reminder_body = f"{' '.join(mention_parts)} Reminder: {reminder_text}".strip()
+    sent = False
+
+    channel_obj = None
+    if channel_id:
+        channel_obj = bot.get_channel(channel_id)
+        if channel_obj is None:
+            try:
+                channel_obj = await bot.fetch_channel(channel_id)
+            except Exception:
+                channel_obj = None
+    if channel_obj:
+        try:
+            await channel_obj.send(
+                reminder_body,
+                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
+            )
+            sent = True
+        except Exception as send_error:
+            print(f"⚠️  [REMINDERS] Failed to send reminder {reminder_id} to channel {channel_id}: {send_error}")
+
+    if not sent and requester_id:
+        user_obj = bot.get_user(requester_id)
+        if user_obj is None:
+            try:
+                user_obj = await bot.fetch_user(requester_id)
+            except Exception:
+                user_obj = None
+        if user_obj:
+            try:
+                await user_obj.send(reminder_body)
+                sent = True
+            except Exception as dm_error:
+                print(f"⚠️  [REMINDERS] Failed to DM reminder {reminder_id}: {dm_error}")
+
+    if sent and reminder_id:
+        await db.complete_reminder(reminder_id)
+
+
+async def run_native_reminder_scheduler():
+    """Background task that dispatches absolute reminders stored in the reminders table."""
+    await bot.wait_until_ready()
+    print("⏰ [REMINDERS] Scheduler started")
+    while not bot.is_closed():
+        try:
+            pending = await db.get_pending_reminders(datetime.now(timezone.utc))
+            if pending:
+                for reminder in pending:
+                    try:
+                        await _deliver_native_reminder(reminder)
+                    except Exception as reminder_error:
+                        print(f"⚠️  [REMINDERS] Error delivering reminder {reminder.get('id')}: {reminder_error}")
+            await asyncio.sleep(REMINDER_POLL_INTERVAL)
+        except asyncio.CancelledError:
+            print("⏰ [REMINDERS] Scheduler cancelled")
+            break
+        except Exception as scheduler_error:
+            print(f"⚠️  [REMINDERS] Scheduler error: {scheduler_error}")
+            await asyncio.sleep(REMINDER_POLL_INTERVAL)
+
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
     import time
@@ -8139,6 +8417,7 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
         
         # Kick off Discord command parsing immediately (AI-only decisions for channel posts/memories)
         discord_command_result = None
+        discord_memory_snapshot = None
         discord_command = None
         discord_command_task = asyncio.create_task(ai_parse_discord_command(message, guild_id)) if guild_id else None
         
@@ -8344,6 +8623,8 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
   * **Query Memory** - "show me what reminders we have", "show me people's birthdays", "list all events"
   * **Discord Actions** - "go to announcements @ everyone and talk about our future plans" - you can send messages to specific channels and mention roles
   * All server memory is dynamic - you create the fields you need, and each server has its own isolated memory. You can store ANYTHING the server needs to remember!
+- ✅ **AI Policy Engine & Scheduler**: You autonomously enforce server-specific policies (channel-only replies, mention requirements, ignore/redirect rules) and run reminders/scheduled posts. For every stored memory you dynamically decide if action is needed, craft the channel messages, and keep latency negligible—all AI-driven per guild with zero hardcoding.
+- ✅ **Server Memory Viewer**: When users ask "what do you have stored about this server?" or run `/servermemory`, show a concise summary of stored reminders, events, rules, and automations—trim long JSON to the important bits.
 
 YOUR CAPABILITIES - HOW TO RESPOND:
 When users ask "what can you do?", "what are your capabilities?", "what can you help with?", "what features do you have?", etc., respond naturally in your own words based on the capabilities listed above. Be enthusiastic and helpful - explain what you can do in a friendly, conversational way. You can mention specific examples like:
@@ -8370,6 +8651,8 @@ SLASH COMMANDS AVAILABLE:
 - `/help` - Get help and information about how to use the bot, its capabilities, and available commands
   - What it does: Displays a help embed showing how to interact with me (mention, reply, say name), what I can do (all capabilities), available slash commands, and usage examples
   - When to use: When someone asks "how do I use you?", "what can you do?", "what commands are available?", or needs general help getting started
+
+- `/servermemory [memory_type] [limit]` - View server memory entries (reminders, events, policies) for this guild. Optional filters let you focus on a specific memory type or limit the output. Great for "what do you have stored about this server?" style questions.
 
 - `/stop` - Stop my current response or automation for YOU (it won't affect anyone else's messages)
   - What it does: Cancels any active AI response, screenshot run, or browser automation that I'm currently doing for your latest message
@@ -8623,11 +8906,30 @@ CURRENT CONVERSATION CONTEXT:
                 if action_type == 'store_memory':
                     memory_type = discord_command.get('memory_type')
                     memory_key = discord_command.get('memory_key')
-                    memory_data = discord_command.get('memory_data', {})
+                    raw_memory_data = discord_command.get('memory_data') or {}
+                    memory_data = raw_memory_data if isinstance(raw_memory_data, dict) else {"value": raw_memory_data}
+                    reminder_payload = _prepare_native_reminder_payload(memory_type, memory_key, memory_data, message)
+                    if reminder_payload and reminder_payload.get('trigger_at'):
+                        memory_data = dict(memory_data)
+                        memory_data.setdefault('delivery', 'native_reminder')
                     if memory_type and memory_key and memory_data:
                         try:
                             await memory.store_server_memory(guild_id, memory_type, memory_key, memory_data, user_id)
                             discord_command_result = f"✅ Stored {memory_type} memory: {memory_key}"
+                            if reminder_payload and reminder_payload.get('trigger_at') and reminder_payload.get('channel_id'):
+                                trigger_at = reminder_payload['trigger_at']
+                                reminder_id = await db.create_reminder(
+                                    user_id,
+                                    reminder_payload['reminder_text'],
+                                    trigger_at,
+                                    guild_id,
+                                    str(reminder_payload.get('channel_id')),
+                                    str(reminder_payload.get('target_user_id')) if reminder_payload.get('target_user_id') else None,
+                                    str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None
+                                )
+                                if reminder_id:
+                                    time_hint = discord.utils.format_dt(trigger_at, style='R') if trigger_at else "soon"
+                                    discord_command_result += f"\n⏰ Reminder scheduled {time_hint}"
                         except Exception as e:
                             discord_command_result = f"❌ Error storing memory: {str(e)}"
                 elif action_type == 'query_memory':
@@ -8639,6 +8941,7 @@ CURRENT CONVERSATION CONTEXT:
                         else:
                             if isinstance(memories, dict):
                                 memories = [memories]
+                            discord_memory_snapshot = memories
                             response_parts = []
                             for mem in memories[:20]:
                                 mem_type = mem.get('memory_type', 'memory')
@@ -8674,6 +8977,23 @@ CURRENT CONVERSATION CONTEXT:
                 print(f"⚠️  [{username}] AI small-talk error: {small_talk_error}")
                 minimal_text = "Hey there! Hope everything's going well."
             return build_response_payload(minimal_text)
+
+        if discord_command_result:
+            system_log = discord_command_result.strip()
+            if system_log:
+                clipped_log = system_log[:1500]
+                consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n"
+
+        if discord_memory_snapshot:
+            snapshot_lite = _serialize_for_ai(discord_memory_snapshot[:8])
+            snapshot_text = json.dumps(snapshot_lite, ensure_ascii=False)
+            if len(snapshot_text) > 4000:
+                snapshot_text = snapshot_text[:4000] + " …"
+            consciousness_prompt += (
+                "\n\nSERVER MEMORY SNAPSHOT REQUESTED BY USER:\n"
+                f"{snapshot_text}\n"
+                "Summarize or reference this data when answering their question."
+            )
 
         # Process images if present (from current message OR replied message)
         image_parts = []
@@ -11193,6 +11513,7 @@ async def on_ready():
         asyncio.create_task(store_guild_structure(guild))
     
     asyncio.create_task(run_server_automation_scheduler())
+    asyncio.create_task(run_native_reminder_scheduler())
 
     # Check for banned servers on startup and leave them
     for guild in bot.guilds:
@@ -12434,6 +12755,8 @@ async def help_command(interaction: discord.Interaction):
             "• **Remember Conversations** - I build personality profiles over time\n"
             "• **Multi-modal** - Process text, images, and documents together\n"
             "• **Server Memory** - Store reminders, birthdays, events, and channel instructions per server\n"
+            "• **AI Policies & Scheduler** - Enforce channel rules and run reminders/scheduled posts automatically\n"
+            "• **Server Memory Viewer** - Summarize what I have stored about this server or use /servermemory\n"
             "• **Discord Actions** - Send messages to channels, mention roles, and interact with Discord dynamically"
         ),
         inline=False
@@ -12445,6 +12768,7 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
+            "`/servermemory [type] [limit]` - Inspect stored server reminders/rules\n"
             "`/stop` - Stop my current response or automation for you\n"
             "`/website` - Visit the ServerMate website"
         ),
@@ -12472,6 +12796,57 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text=f"Use /profile to see your personality profile!")
     
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name='servermemory', description='View stored server-wide memory entries')
+@app_commands.describe(memory_type='Filter by memory type (optional)', limit='Number of entries to show (1-20)')
+async def server_memory_command(interaction: discord.Interaction, memory_type: Optional[str] = None, limit: int = 10):
+    """Slash command to inspect server memory."""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild.id)
+    limit = max(1, min(20, limit))
+
+    try:
+        memories = await memory.get_server_memory(guild_id, memory_type)
+        if not memories:
+            await interaction.followup.send(
+                "No server memory entries found." if not memory_type else f"No '{memory_type}' entries found.",
+                ephemeral=True
+            )
+            return
+        if isinstance(memories, dict):
+            memories = [memories]
+        display_entries = memories[:limit]
+        bot_name = os.getenv('BOT_NAME', 'ServerMate').title()
+        embed = discord.Embed(
+            title=f"🧠 {bot_name} Server Memory",
+            description=f"Showing {len(display_entries)} entr{'y' if len(display_entries)==1 else 'ies'}"
+                        f"{f' (type: {memory_type})' if memory_type else ''}",
+            color=0x5865F2
+        )
+        for entry in display_entries:
+            mem_type = entry.get('memory_type', 'memory')
+            mem_key = entry.get('memory_key', 'unknown')
+            updated_at = entry.get('updated_at')
+            if isinstance(updated_at, datetime):
+                updated_display = updated_at.strftime('%Y-%m-%d %H:%M')
+            else:
+                updated_display = str(updated_at) if updated_at else 'unknown'
+            data_preview = entry.get('memory_data', {})
+            data_text = json.dumps(_serialize_for_ai(data_preview), ensure_ascii=False)
+            if len(data_text) > 200:
+                data_text = data_text[:200] + " …"
+            field_name = f"{mem_type} → {mem_key}"
+            field_value = f"{data_text}\n*Updated: {updated_display}*"
+            embed.add_field(name=field_name, value=field_value, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Error retrieving server memory: {e}", ephemeral=True)
 
 
 @bot.tree.command(name='stop', description='Stop my current response or automation for you')
