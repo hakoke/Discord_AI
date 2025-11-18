@@ -2549,6 +2549,29 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
     ):
         return None
 
+    def _collect_relative_seconds(data: Dict[str, Any]) -> float:
+        total = 0.0
+        mappings = [
+            ('seconds', 1),
+            ('relative_seconds', 1),
+            ('offset_seconds', 1),
+            ('time_seconds', 1),
+            ('minutes', 60),
+            ('relative_minutes', 60),
+            ('time_minutes', 60),
+            ('hours', 3600),
+            ('relative_hours', 3600),
+            ('time_hours', 3600),
+            ('days', 86400),
+            ('relative_days', 86400),
+            ('time_days', 86400),
+        ]
+        for key, multiplier in mappings:
+            value = data.get(key)
+            if isinstance(value, (int, float)):
+                total += float(value) * multiplier
+        return total
+
     # Determine trigger time
     trigger_at = None
     iso_candidates = [
@@ -2559,6 +2582,7 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
         memory_data.get('time_iso'),
         memory_data.get('trigger_iso'),
         memory_data.get('next_trigger_iso'),
+        memory_data.get('trigger_at'),
     ]
     for candidate in iso_candidates:
         trigger_at = _parse_iso_datetime(candidate)
@@ -2566,29 +2590,10 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
             break
 
     if not trigger_at:
-        seconds = None
-        relative_keys = (
-            'seconds', 'relative_seconds', 'offset_seconds',
-            'minutes', 'relative_minutes',
-            'hours', 'relative_hours',
-            'days', 'relative_days'
-        )
-        accum_seconds = 0.0
-        for key in relative_keys:
-            value = schedule_block.get(key)
-            if isinstance(value, (int, float)):
-                if 'minute' in key:
-                    accum_seconds += float(value) * 60.0
-                elif 'hour' in key:
-                    accum_seconds += float(value) * 3600.0
-                elif 'day' in key:
-                    accum_seconds += float(value) * 86400.0
-                else:
-                    accum_seconds += float(value)
+        accum_seconds = _collect_relative_seconds(schedule_block)
+        accum_seconds += _collect_relative_seconds(memory_data)
         if accum_seconds > 0:
-            seconds = max(5.0, accum_seconds)
-        if seconds:
-            trigger_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            trigger_at = datetime.now(timezone.utc) + timedelta(seconds=max(5.0, accum_seconds))
 
     if not trigger_at:
         return None
