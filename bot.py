@@ -2417,6 +2417,102 @@ def _matches_keyword_boundary(text: str, keyword: str) -> bool:
             return True
         start = idx + 1
 
+MENTION_REGEX = re.compile(r'<@!?&?\d+>')
+
+
+def _strip_discord_mentions(text: Optional[str]) -> str:
+    """Remove Discord mention tokens like <@12345> for cleaner heuristics."""
+    if not text:
+        return ""
+    return MENTION_REGEX.sub("", text).strip()
+
+
+def _is_profile_picture_asset(image_part: Dict[str, Any]) -> bool:
+    """Return True if the provided image payload is a Discord profile picture asset."""
+    return (
+        isinstance(image_part, dict)
+        and image_part.get("source") == "discord_asset"
+        and image_part.get("discord_type") == "profile_picture"
+    )
+
+def _default_message_meta() -> Dict[str, Any]:
+    return {
+        "small_talk": False,
+        "profile_picture_focus": False,
+        "media": {
+            "needs_screenshots": False,
+            "needs_video": False,
+            "forbid_screenshots": False,
+            "forbid_video": False,
+            "video_duration_seconds": None,
+            "preferred_screenshot_count": None,
+            "notes": ""
+        }
+    }
+
+
+async def ai_analyze_message_meta(message: discord.Message) -> Dict[str, Any]:
+    """AI analyzes the latest message for conversational meta-intent."""
+    content = (message.content or "").strip()
+    meta = _default_message_meta()
+    if not content:
+        return meta
+
+    prompt = f"""You are a classifier for a Discord assistant. Analyze the SINGLE message below and return structured JSON.
+
+Message: "{content}"
+
+Return ONLY JSON with this shape:
+{{
+  "small_talk": true/false,
+  "profile_picture_focus": true/false,
+  "media": {{
+    "needs_screenshots": true/false,
+    "needs_video": true/false,
+    "forbid_screenshots": true/false,
+    "forbid_video": true/false,
+    "video_duration_seconds": number or null,
+    "preferred_screenshot_count": number or null,
+    "notes": "short explanation"
+  }}
+}}
+
+Definitions:
+- "small_talk": true only when the user is just greeting/checking-in without asking for tasks.
+- "profile_picture_focus": true only when they explicitly want any profile/avatar/server picture described, sent, or edited.
+- "needs_screenshots": true when they explicitly request website screenshots or visual proof.
+- "needs_video": true when they explicitly ask for a video/recording/clip of the process.
+- "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
+- Durations/counts: extract explicit numbers (e.g., "10 second video", "take 3 screenshots"). Use null when unspecified.
+- "notes": summarize the reasoning in under 20 words.
+
+JSON:"""
+
+    try:
+        decision_model = get_fast_model()
+        response = await queued_generate_content(decision_model, prompt)
+        response_text = (response.text or "").strip()
+        if '```' in response_text:
+            parts = response_text.split('```')
+            if len(parts) >= 3:
+                response_text = parts[1 if parts[0].strip().lower().startswith('json') else 1].strip()
+        parsed = json.loads(response_text)
+        meta["small_talk"] = bool(parsed.get("small_talk", meta["small_talk"]))
+        meta["profile_picture_focus"] = bool(parsed.get("profile_picture_focus", meta["profile_picture_focus"]))
+        media = parsed.get("media") or {}
+        meta_media = meta["media"]
+        meta_media["needs_screenshots"] = bool(media.get("needs_screenshots", meta_media["needs_screenshots"]))
+        meta_media["needs_video"] = bool(media.get("needs_video", meta_media["needs_video"]))
+        meta_media["forbid_screenshots"] = bool(media.get("forbid_screenshots", meta_media["forbid_screenshots"]))
+        meta_media["forbid_video"] = bool(media.get("forbid_video", meta_media["forbid_video"]))
+        meta_media["video_duration_seconds"] = media.get("video_duration_seconds", meta_media["video_duration_seconds"])
+        meta_media["preferred_screenshot_count"] = media.get("preferred_screenshot_count", meta_media["preferred_screenshot_count"])
+        meta_media["notes"] = str(media.get("notes", meta_media["notes"] or "")).strip()
+    except Exception as e:
+        handle_rate_limit_error(e)
+        print(f"⚠️  [META] Failed to analyze message meta: {e}")
+    return meta
+
 def build_response_payload(
     response_text: str = "",
     generated_images=None,
@@ -6157,13 +6253,19 @@ Actions: """
     
     return actions, take_screenshot
 
-async def ai_decide_video_recording(message: discord.Message, url: str, browser_actions: List[str]) -> Tuple[bool, Optional[int], Optional[str]]:
+async def ai_decide_video_recording(
+    message: discord.Message,
+    url: str,
+    browser_actions: List[str],
+    media_preferences: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, Optional[int], Optional[str]]:
     """AI decides if video recording should be used and extracts duration/trigger point
     
     Args:
         message: The Discord message
         url: The URL being accessed
         browser_actions: List of browser actions to perform
+        media_preferences: Optional structured hints from ai_analyze_message_meta
     
     Returns:
         Tuple of (should_record_video, duration_seconds, trigger_point)
@@ -6171,42 +6273,19 @@ async def ai_decide_video_recording(message: discord.Message, url: str, browser_
         - duration_seconds: How long to record (None = until actions complete)
         - trigger_point: When to start recording ("before_actions", "after_actions", "specific_action")
     """
-    content = (message.content or "").lower()
+    prefs = media_preferences or {}
+    if prefs.get("forbid_video"):
+        return False, None, None
     
-    # Check for explicit video keywords
-    video_keywords = ['record', 'video', 'screen record', 'screen recording', 'record video', 'take video', 'show me video']
-    has_video_keyword = any(keyword in content for keyword in video_keywords)
-    
-    # Extract duration if mentioned
-    duration_seconds = None
-    duration_patterns = [
-        r'record\s+(\d+)\s*(?:second|sec|s)',
-        r'video\s+(\d+)\s*(?:second|sec|s)',
-        r'record\s+for\s+(\d+)\s*(?:second|sec|s)',
-        r'(\d+)\s*(?:second|sec|s)\s*(?:of|video|recording)',
-        r'record\s+(\d+)\s*(?:minute|min|m)',
-        r'video\s+(\d+)\s*(?:minute|min|m)',
-        r'record\s+for\s+(\d+)\s*(?:minute|min|m)',
-        r'(\d+)\s*(?:minute|min|m)\s*(?:of|video|recording)',
-    ]
-    
-    for pattern in duration_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            value = int(match.group(1))
-            if 'min' in pattern or 'm)' in pattern:
-                duration_seconds = value * 60
-            else:
-                duration_seconds = value
-            break
+    preference_summary = json.dumps(prefs, ensure_ascii=False)
     
     # Use AI to make intelligent decision
     decision_prompt = f"""User message: "{message.content}"
 
 URL: {url}
 Browser actions planned: {browser_actions}
-Has explicit video keyword: {has_video_keyword}
-Extracted duration: {duration_seconds} seconds (if any)
+Existing media preference summary (from a previous AI pass):
+{preference_summary}
 
 Decide if video recording should be used instead of or in addition to screenshots.
 
@@ -6261,32 +6340,34 @@ Decision: """
             duration = parsed.get("duration_seconds")
             if duration is not None:
                 duration = int(duration)
-            trigger = parsed.get("trigger_point", "before_actions")
-            reasoning = parsed.get("reasoning", "")
-            
-            print(f"🎥 [VIDEO DECISION] AI decided: record={should_record}, duration={duration}s, trigger={trigger}, reason: {reasoning}")
-            
-            # Override with explicit keywords if found
-            if has_video_keyword:
+            trigger = parsed.get("trigger_point") or "before_actions"
+            reasoning = (parsed.get("reasoning", "") or "").strip()
+
+            if prefs.get("needs_video") and not should_record:
                 should_record = True
-                if duration_seconds is None and duration is None:
-                    # Default duration if explicitly requested but not specified
-                    duration = 30
-                elif duration_seconds is not None:
-                    duration = duration_seconds
-            
+                if duration is None:
+                    duration = prefs.get("video_duration_seconds")
+
+            if duration is None:
+                duration = prefs.get("video_duration_seconds")
+
+            duration_log = f"{duration}s" if duration is not None else "None"
+            final_reason = reasoning or prefs.get("notes", "") or "No explicit reason provided"
+            print(f"🎥 [VIDEO DECISION] AI decided: record={should_record}, duration={duration_log}, trigger={trigger}, reason: {final_reason}")
+
             return should_record, duration, trigger
         except json.JSONDecodeError:
             # Fallback: use keyword detection
-            if has_video_keyword:
-                return True, duration_seconds or 30, "before_actions"
+            fallback_duration = prefs.get("video_duration_seconds")
+            if prefs.get("needs_video"):
+                return True, fallback_duration, "before_actions"
             return False, None, None
     except Exception as e:
         handle_rate_limit_error(e)
         print(f"⚠️  [VIDEO DECISION] Error: {e}")
         # Fallback
-        if has_video_keyword:
-            return True, duration_seconds or 30, "before_actions"
+        if prefs.get("needs_video"):
+            return True, prefs.get("video_duration_seconds"), "before_actions"
         return False, None, None
 
 def _clean_document_text(text: str) -> str:
@@ -8152,19 +8233,20 @@ CURRENT CONVERSATION CONTEXT:
                 pass
         
         plain_message = (message.content or "").strip()
-        simple_small_talk_candidate = (
-            plain_message
-            and len(plain_message) <= 20
+        message_meta = await ai_analyze_message_meta(message)
+        profile_request_detected = bool(message_meta.get("profile_picture_focus"))
+        media_preferences = message_meta.get("media") or {}
+
+        if (
+            message_meta.get("small_talk")
             and not message.attachments
             and not message.reference
             and not wants_summary
             and not extract_urls(plain_message)
-            and '?' not in plain_message
-        )
-
-        if simple_small_talk_candidate:
-            print(f"💬 [{username}] Early small-talk shortcut triggered")
-            minimal_prompt = f"""You are Servermate. The user just said "{plain_message}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
+        ):
+            print(f"💬 [{username}] AI small-talk shortcut triggered")
+            display_text = _strip_discord_mentions(plain_message) or plain_message or "hi"
+            minimal_prompt = f"""You are Servermate. The user just said "{display_text}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
             try:
                 fast_model = get_fast_model()
                 minimal_response = await queued_generate_content(fast_model, minimal_prompt)
@@ -8172,7 +8254,7 @@ CURRENT CONVERSATION CONTEXT:
                 if not minimal_text:
                     minimal_text = "Hey there! Hope everything's going well."
             except Exception as small_talk_error:
-                print(f"⚠️  [{username}] Early small-talk error: {small_talk_error}")
+                print(f"⚠️  [{username}] AI small-talk error: {small_talk_error}")
                 minimal_text = "Hey there! Hope everything's going well."
             return build_response_payload(minimal_text)
 
@@ -8379,16 +8461,6 @@ Now decide: "{message.content}" -> """
             wants_screenshot = (action_type == 'screenshot')
             print(f"🤖 [{username}] AI decided action type: {action_type}")
 
-            # Generic AI-friendly fallback: if the phrasing clearly asks to "show" a page,
-            # treat it as a screenshot/visual request. This is site-agnostic and does not
-            # hardcode destinations. It simply ensures we trigger the visual path.
-            if action_type == 'none':
-                content_lower = (message.content or "").lower()
-                if any(phrase in content_lower for phrase in ['show me', 'screenshot', 'show the', 'show page']):
-                    action_type = 'screenshot'
-                    wants_screenshot = True
-                    print(f"🤖 [{username}] Fallback: upgrading action to 'screenshot' based on phrasing")
-            
             # If no URLs in current message but AI determined user wants screenshot/interaction
             # PRIORITY 1: Try AI extraction from current message first (most relevant - user's current intent)
             # PRIORITY 2: Check replied message if AI extraction didn't work
@@ -8664,6 +8736,17 @@ Decision: """
                 # Defer screenshot decision until after URL extraction so we don't miss screenshots
                 # when the URL isn't in the original message.
                 screenshot_needed = None  # decide below
+                media_requires_video = bool(media_preferences.get("needs_video"))
+                media_requires_screenshots = bool(media_preferences.get("needs_screenshots"))
+                media_forbids_video = bool(media_preferences.get("forbid_video"))
+                media_forbids_screenshots = bool(media_preferences.get("forbid_screenshots"))
+                preferred_video_duration = media_preferences.get("video_duration_seconds")
+                preferred_screenshot_count = media_preferences.get("preferred_screenshot_count")
+                
+                if media_forbids_screenshots:
+                    screenshot_needed = False
+                elif media_requires_screenshots:
+                    screenshot_needed = True
                 
                 if should_fetch_urls:
                     print(f"🌐 [{username}] URLs are relevant - fetching content...")
@@ -8681,20 +8764,17 @@ Decision: """
                 else:
                     print(f"⏭️  [{username}] URLs not relevant/useful - skipping fetch")
                 
-                # Handle screenshots if needed (separate from text fetching)
+                # Handle browser automation (screenshots and/or video)
                 screenshot_attachments = []
-
-                # FIRST: Check for autonomous goals (including video recording) BEFORE checking screenshot_needed
-                # This ensures that "go to [URL] and record me completing it" triggers automation even without explicit "screenshot"
+                automation_required = False
+                screenshot_url = clean_url(urls[0]) if urls else None
                 autonomous_goal = None
-                if urls and PLAYWRIGHT_AVAILABLE:
-                    screenshot_url = clean_url(urls[0])
-                    if screenshot_url:
-                        autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
-                        if autonomous_goal:
-                            print(f"🤖 [{username}] Detected autonomous goal (including video recording): '{autonomous_goal}'")
-                            # If autonomous goal detected, we need browser automation (screenshot or video)
-                            screenshot_needed = True
+                
+                if screenshot_url and PLAYWRIGHT_AVAILABLE:
+                    autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
+                    if autonomous_goal:
+                        print(f"🤖 [{username}] Detected autonomous goal (including video recording): '{autonomous_goal}'")
+                        automation_required = True
 
                 # Decide screenshot after URLs were gathered or inferred.
                 if screenshot_needed is None:
@@ -8702,129 +8782,99 @@ Decision: """
                         print(f"⏭️  [{username}] Skipping screenshot - user wants image search, not website screenshots")
                         screenshot_needed = False
                     else:
-                        # If the user asked to "show" something, default to True; otherwise let AI decide.
-                        content_lower = (message.content or "").lower()
-                        if 'show me' in content_lower or 'show the' in content_lower or 'show page' in content_lower or 'screenshot' in content_lower or wants_screenshot:
-                            screenshot_needed = True
-                        else:
-                            screenshot_needed = await ai_decide_screenshot_needed(message, urls)
+                        screenshot_needed = await ai_decide_screenshot_needed(message, urls)
 
-                if screenshot_needed and PLAYWRIGHT_AVAILABLE:
-                    # Take screenshots of first URL (limit to 1 URL for screenshots to avoid overload)
-                    screenshot_url = clean_url(urls[0])  # Clean URL to remove any trailing invalid characters
-                    if not screenshot_url:
-                        print(f"❌ [{username}] Invalid URL after cleaning, skipping screenshot")
-                        screenshot_needed = False
-                    else:
-                        print(f"📸 [{username}] Screenshot requested for {screenshot_url[:80]}...")
-                    
+                run_browser = bool(screenshot_url) and PLAYWRIGHT_AVAILABLE and (automation_required or screenshot_needed or media_requires_video)
+                video_attachment = None
+
+                if run_browser:
+                    print(f"🧭 [{username}] Launching browser automation for {screenshot_url[:80]}...")
                     try:
-                        # AI decides: how many screenshots and what browser actions
-                        # Check if user wants autonomous goal-oriented automation (already checked above, but re-check if not set)
-                        if not autonomous_goal:
-                            autonomous_goal = await ai_detect_autonomous_goal(message, screenshot_url)
-                        
                         if autonomous_goal:
-                            # Use fully autonomous automation - AI will handle everything dynamically
                             print(f"🤖 [{username}] Using AUTONOMOUS automation for goal: '{autonomous_goal}'")
                             if hasattr(message, "__dict__"):
                                 message._servermate_force_fast_model = True
-                            screenshot_images, video_bytes = await autonomous_browser_automation(screenshot_url, autonomous_goal, max_iterations=10)
-                            screenshot_attachments.extend(screenshot_images)
-                            # Set screenshot_count for logging (autonomous mode returns variable number)
-                            screenshot_count = len(screenshot_images) if screenshot_images else 0
-                            
-                            # Add video if recorded
-                            if video_bytes:
+                            screenshot_images, video_bytes = await autonomous_browser_automation(
+                                screenshot_url, autonomous_goal, max_iterations=10
+                            )
+                            if screenshot_images and not media_forbids_screenshots:
+                                screenshot_attachments.extend(screenshot_images)
+                            if video_bytes and not media_forbids_video:
                                 video_bytes.seek(0)
                                 video_attachment = discord.File(video_bytes, filename="recording.mp4")
-                                # Store in global dictionary (Message objects are read-only)
-                                message_id = message.id
-                                # CRITICAL: Clear any previous videos for this message to prevent wrong video attachment
-                                if message_id in VIDEO_ATTACHMENTS:
-                                    print(f"⚠️  [{username}] Clearing previous video(s) for message {message_id} to prevent wrong video attachment")
-                                    del VIDEO_ATTACHMENTS[message_id]
-                                VIDEO_ATTACHMENTS[message_id] = [video_attachment]
                                 print(f"✅ [{username}] Video recorded from autonomous automation ({len(video_bytes.getvalue())} bytes)")
                         else:
-                            # Use regular automation with explicit actions
-                            screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
                             browser_actions, should_take_screenshot = await ai_decide_browser_actions(message, screenshot_url)
+                            should_record_video, video_duration, video_trigger = await ai_decide_video_recording(
+                                message,
+                                screenshot_url,
+                                browser_actions,
+                                media_preferences,
+                            )
                             
-                            # AI decides if video recording should be used
-                            should_record_video, video_duration, video_trigger = await ai_decide_video_recording(message, screenshot_url, browser_actions)
-                            
-                            # Track video separately
-                            video_attachment = None
-                            
-                            if should_record_video:
-                                print(f"🎥 [{username}] Recording video with actions: {browser_actions}, duration: {video_duration}s, trigger: {video_trigger}")
-                                # Record video
+                            if should_record_video and not media_forbids_video:
+                                final_duration = video_duration if video_duration is not None else preferred_video_duration
+                                print(f"🎥 [{username}] Recording browser video with actions: {browser_actions}, duration: {final_duration}s, trigger: {video_trigger}")
                                 video_bytes = await record_video_with_actions(
-                                    screenshot_url, 
-                                    browser_actions, 
-                                    duration_seconds=video_duration,
-                                    trigger_point=video_trigger
+                                    screenshot_url,
+                                    browser_actions,
+                                    duration_seconds=final_duration,
+                                    trigger_point=video_trigger,
                                 )
                                 if video_bytes:
-                                    # Create video file attachment
                                     video_bytes.seek(0)
                                     video_attachment = discord.File(video_bytes, filename="recording.mp4")
                                     print(f"✅ [{username}] Video recorded and ready")
                             
-                            # Still take screenshots (unless user explicitly only wants video)
-                            if not (should_record_video and 'only video' in (message.content or "").lower()):
+                            if screenshot_needed and not media_forbids_screenshots:
+                                screenshot_count = preferred_screenshot_count if isinstance(preferred_screenshot_count, int) else None
+                                if screenshot_count is None:
+                                    screenshot_count = await ai_decide_screenshot_count(message, screenshot_url)
+                                screenshot_count = max(1, min(10, screenshot_count))
                                 print(f"📸 [{username}] Taking {screenshot_count} screenshot(s) with actions: {browser_actions}")
-                            
-                            if browser_actions:
-                                # Perform actions and take screenshots
-                                screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                                if browser_actions:
+                                    screenshot_images = await navigate_and_screenshot(screenshot_url, browser_actions)
+                                else:
+                                    screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
                                 screenshot_attachments.extend(screenshot_images)
+
+                        if video_attachment and not media_forbids_video:
+                            message_id = message.id
+                            if autonomous_goal:
+                                if message_id in VIDEO_ATTACHMENTS:
+                                    print(f"⚠️  [{username}] Clearing previous video(s) for message {message_id} to prevent wrong video attachment")
+                                    del VIDEO_ATTACHMENTS[message_id]
+                                VIDEO_ATTACHMENTS[message_id] = [video_attachment]
                             else:
-                                # Just take multiple screenshots at different scroll positions
-                                screenshot_images = await take_multiple_screenshots(screenshot_url, count=screenshot_count)
-                                screenshot_attachments.extend(screenshot_images)
-                            
-                            # Store video attachment for later sending
-                            if video_attachment:
-                                # Store in global dictionary (Message objects are read-only)
-                                message_id = message.id
                                 if message_id not in VIDEO_ATTACHMENTS:
                                     VIDEO_ATTACHMENTS[message_id] = []
                                 VIDEO_ATTACHMENTS[message_id].append(video_attachment)
                         
-                        # Compress screenshots for Discord
-                        compressed_screenshots = []
-                        for idx, screenshot_bytes in enumerate(screenshot_attachments):
-                            if screenshot_bytes:
+                        if screenshot_attachments and not media_forbids_screenshots:
+                            compressed_screenshots = []
+                            for idx, screenshot_bytes in enumerate(screenshot_attachments):
+                                if not screenshot_bytes:
+                                    continue
                                 try:
-                                    # Read image
                                     screenshot_bytes.seek(0)
                                     from PIL import Image as PILImage
                                     img = PILImage.open(screenshot_bytes)
-                                    
-                                    # Compress
                                     compressed = compress_image_for_discord(img, max_width=1920, max_height=1080, quality=90)
                                     compressed_screenshots.append(compressed)
                                     print(f"✅ [{username}] Screenshot {idx + 1} compressed ({compressed.getvalue().__len__()} bytes)")
                                 except Exception as e:
                                     print(f"⚠️  [{username}] Error compressing screenshot {idx + 1}: {e}")
-                                    # Use uncompressed as fallback
                                     screenshot_bytes.seek(0)
                                     compressed_screenshots.append(screenshot_bytes)
-                        
-                        screenshot_attachments = compressed_screenshots
-                        actual_count = len(screenshot_attachments)
-                        print(f"✅ [{username}] Captured {actual_count} screenshot(s) (requested {screenshot_count})")
-                        
-                        # Analyze screenshots to detect errors/issues
-                        screenshot_analysis = []
-                        if screenshot_attachments:
+                            screenshot_attachments = compressed_screenshots
+                            actual_count = len(screenshot_attachments)
+                            print(f"✅ [{username}] Captured {actual_count} screenshot(s)")
+                            
+                            screenshot_analysis = []
                             print(f"🔍 [{username}] Analyzing {actual_count} screenshot(s) for errors/issues...")
                             for idx, screenshot_bytes in enumerate(screenshot_attachments):
                                 try:
                                     screenshot_bytes.seek(0)
-                                    # Analyze screenshot for error pages
                                     analysis_prompt = f"""Analyze this screenshot. Does it show an error page, block message, or access denied? 
 
 Common patterns to look for:
@@ -8863,7 +8913,6 @@ Screenshot {idx + 1}:"""
                                     
                                     # Try to parse JSON from response
                                     try:
-                                        # Extract JSON from markdown code blocks if present
                                         if '```json' in analysis_text:
                                             json_start = analysis_text.find('```json') + 7
                                             json_end = analysis_text.find('```', json_start)
@@ -8872,7 +8921,6 @@ Screenshot {idx + 1}:"""
                                             json_start = analysis_text.find('```') + 3
                                             json_end = analysis_text.find('```', json_start)
                                             analysis_text = analysis_text[json_start:json_end].strip()
-                                        
                                         analysis_data = json.loads(analysis_text)
                                         screenshot_analysis.append({
                                             'index': idx + 1,
@@ -8881,8 +8929,7 @@ Screenshot {idx + 1}:"""
                                             'description': analysis_data.get('description', '')
                                         })
                                         print(f"🔍 [{username}] Screenshot {idx + 1}: {'❌ ERROR - ' + analysis_data.get('error_type', 'unknown') if analysis_data.get('is_error') else '✅ OK'}")
-                                    except:
-                                        # Fallback: simple text analysis
+                                    except Exception:
                                         is_error = any(keyword in analysis_text.lower() for keyword in ['blocked', 'error', 'denied', 'forbidden', 'captcha', 'login required'])
                                         screenshot_analysis.append({
                                             'index': idx + 1,
@@ -8899,27 +8946,48 @@ Screenshot {idx + 1}:"""
                                         'error_type': 'analysis_failed',
                                         'description': 'Could not analyze screenshot'
                                     })
+                            screenshot_attachments_metadata = {
+                                'count': actual_count,
+                                'requested': preferred_screenshot_count if preferred_screenshot_count else actual_count,
+                                'analysis': screenshot_analysis,
+                                'url': screenshot_url
+                            }
+                        else:
+                            screenshot_attachments_metadata = {
+                                'count': 0,
+                                'requested': 0,
+                                'analysis': [],
+                                'url': screenshot_url or '',
+                            }
                         
-                        # Store analysis for later use in prompt
-                        screenshot_attachments_metadata = {
-                            'count': actual_count,
-                            'requested': screenshot_count,
-                            'analysis': screenshot_analysis,
-                            'url': screenshot_url
-                        }
-                        
+                        if media_forbids_screenshots:
+                            screenshot_attachments = []
+                            screenshot_attachments_metadata = {
+                                'count': 0,
+                                'requested': 0,
+                                'analysis': [],
+                                'url': screenshot_url or '',
+                                'notes': 'Screenshots suppressed per user instruction'
+                            }
                     except Exception as e:
-                        print(f"❌ [{username}] Error taking screenshots: {e}")
+                        print(f"❌ [{username}] Error during browser automation: {e}")
                         import traceback
-                        print(f"❌ [{username}] Screenshot traceback: {traceback.format_exc()}")
+                        print(f"❌ [{username}] Browser automation traceback: {traceback.format_exc()}")
                         screenshot_attachments = []
                         screenshot_attachments_metadata = {
                             'count': 0,
-                            'requested': screenshot_count if 'screenshot_count' in locals() else 0,
+                            'requested': 0,
                             'analysis': [],
-                            'url': screenshot_url if 'screenshot_url' in locals() else '',
+                            'url': screenshot_url or '',
                             'error': str(e)
                         }
+                else:
+                    screenshot_attachments_metadata = {
+                        'count': 0,
+                        'requested': 0,
+                        'analysis': [],
+                        'url': '',
+                    }
         
         search_decision_override = None
 
@@ -8963,7 +9031,13 @@ Screenshot {idx + 1}:"""
                 document_assets = []
             
         # Determine user intentions FIRST (before document check)
-        intention = await ai_decide_intentions(message, image_parts)
+        if profile_request_detected:
+            intention_image_parts = image_parts
+        else:
+            intention_image_parts = [
+                img for img in image_parts if not _is_profile_picture_asset(img)
+            ]
+        intention = await ai_decide_intentions(message, intention_image_parts)
         wants_image = intention['generate']
         wants_image_edit = intention['edit']
         wants_image_analysis = intention.get('analysis', False)
@@ -8971,12 +9045,31 @@ Screenshot {idx + 1}:"""
         print(f"🎯 [{username}] Intention decision: generate={wants_image}, edit={wants_image_edit}, analysis={wants_image_analysis}, attach_pfp={should_attach_profile_picture}")
         print(f"🎯 [{username}] Image parts available: {len(image_parts)}")
 
+        # Remove Discord profile pictures from the vision payload unless explicitly requested.
+        keep_profile_assets = profile_request_detected or should_attach_profile_picture
+        if image_parts and not keep_profile_assets:
+            filtered_profile_parts = [
+                img for img in image_parts if not _is_profile_picture_asset(img)
+            ]
+            if len(filtered_profile_parts) != len(image_parts):
+                removed_profiles = len(image_parts) - len(filtered_profile_parts)
+                print(f"📸 [{username}] Removed {removed_profiles} profile picture asset(s) (not requested)")
+                image_parts = filtered_profile_parts
+                if not image_parts:
+                    wants_image = False
+                    wants_image_edit = False
+                    wants_image_analysis = False
+
         # If no image analysis/edit/generation is needed and there are no fresh screenshots,
         # drop Discord visual assets from the vision payload to prevent irrelevant profile picture chatter.
         if image_parts:
             has_new_screenshots = any(img.get('source') == 'screenshot' and img.get('is_current', False) for img in image_parts)
             if not (wants_image_analysis or wants_image_edit or wants_image or has_new_screenshots):
-                filtered_image_parts = [img for img in image_parts if img.get('source') != 'discord_asset']
+                filtered_image_parts = [
+                    img for img in image_parts
+                    if img.get('source') != 'discord_asset'
+                    or (keep_profile_assets and _is_profile_picture_asset(img))
+                ]
                 if len(filtered_image_parts) != len(image_parts):
                     removed_count = len(image_parts) - len(filtered_image_parts)
                     print(f"📸 [{username}] Removed {removed_count} Discord asset(s) from image_parts (not needed for this request)")
@@ -9021,9 +9114,11 @@ Screenshot {idx + 1}:"""
         print(f"💬 [{username}] Reply style selected: {reply_style}")
         if small_talk and not wants_summary:
             message_clean = (message.content or "").strip()
-            if len(message_clean) <= 20 and not document_assets and not image_parts:
+            message_clean_compact = _strip_discord_mentions(message_clean)
+            if len(message_clean_compact) <= 20 and not document_assets and not image_parts:
                 print(f"💬 [{username}] Minimal small-talk shortcut triggered")
-                minimal_prompt = f"""You are Servermate. The user just said "{message_clean}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
+                prompt_text = message_clean_compact or message_clean or "hi"
+                minimal_prompt = f"""You are Servermate. The user just said "{prompt_text}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
                 try:
                     fast_model = get_fast_model()
                     minimal_response = await queued_generate_content(fast_model, minimal_prompt)
