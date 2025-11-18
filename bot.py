@@ -2477,6 +2477,24 @@ def _serialize_for_ai(value: Any) -> Any:
     return value
 
 
+def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert datetime to naive UTC (for DB writes)."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure datetime is timezone-aware UTC."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse ISO timestamps (with optional Z suffix) into timezone-aware datetimes."""
     if not value or not isinstance(value, str):
@@ -7963,6 +7981,18 @@ def _resolve_text_channel(guild: Optional[discord.Guild], spec: Optional[str]) -
     if not guild or not spec:
         return None
     spec = spec.strip()
+    if bot and bot.user:
+        bot_id_str = str(bot.user.id)
+        bot_mentions = {
+            bot_id_str,
+            f"<@{bot_id_str}>",
+            f"<@!{bot_id_str}>",
+            bot.user.name.lower() if bot.user.name else "",
+            bot.user.display_name.lower() if bot.user.display_name else ""
+        }
+        spec_lower = spec.lower()
+        if spec in bot_mentions or spec_lower in bot_mentions:
+            return None
     mention_match = re.fullmatch(r'<#(\d+)>', spec)
     if mention_match:
         channel = guild.get_channel(int(mention_match.group(1)))
@@ -7970,6 +8000,8 @@ def _resolve_text_channel(guild: Optional[discord.Guild], spec: Optional[str]) -
             return channel
     if spec.isdigit():
         channel = guild.get_channel(int(spec))
+        if bot and bot.user and int(spec) == bot.user.id:
+            return None
         if isinstance(channel, discord.TextChannel):
             return channel
     lowered = spec.lstrip('#').lower()
@@ -8090,6 +8122,8 @@ async def execute_channel_actions(
             continue
         channel = _resolve_text_channel(guild, channel_spec)
         if not channel:
+            if bot and bot.user and str(channel_spec).strip() == str(bot.user.id):
+                continue
             logs.append(f"❌ [{source}] Could not find channel matching '{channel_spec}'")
             continue
         allow_bot_mention = bool(
@@ -8301,15 +8335,15 @@ async def run_server_automation_scheduler():
                             await memory.update_server_memory_runtime(
                                 memory_id,
                                 system_state=state_payload,
-                                last_executed_at=now,
-                                next_check_at=next_check_time
+                                last_executed_at=_naive_utc(now),
+                                next_check_at=_naive_utc(next_check_time)
                             )
                         else:
                             await memory.update_server_memory_runtime(
                                 memory_id,
                                 system_state=state_payload,
                                 last_executed_at=None,
-                                next_check_at=next_check_time
+                                next_check_at=_naive_utc(next_check_time)
                             )
             await asyncio.sleep(SERVER_AUTOMATION_INTERVAL)
         except asyncio.CancelledError:
@@ -8380,7 +8414,7 @@ async def run_native_reminder_scheduler():
     print("⏰ [REMINDERS] Scheduler started")
     while not bot.is_closed():
         try:
-            pending = await db.get_pending_reminders(datetime.now(timezone.utc))
+            pending = await db.get_pending_reminders(_naive_utc(datetime.now(timezone.utc)))
             if pending:
                 for reminder in pending:
                     try:
@@ -8921,14 +8955,14 @@ CURRENT CONVERSATION CONTEXT:
                                 reminder_id = await db.create_reminder(
                                     user_id,
                                     reminder_payload['reminder_text'],
-                                    trigger_at,
+                                    _naive_utc(trigger_at),
                                     guild_id,
                                     str(reminder_payload.get('channel_id')),
                                     str(reminder_payload.get('target_user_id')) if reminder_payload.get('target_user_id') else None,
                                     str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None
                                 )
                                 if reminder_id:
-                                    time_hint = discord.utils.format_dt(trigger_at, style='R') if trigger_at else "soon"
+                                    time_hint = discord.utils.format_dt(_aware_utc(trigger_at), style='R') if trigger_at else "soon"
                                     discord_command_result += f"\n⏰ Reminder scheduled {time_hint}"
                         except Exception as e:
                             discord_command_result = f"❌ Error storing memory: {str(e)}"
