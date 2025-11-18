@@ -8994,6 +8994,21 @@ Screenshot {idx + 1}:"""
         small_talk = reply_style == 'SMALL_TALK'
         detailed_reply = reply_style == 'DETAILED'
         print(f"💬 [{username}] Reply style selected: {reply_style}")
+        if small_talk and not context_messages and not wants_summary:
+            message_clean = (message.content or "").strip()
+            if len(message_clean) <= 20 and not document_assets and not image_parts:
+                print(f"💬 [{username}] Minimal small-talk shortcut triggered")
+                minimal_prompt = f"""You are Servermate. The user just said "{message_clean}". Respond with exactly one short friendly sentence (under 20 words). Do NOT mention profile pictures or images."""
+                try:
+                    fast_model = get_fast_model()
+                    minimal_response = await queued_generate_content(fast_model, minimal_prompt)
+                    minimal_text = (minimal_response.text or "").strip()
+                    if not minimal_text:
+                        minimal_text = "Hey there! Hope everything's going well."
+                except Exception as small_talk_error:
+                    print(f"⚠️  [{username}] Minimal small-talk error: {small_talk_error}")
+                    minimal_text = "Hey there! Hope everything's going well."
+                return build_response_payload(minimal_text)
         
         # Let AI decide if internet search is needed and extract platform/query
         search_results = None
