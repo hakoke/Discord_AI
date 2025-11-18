@@ -4103,7 +4103,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
                 await page.wait_for_timeout(2000)
         
         # Main autonomous loop - FULLY AI-DRIVEN
-        # The AI will analyze screenshots and dynamiscally decide what to click
+        # The AI will analyze screenshots and dynamiscally decide what to clicsk
         # No hardcoded lists - everything is determined by AI vision analysis
         last_significant_state = None
         proposed_actions: List[Tuple[str, str]] = []  # Track AI proposals (raw + normalized) to detect loops
