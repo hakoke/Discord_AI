@@ -4179,6 +4179,7 @@ async def autonomous_browser_automation(url: str, goal: str, max_iterations: int
     goal_achieved = False
     temp_dir = None
     video_dir = None
+    last_page_url = url
     
     try:
         print(f"🤖 [AUTONOMOUS] Starting autonomous automation for goal: '{goal}'")
@@ -4316,6 +4317,10 @@ Return JSON:
             
             # Take screenshot of current state (but don't save it yet - only save significant ones)
             current_screenshot_bytes = await page.screenshot(type='png')
+            try:
+                last_page_url = page.url
+            except Exception:
+                pass
             screenshot_img = Image.open(BytesIO(current_screenshot_bytes))
             
             # Use AI to analyze current state and decide next action
@@ -5817,13 +5822,21 @@ If found, return the data. If not found, return {{"field_description": null}}.
                 storage_state = await page.context.storage_state()
             except Exception:
                 pass
-            video_bytes = await record_content_only_video(
-                browser,
-                page.url,
-                duration_for_clip,
-                storage_state,
-                goal
-            )
+            fallback_browser = browser if browser and browser.is_connected() else await get_browser()
+            target_url = None
+            try:
+                target_url = page.url
+            except Exception:
+                target_url = None
+            target_url = target_url or last_page_url or url
+            if fallback_browser and target_url:
+                video_bytes = await record_content_only_video(
+                    fallback_browser,
+                    target_url,
+                    duration_for_clip,
+                    storage_state,
+                    goal
+                )
 
         # If video recording was requested, finalize the video
         if should_record_video and not content_only_video and context and not page.is_closed():
@@ -5891,9 +5904,40 @@ If found, return the data. If not found, return {{"field_description": null}}.
                 screenshots.append(error_img_bytes)
             except:
                 pass
-        
-        return (screenshots if screenshots else []), None
-    
+        if should_record_video and content_only_video and video_bytes is None:
+            duration_for_clip = video_duration or 20
+            fallback_browser = None
+            try:
+                if browser and browser.is_connected():
+                    fallback_browser = browser
+            except Exception:
+                fallback_browser = None
+            if not fallback_browser:
+                fallback_browser = await get_browser()
+            storage_state = None
+            if page:
+                try:
+                    storage_state = await page.context.storage_state()
+                except Exception:
+                    pass
+            target_url = None
+            if page:
+                try:
+                    target_url = page.url
+                except Exception:
+                    pass
+            target_url = target_url or last_page_url or url
+            if fallback_browser and target_url:
+                video_bytes = await record_content_only_video(
+                    fallback_browser,
+                    target_url,
+                    duration_for_clip,
+                    storage_state,
+                    goal
+                )
+
+        return (screenshots if screenshots else []), video_bytes
+
     finally:
         if page and not page.is_closed():
             try:
@@ -12346,8 +12390,22 @@ async def analyze_command(ctx):
 async def on_disconnect():
     """Cleanup on disconnect"""
     if PLAYWRIGHT_AVAILABLE:
-        await close_browser()
+        active_tasks = sum(len(tasks) for tasks in ACTIVE_USER_TASKS.values())
+        if active_tasks:
+            print(f"🌐 [DISCONNECT] Discord disconnected ({active_tasks} automation task(s) still running) – keeping browser alive")
+        else:
+            print("🌐 [DISCONNECT] Discord disconnected – keeping browser warm for quick resume")
 
 if __name__ == '__main__':
-    bot.run(os.getenv('DISCORD_TOKEN'))
+    try:
+        bot.run(os.getenv('DISCORD_TOKEN'))
+    finally:
+        if PLAYWRIGHT_AVAILABLE:
+            try:
+                asyncio.run(close_browser())
+            except RuntimeError:
+                # If we're already inside an event loop (rare on shutdown), schedule the cleanup
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(close_browser())
 
