@@ -2435,6 +2435,27 @@ def _is_profile_picture_asset(image_part: Dict[str, Any]) -> bool:
         and image_part.get("discord_type") == "profile_picture"
     )
 
+
+def _extract_json_object(text: str) -> Optional[str]:
+    """Extract the first JSON object from a string, handling code fences."""
+    if not text:
+        return None
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate[3:]
+        if candidate.lower().startswith("json"):
+            candidate = candidate[4:]
+        if "```" in candidate:
+            candidate = candidate.split("```", 1)[0]
+        candidate = candidate.strip()
+    if candidate.startswith("{"):
+        return candidate
+    match = re.search(r'\{[\s\S]*\}', candidate)
+    if match:
+        return match.group(0)
+    return None
+
+
 def _default_message_meta() -> Dict[str, Any]:
     return {
         "small_talk": False,
@@ -2492,11 +2513,10 @@ JSON:"""
         decision_model = get_fast_model()
         response = await queued_generate_content(decision_model, prompt)
         response_text = (response.text or "").strip()
-        if '```' in response_text:
-            parts = response_text.split('```')
-            if len(parts) >= 3:
-                response_text = parts[1 if parts[0].strip().lower().startswith('json') else 1].strip()
-        parsed = json.loads(response_text)
+        json_blob = _extract_json_object(response_text)
+        if not json_blob:
+            raise ValueError("No JSON blob detected")
+        parsed = json.loads(json_blob)
         meta["small_talk"] = bool(parsed.get("small_talk", meta["small_talk"]))
         meta["profile_picture_focus"] = bool(parsed.get("profile_picture_focus", meta["profile_picture_focus"]))
         media = parsed.get("media") or {}
@@ -8461,12 +8481,13 @@ Now decide: "{message.content}" -> """
             wants_screenshot = (action_type == 'screenshot')
             print(f"🤖 [{username}] AI decided action type: {action_type}")
 
-            # If no URLs in current message but AI determined user wants screenshot/interaction
+            needs_visual_automation = wants_screenshot or bool(media_preferences.get("needs_video"))
+            # If no URLs in current message but AI determined user wants visual media/automation
             # PRIORITY 1: Try AI extraction from current message first (most relevant - user's current intent)
             # PRIORITY 2: Check replied message if AI extraction didn't work
             # PRIORITY 3: Check context messages as last resort
-            # IMPORTANT: Only use context URLs if NO URLs were found in the current message AND user wants screenshot
-            if not urls_found_in_current_message and wants_screenshot:
+            # IMPORTANT: Only use context URLs if NO URLs were found in the current message AND user wants automation
+            if not urls_found_in_current_message and needs_visual_automation:
                     # PRIORITY 1: Use AI to extract website name from current message and convert to URL (most relevant - current intent)
                     if not urls:
                         async def ai_extract_website_url():
