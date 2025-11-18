@@ -1057,7 +1057,7 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
             )
             print(f"✅ [IMAGE GEN] API call successful, received response")
         except ValueError as ve:
-            # ValueError with "image_bytes or gcs_uri" means the API returned empty/invalid images (blocked by safety)
+            # ValueError with "image_bytes or gcs_uri" means thes API returned empty/invalid images (blocked by safety)
             error_str = str(ve).lower()
             if 'image_bytes' in error_str or 'gcs_uri' in error_str:
                 print(f"🚫 [IMAGE GEN] Content safety filter blocked the image generation (ValueError: {ve})")
