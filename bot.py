@@ -11904,12 +11904,13 @@ async def on_message(message: discord.Message):
     should_respond = False
     force_response = False
     
-    # Always respond to mentions
-    if bot.user.mentioned_in(message):
+    # Only respond to DIRECT mentions (not @everyone or @here)
+    # Check if bot is directly mentioned in message.mentions
+    if bot.user and bot.user in message.mentions:
         should_respond = True
         force_response = True
     
-    # Always respond to replies
+    # Always respond to replies to bot's messages
     elif message.reference:
         try:
             replied_msg = await message.channel.fetch_message(message.reference.message_id)
@@ -11918,11 +11919,6 @@ async def on_message(message: discord.Message):
                 force_response = True
         except:
             pass
-    
-    # Check for name mentions with fuzzy matching
-    elif should_respond_to_name(message.content):
-        should_respond = True
-        force_response = True
     
     # Only respond if mentioned or replied to - don't monitor all messages
     # (Removed the "let AI decide for all messages" section)
