@@ -257,6 +257,10 @@ DEFAULT_DOCUMENT_EXTENSION = '.docx'
 MAX_DOCUMENT_PROMPT_CHARS_TOTAL = 48000
 MAX_DOCUMENT_PROMPT_CHARS_PER_DOC = 16000
 
+SERVER_MEMORY_POLICY_LIMIT = _env_int('SERVER_MEMORY_POLICY_LIMIT', 12)
+SERVER_AUTOMATION_ENTRY_LIMIT = _env_int('SERVER_AUTOMATION_ENTRY_LIMIT', 8)
+SERVER_AUTOMATION_INTERVAL = _env_int('SERVER_AUTOMATION_INTERVAL', 60)
+
 # Bot configuration
 BOT_NAME = os.getenv('BOT_NAME', 'servermate').lower()
 SERPER_API_KEY = os.getenv('SERPER_API_KEY')
@@ -7685,6 +7689,7 @@ Return JSON:
             "message": "FULLY GENERATED message content (create the actual message, don't just copy user's words)",
             "role_mentions": ["@everyone", "@here", "Role Name", "<@&123>"],
             "user_mentions": ["@User", "<@123>", "Display Name"],
+            "include_bot_mention": true/false,
             "attachments": []  // optional future use
         }}
     ],
@@ -7702,6 +7707,7 @@ CHANNEL ACTION RULES:
 - ONLY create channel_actions when the user explicitly tells you to post/send something to another channel.
 - You may include MULTIPLE channel_actions if the user wants the same/different message in several channels.
 - Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it.
+- NEVER mention ServerMate/the bot unless the user explicitly asks for it. If they do, set include_bot_mention=true for that action; otherwise leave it false (or omit) and exclude the bot from user_mentions.
 - Messages must be fully written by you. Do not echo "post this" or copy raw instructions—compose the final announcement or reply exactly as it should appear in the other channel.
 - If the user combines requests ("create two images and post them in #art @mods", "summarize this and drop it in #updates and #announcements"), still generate the content AND provide channel_actions that describe the follow-up posts.
 
@@ -7755,6 +7761,361 @@ Be smart and extract all relevant information. Return needs_discord_action=false
     except Exception as e:
         print(f"⚠️  Error parsing Discord command: {e}")
         return {"needs_discord_action": False}
+
+
+def _normalize_spec_list(specs) -> List[str]:
+    if specs is None:
+        return []
+    if isinstance(specs, str):
+        return [specs.strip()] if specs.strip() else []
+    normalized = []
+    for item in specs:
+        if item:
+            normalized.append(str(item).strip())
+    return normalized
+
+
+def _resolve_text_channel(guild: Optional[discord.Guild], spec: Optional[str]) -> Optional[discord.TextChannel]:
+    if not guild or not spec:
+        return None
+    spec = spec.strip()
+    mention_match = re.fullmatch(r'<#(\d+)>', spec)
+    if mention_match:
+        channel = guild.get_channel(int(mention_match.group(1)))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+    if spec.isdigit():
+        channel = guild.get_channel(int(spec))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+    lowered = spec.lstrip('#').lower()
+    for channel in guild.text_channels:
+        if channel.name.lower() == lowered:
+            return channel
+    for channel in guild.text_channels:
+        if lowered and lowered in channel.name.lower():
+            return channel
+    return None
+
+
+def _build_role_mentions(guild: Optional[discord.Guild], specs) -> List[str]:
+    mentions = []
+    seen = set()
+    for spec in _normalize_spec_list(specs):
+        lower = spec.lower()
+        if lower in ('@everyone', 'everyone'):
+            if '@everyone' not in seen:
+                seen.add('@everyone')
+                mentions.append('@everyone')
+            continue
+        if lower in ('@here', 'here'):
+            if '@here' not in seen:
+                seen.add('@here')
+                mentions.append('@here')
+            continue
+        role_obj = None
+        if guild:
+            id_match = re.fullmatch(r'<@&(\d+)>', spec)
+            if id_match:
+                role_obj = guild.get_role(int(id_match.group(1)))
+            if not role_obj:
+                role_obj = discord.utils.get(guild.roles, name=spec)
+            if not role_obj:
+                role_obj = discord.utils.get(guild.roles, name=spec.lstrip('@'))
+        if role_obj and role_obj.mention not in seen:
+            seen.add(role_obj.mention)
+            mentions.append(role_obj.mention)
+    return mentions
+
+
+def _build_user_mentions(guild: Optional[discord.Guild], specs) -> List[str]:
+    mentions = []
+    seen = set()
+    for spec in _normalize_spec_list(specs):
+        member = None
+        if guild:
+            id_match = re.fullmatch(r'<@!?(\d+)>', spec)
+            if id_match:
+                member = guild.get_member(int(id_match.group(1)))
+            if not member:
+                cleaned = spec.lstrip('@').lower()
+                member = discord.utils.find(
+                    lambda m: (m.display_name and m.display_name.lower() == cleaned) or
+                              (m.name and m.name.lower() == cleaned),
+                    guild.members
+                )
+        if member and member.mention not in seen:
+            seen.add(member.mention)
+            mentions.append(member.mention)
+    return mentions
+
+
+def _is_bot_mention_spec(spec: str) -> bool:
+    if not spec or not bot or not bot.user:
+        return False
+    candidate = spec.strip()
+    if not candidate:
+        return False
+    bot_id = str(bot.user.id)
+    if candidate in {f"<@{bot_id}>", f"<@!{bot_id}>"}:
+        return True
+    normalized = candidate.lstrip('@').lower()
+    bot_names = {bot.user.name.lower()}
+    if bot.user.display_name:
+        bot_names.add(bot.user.display_name.lower())
+    return normalized in bot_names
+
+
+def _filter_bot_mentions(specs, allow_bot: bool) -> List[str]:
+    normalized = _normalize_spec_list(specs)
+    if allow_bot or not bot or not bot.user:
+        return normalized
+    filtered = []
+    for spec in normalized:
+        if not _is_bot_mention_spec(spec):
+            filtered.append(spec)
+    return filtered
+
+
+def _compose_mentions(guild: Optional[discord.Guild], role_specs, user_specs) -> str:
+    parts = _build_role_mentions(guild, role_specs) + _build_user_mentions(guild, user_specs)
+    return " ".join(parts).strip()
+
+
+async def execute_channel_actions(
+    guild: Optional[discord.Guild],
+    actions: Optional[List[dict]],
+    *,
+    source: str = "AUTOMATION"
+) -> List[str]:
+    """Execute AI-provided channel actions (posting messages, mentions, etc.)."""
+    logs: List[str] = []
+    if not guild or not actions:
+        return logs
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        channel_spec = action.get('channel') or action.get('target_channel')
+        message_text = (
+            action.get('message') or
+            action.get('content') or
+            action.get('message_content') or
+            ""
+        ).strip()
+        if not channel_spec or not message_text:
+            continue
+        channel = _resolve_text_channel(guild, channel_spec)
+        if not channel:
+            logs.append(f"❌ [{source}] Could not find channel matching '{channel_spec}'")
+            continue
+        allow_bot_mention = bool(
+            action.get('include_bot_mention') or
+            action.get('allow_bot_mention')
+        )
+        role_specs = action.get('role_mentions') or action.get('roles')
+        user_specs = _filter_bot_mentions(action.get('user_mentions'), allow_bot_mention)
+        mention_prefix = _compose_mentions(guild, role_specs, user_specs)
+        final_message = f"{mention_prefix} {message_text}".strip() if mention_prefix else message_text
+        if not final_message:
+            continue
+        try:
+            await channel.send(
+                final_message,
+                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
+            )
+            logs.append(f"✅ [{source}] Sent message to #{channel.name}")
+        except Exception as send_error:
+            logs.append(f"❌ [{source}] Error sending to #{channel.name}: {send_error}")
+    return logs
+
+
+async def evaluate_server_policies(message: discord.Message, server_memories: List[dict]) -> Optional[dict]:
+    """Use AI to determine whether server-specific policies affect this message."""
+    if not server_memories:
+        return None
+    trimmed = server_memories[:SERVER_MEMORY_POLICY_LIMIT]
+    formatted_entries = []
+    for entry in trimmed:
+        formatted_entries.append({
+            "id": entry.get('id'),
+            "memory_type": entry.get('memory_type'),
+            "memory_key": entry.get('memory_key'),
+            "memory_data": entry.get('memory_data'),
+            "system_state": entry.get('system_state'),
+            "last_executed_at": entry.get('last_executed_at')
+        })
+    current_time = datetime.now(timezone.utc).isoformat()
+    channel_name = getattr(message.channel, "name", "direct-message")
+    prompt = f"""You enforce per-server policies for ServerMate.
+
+Current UTC time: {current_time}
+Server: {message.guild.name if message.guild else 'Direct Message'} (ID: {message.guild.id if message.guild else 'N/A'})
+Channel: #{channel_name} (ID: {message.channel.id})
+User: {message.author.display_name} (ID: {message.author.id})
+Message: "{message.content or ''}"
+
+Server memories (JSON list):
+{json.dumps(formatted_entries, ensure_ascii=False)}
+
+Decide whether any policy affects this message. If no policy applies, allow the response.
+Return ONLY JSON in this format:
+{{
+  "allow_response": true/false,
+  "block_response": true/false,
+  "system_message": "what to tell the user if blocking or redirecting" or null,
+  "guidance": "reminders for the assistant to keep in mind while replying" or null,
+  "redirect_channel": "channel name/ID/mention to move the conversation" or null,
+  "channel_actions": [
+      {{
+          "channel": "...",
+          "message": "...",
+          "role_mentions": [],
+          "user_mentions": []
+      }}
+  ]
+}}"""
+
+    try:
+        model = get_fast_model()
+        response = await queued_generate_content(model, prompt)
+        payload = response.text.strip()
+        if '```json' in payload:
+            payload = payload.split('```json')[1].split('```')[0].strip()
+        elif '```' in payload:
+            payload = payload.split('```')[1].split('```')[0].strip()
+        decision = json.loads(payload) if payload else {}
+        if decision and isinstance(decision, dict):
+            if not isinstance(decision.get('channel_actions'), list):
+                decision['channel_actions'] = []
+            return decision
+    except Exception as policy_error:
+        print(f"⚠️  [{message.author.display_name}] Policy evaluation error: {policy_error}")
+    return None
+
+
+async def evaluate_server_automations(guild: discord.Guild, entries: List[dict], now: datetime) -> dict:
+    """Use AI to determine which server memories should trigger scheduled actions."""
+    if not entries:
+        return {}
+    formatted_entries = []
+    for entry in entries:
+        formatted_entries.append({
+            "memory_id": entry.get('id'),
+            "memory_type": entry.get('memory_type'),
+            "memory_key": entry.get('memory_key'),
+            "memory_data": entry.get('memory_data'),
+            "system_state": entry.get('system_state'),
+            "last_executed_at": entry.get('last_executed_at'),
+            "updated_at": entry.get('updated_at')
+        })
+    prompt = f"""You orchestrate scheduled automations for server "{guild.name}" (ID: {guild.id}).
+
+Current UTC time: {now.isoformat()}
+Automation entries:
+{json.dumps(formatted_entries, ensure_ascii=False)}
+
+For each entry decide whether it should execute right now. If not, provide how long until the next check.
+Return ONLY JSON:
+{{
+  "entries": [
+    {{
+      "memory_id": <id>,
+      "should_execute": true/false,
+      "reason": "brief explanation",
+      "channel_actions": [{{"channel": "...", "message": "...", "role_mentions": [], "user_mentions": []}}],
+      "state": {{}},
+      "next_check_seconds": 1800
+    }}
+  ]
+}}"""
+
+    try:
+        model = get_fast_model()
+        response = await queued_generate_content(model, prompt)
+        payload = response.text.strip()
+        if '```json' in payload:
+            payload = payload.split('```json')[1].split('```')[0].strip()
+        elif '```' in payload:
+            payload = payload.split('```')[1].split('```')[0].strip()
+        data = json.loads(payload) if payload else {}
+        if isinstance(data, dict):
+            entries_resp = data.get('entries')
+            if isinstance(entries_resp, list):
+                for entry in entries_resp:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not isinstance(entry.get('channel_actions'), list):
+                        entry['channel_actions'] = []
+                return data
+    except Exception as automation_error:
+        print(f"⚠️  [AUTOMATION] Evaluation error: {automation_error}")
+    return {}
+
+
+async def run_server_automation_scheduler():
+    """Background task that evaluates server automations and executes actions."""
+    await bot.wait_until_ready()
+    print("🕒 [AUTOMATION] Scheduler started")
+    while not bot.is_closed():
+        try:
+            candidate_entries = await memory.get_server_memories_needing_check(SERVER_AUTOMATION_ENTRY_LIMIT)
+            if candidate_entries:
+                now = datetime.now(timezone.utc)
+                entries_by_guild: Dict[str, List[dict]] = {}
+                for entry in candidate_entries:
+                    guild_id = entry.get('guild_id')
+                    if guild_id:
+                        entries_by_guild.setdefault(guild_id, []).append(entry)
+                for guild_id, guild_entries in entries_by_guild.items():
+                    guild = None
+                    try:
+                        guild = bot.get_guild(int(guild_id))
+                    except Exception:
+                        guild = None
+                    if not guild:
+                        continue
+                    evaluation = await evaluate_server_automations(guild, guild_entries, now)
+                    entry_map = {entry.get('id'): entry for entry in guild_entries if entry.get('id')}
+                    for entry_result in evaluation.get('entries', []):
+                        memory_id = entry_result.get('memory_id')
+                        if not memory_id:
+                            continue
+                        next_seconds = entry_result.get('next_check_seconds')
+                        if not isinstance(next_seconds, (int, float)):
+                            next_seconds = SERVER_AUTOMATION_INTERVAL
+                        next_seconds = max(30, int(next_seconds))
+                        next_check_time = now + timedelta(seconds=next_seconds)
+                        state_payload = entry_result.get('state')
+                        if entry_result.get('should_execute'):
+                            channel_actions = entry_result.get('channel_actions') or []
+                            if channel_actions:
+                                action_logs = await execute_channel_actions(
+                                    guild,
+                                    channel_actions,
+                                    source=f"AUTOMATION:{memory_id}"
+                                )
+                                if action_logs:
+                                    print("\n".join(action_logs))
+                            await memory.update_server_memory_runtime(
+                                memory_id,
+                                system_state=state_payload,
+                                last_executed_at=now,
+                                next_check_at=next_check_time
+                            )
+                        else:
+                            await memory.update_server_memory_runtime(
+                                memory_id,
+                                system_state=state_payload,
+                                last_executed_at=None,
+                                next_check_at=next_check_time
+                            )
+            await asyncio.sleep(SERVER_AUTOMATION_INTERVAL)
+        except asyncio.CancelledError:
+            print("🕒 [AUTOMATION] Scheduler cancelled")
+            break
+        except Exception as scheduler_error:
+            print(f"⚠️  [AUTOMATION] Scheduler error: {scheduler_error}")
+            await asyncio.sleep(SERVER_AUTOMATION_INTERVAL)
 
 async def generate_response(message: discord.Message, force_response: bool = False):
     """Generate AI response"""
@@ -8180,6 +8541,42 @@ CURRENT CONVERSATION CONTEXT:
         else:
             discord_command = None
 
+        server_memories: List[dict] = []
+        if guild_id:
+            try:
+                mems = await memory.get_server_memory(guild_id)
+                if isinstance(mems, dict):
+                    mems = [mems]
+                if mems:
+                    server_memories = mems[:SERVER_MEMORY_POLICY_LIMIT]
+            except Exception as mem_error:
+                print(f"⚠️  [{username}] Error fetching server memory: {mem_error}")
+
+        policy_decision = None
+        if server_memories:
+            policy_decision = await evaluate_server_policies(message, server_memories)
+            if policy_decision:
+                policy_actions = policy_decision.get('channel_actions') or []
+                if policy_actions:
+                    policy_logs = await execute_channel_actions(
+                        message.guild,
+                        policy_actions,
+                        source=f"POLICY:{username}"
+                    )
+                    if policy_logs:
+                        print("\n".join(policy_logs))
+                if policy_decision.get('guidance'):
+                    consciousness_prompt += f"\n\n⚠️ SERVER POLICY GUIDANCE:\n{policy_decision['guidance']}\n"
+                if policy_decision.get('redirect_channel'):
+                    consciousness_prompt += (
+                        f"\n\n⚠️ SERVER POLICY: Respond by directing the user to "
+                        f"{policy_decision['redirect_channel']}.\n"
+                    )
+                if policy_decision.get('block_response'):
+                    system_message = policy_decision.get('system_message') or \
+                        "I'm not allowed to respond here due to server rules."
+                    return build_response_payload(system_message)
+
         if discord_command:
             wants_channels_list = discord_command.get('wants_channels_list', False)
             if wants_channels_list and guild_id:
@@ -8198,94 +8595,6 @@ CURRENT CONVERSATION CONTEXT:
                     print(f"⚠️  [{username}] Error handling channels list request: {e}")
 
             if discord_command.get('needs_discord_action') and not wants_channels_list:
-                def _resolve_text_channel(identifier: Optional[str]):
-                    if not identifier or not message.guild:
-                        return None
-                    identifier = identifier.strip()
-                    mention_match = re.fullmatch(r'<#(\d+)>', identifier)
-                    if mention_match:
-                        identifier = mention_match.group(1)
-                    channel = None
-                    if identifier.isdigit():
-                        channel = message.guild.get_channel(int(identifier))
-                        if channel:
-                            return channel
-                    lowered = identifier.lstrip('#').lower()
-                    for ch in message.guild.text_channels:
-                        if ch.name.lower() == lowered:
-                            return ch
-                    for ch in message.guild.text_channels:
-                        if lowered and lowered in ch.name.lower():
-                            return ch
-                    return None
-
-                def _normalize_role_specs(specs):
-                    normalized = []
-                    for spec in specs or []:
-                        if spec:
-                            normalized.append(spec.strip())
-                    return normalized
-
-                def _normalize_user_specs(specs):
-                    normalized = []
-                    for spec in specs or []:
-                        if spec:
-                            normalized.append(spec.strip())
-                    return normalized
-
-                def _build_role_mentions(specs):
-                    tokens = []
-                    seen = set()
-                    for spec in _normalize_role_specs(specs):
-                        lower = spec.lower()
-                        if lower in ('@everyone', 'everyone'):
-                            if '@everyone' not in seen:
-                                seen.add('@everyone')
-                                tokens.append('@everyone')
-                            continue
-                        if lower in ('@here', 'here'):
-                            if '@here' not in seen:
-                                seen.add('@here')
-                                tokens.append('@here')
-                            continue
-                        role_id_match = re.fullmatch(r'<@&(\d+)>', spec)
-                        role_obj = None
-                        if role_id_match and message.guild:
-                            role_obj = message.guild.get_role(int(role_id_match.group(1)))
-                        elif message.guild:
-                            role_obj = discord.utils.get(message.guild.roles, name=spec)
-                            if not role_obj:
-                                role_obj = discord.utils.get(message.guild.roles, name=spec.lstrip('@'))
-                        if role_obj and role_obj.mention not in seen:
-                            seen.add(role_obj.mention)
-                            tokens.append(role_obj.mention)
-                    return tokens
-
-                def _build_user_mentions(specs):
-                    tokens = []
-                    seen = set()
-                    for spec in _normalize_user_specs(specs):
-                        member = None
-                        mention_match = re.fullmatch(r'<@!?(\d+)>', spec)
-                        if mention_match and message.guild:
-                            member = message.guild.get_member(int(mention_match.group(1)))
-                        elif message.guild:
-                            cleaned = spec.lstrip('@').lower()
-                            member = discord.utils.find(
-                                lambda m: (m.display_name and m.display_name.lower() == cleaned)
-                                or (m.name and m.name.lower() == cleaned),
-                                message.guild.members,
-                            )
-                        if member and member.mention not in seen:
-                            seen.add(member.mention)
-                            tokens.append(member.mention)
-                    return tokens
-
-                def _compose_mentions(role_specs, user_specs):
-                    role_tokens = _build_role_mentions(role_specs)
-                    user_tokens = _build_user_mentions(user_specs)
-                    return " ".join(role_tokens + user_tokens).strip()
-
                 channel_actions = discord_command.get('channel_actions') or []
                 if (not channel_actions) and discord_command.get('action_type') == 'send_message':
                     fallback_roles = []
@@ -8301,32 +8610,12 @@ CURRENT CONVERSATION CONTEXT:
                         "user_mentions": fallback_users,
                     }]
 
-                action_logs = []
                 if channel_actions:
-                    for action in channel_actions:
-                        channel_spec = action.get('channel')
-                        action_message = (action.get('message') or action.get('message_content') or "").strip()
-                        if not channel_spec or not action_message:
-                            continue
-                        target_channel = _resolve_text_channel(channel_spec)
-                        if not target_channel:
-                            action_logs.append(f"❌ Could not find channel matching '{channel_spec}'")
-                            continue
-                        mention_prefix = _compose_mentions(
-                            action.get('role_mentions') or action.get('roles'),
-                            action.get('user_mentions')
-                        )
-                        final_message = f"{mention_prefix} {action_message}".strip()
-                        if not final_message:
-                            continue
-                        try:
-                            await target_channel.send(
-                                final_message,
-                                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
-                            )
-                            action_logs.append(f"✅ Sent message to #{target_channel.name}: {final_message}")
-                        except Exception as send_error:
-                            action_logs.append(f"❌ Error sending to #{target_channel.name}: {send_error}")
+                    action_logs = await execute_channel_actions(
+                        message.guild,
+                        channel_actions,
+                        source=f"COMMAND:{username}"
+                    )
                     if action_logs:
                         discord_command_result = "\n".join(action_logs)
 
@@ -9160,10 +9449,17 @@ Screenshot {idx + 1}:"""
                 document_assets = []
             
         # Determine user intentions FIRST (before document check)s
+        bot_user_id = str(bot.user.id) if bot.user and bot.user.id else None
+
         def _profile_asset_is_relevant(asset: Dict[str, Any]) -> bool:
             if not _is_profile_picture_asset(asset):
                 return True
-            return profile_request_detected or asset.get("is_author") or asset.get("is_mentioned")
+            asset_owner_id = str(asset.get("user_id")) if asset.get("user_id") else None
+            if bot_user_id and asset_owner_id == bot_user_id:
+                return bool(profile_request_detected)
+            if profile_request_detected:
+                return True
+            return bool(asset.get("is_author"))
 
         if profile_request_detected:
             intention_image_parts = image_parts
@@ -10896,6 +11192,8 @@ async def on_ready():
     for guild in bot.guilds:
         asyncio.create_task(store_guild_structure(guild))
     
+    asyncio.create_task(run_server_automation_scheduler())
+
     # Check for banned servers on startup and leave them
     for guild in bot.guilds:
         guild_id = str(guild.id)

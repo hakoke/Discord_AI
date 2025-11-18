@@ -160,6 +160,18 @@ class Database:
                     UNIQUE(guild_id, memory_type, memory_key)
                 )
             ''')
+            await conn.execute('''
+                ALTER TABLE server_memory
+                ADD COLUMN IF NOT EXISTS system_state JSONB
+            ''')
+            await conn.execute('''
+                ALTER TABLE server_memory
+                ADD COLUMN IF NOT EXISTS last_executed_at TIMESTAMP
+            ''')
+            await conn.execute('''
+                ALTER TABLE server_memory
+                ADD COLUMN IF NOT EXISTS next_check_at TIMESTAMP
+            ''')
             
             # Create indexes for performance
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_interactions_user_id ON interactions(user_id)')
@@ -775,6 +787,7 @@ class Database:
                 if row:
                     result = dict(row)
                     result['memory_data'] = json.loads(result['memory_data']) if isinstance(result['memory_data'], str) else result['memory_data']
+                    result['system_state'] = json.loads(result['system_state']) if isinstance(result.get('system_state'), str) else result.get('system_state')
                     return result
                 return None
             elif memory_type:
@@ -794,6 +807,7 @@ class Database:
             for row in rows:
                 result = dict(row)
                 result['memory_data'] = json.loads(result['memory_data']) if isinstance(result['memory_data'], str) else result['memory_data']
+                result['system_state'] = json.loads(result['system_state']) if isinstance(result.get('system_state'), str) else result.get('system_state')
                 results.append(result)
             return results
     
@@ -804,6 +818,53 @@ class Database:
                 DELETE FROM server_memory
                 WHERE guild_id = $1 AND memory_type = $2 AND memory_key = $3
             ''', guild_id, memory_type, memory_key)
+    
+    async def update_server_memory_runtime(self, memory_id: int, system_state: dict = None,
+                                           last_executed_at = None, next_check_at = None):
+        """Update runtime metadata for a server memory entry"""
+        if system_state is None and last_executed_at is None and next_check_at is None:
+            return
+        async with self.pool.acquire() as conn:
+            update_parts = []
+            params = []
+            param_index = 1
+            if system_state is not None:
+                update_parts.append(f'system_state = ${param_index}')
+                params.append(json.dumps(system_state))
+                param_index += 1
+            if last_executed_at is not None:
+                update_parts.append(f'last_executed_at = ${param_index}')
+                params.append(last_executed_at)
+                param_index += 1
+            if next_check_at is not None:
+                update_parts.append(f'next_check_at = ${param_index}')
+                params.append(next_check_at)
+                param_index += 1
+            params.append(memory_id)
+            query = f'''
+                UPDATE server_memory
+                SET {', '.join(update_parts)}
+                WHERE id = ${param_index}
+            '''
+            await conn.execute(query, *params)
+
+    async def get_server_memories_needing_check(self, limit: int = 50):
+        """Get server memory entries that require automation checks"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT *
+                FROM server_memory
+                WHERE next_check_at IS NULL OR next_check_at <= NOW()
+                ORDER BY COALESCE(next_check_at, updated_at) ASC
+                LIMIT $1
+            ''', limit)
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['memory_data'] = json.loads(result['memory_data']) if isinstance(result['memory_data'], str) else result['memory_data']
+                result['system_state'] = json.loads(result['system_state']) if isinstance(result.get('system_state'), str) else result.get('system_state')
+                results.append(result)
+            return results
 
     async def close(self):
         """Close database connection"""

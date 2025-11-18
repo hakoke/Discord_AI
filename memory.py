@@ -350,4 +350,13 @@ NOW: What did you learn from {username}? Be honest and specific."""
     async def delete_server_memory(self, guild_id: str, memory_type: str, memory_key: str):
         """Delete server memory entry"""
         return await self.db.delete_server_memory(guild_id, memory_type, memory_key)
+    
+    async def update_server_memory_runtime(self, memory_id: int, system_state: dict = None,
+                                           last_executed_at = None, next_check_at = None):
+        """Update runtime metadata for a server memory entry"""
+        return await self.db.update_server_memory_runtime(memory_id, system_state, last_executed_at, next_check_at)
+
+    async def get_server_memories_needing_check(self, limit: int = 50):
+        """Fetch server memory entries that need automation checks"""
+        return await self.db.get_server_memories_needing_check(limit)
 
