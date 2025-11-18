@@ -4586,7 +4586,8 @@ Analyze the screenshot now: """
                 recovery_suggestion = analysis_data.get('recovery_suggestion', '')
                 
                 # Track action for loop detection
-                action_desc = next_action.get('description', '')
+                action_desc = next_action.get('description', '') if next_action else ''
+                action_type = next_action.get('type') if next_action else None
                 if action_desc:
                     normalized_action = _normalize_action_label(action_type, action_desc)
                     proposed_actions.append((action_desc, normalized_action))
