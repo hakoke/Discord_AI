@@ -7679,21 +7679,38 @@ Return JSON:
 {{
     "needs_discord_action": true/false,
     "action_type": "send_message" | "store_memory" | "query_memory" | null,
-    "target_channel": "BEST channel name from available channels (pick intelligently)" or null,
-    "target_role": "role name or @everyone" or null,
-    "target_user": "user mention or name" or null,
-    "message_content": "FULLY GENERATED message content (create the actual message, don't just copy user's words)" or null,
+    "channel_actions": [
+        {{
+            "channel": "channel name, ID, or <#mention>",
+            "message": "FULLY GENERATED message content (create the actual message, don't just copy user's words)",
+            "role_mentions": ["@everyone", "@here", "Role Name", "<@&123>"],
+            "user_mentions": ["@User", "<@123>", "Display Name"],
+            "attachments": []  // optional future use
+        }}
+    ],
+    "target_channel": "legacy fallback channel" or null,
+    "target_role": "legacy fallback role" or null,
+    "target_user": "legacy fallback user" or null,
+    "message_content": "legacy fallback message" or null,
     "memory_type": "any type (birthday, reminder, event, schedule, instruction, custom, etc.)" or null,
     "memory_key": "unique key for this memory" or null,
     "memory_data": {{"fully dynamic structure - store whatever user needs"}} or null,
     "query_type": "reminders" | "birthdays" | "events" | "all" or null
 }}
 
+CHANNEL ACTION RULES:
+- ONLY create channel_actions when the user explicitly tells you to post/send something to another channel.
+- You may include MULTIPLE channel_actions if the user wants the same/different message in several channels.
+- Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it.
+- Messages must be fully written by you. Do not echo "post this" or copy raw instructions—compose the final announcement or reply exactly as it should appear in the other channel.
+- If the user combines requests ("create two images and post them in #art @mods", "summarize this and drop it in #updates and #announcements"), still generate the content AND provide channel_actions that describe the follow-up posts.
+
 CRITICAL FOR SEND_MESSAGE:
 - If user says "make a short announcement @ing everyone in announcements about the future of this server":
   * target_channel: Pick the best "announcements" channel from available channels (intelligently match even if name isn't exact)
   * message_content: GENERATE a proper short announcement about the server's future (don't just copy user's words - create the actual message)
   * target_role: "@everyone"
+  * channel_actions: include one entry with channel="announcements", role_mentions=["@everyone"], message="..."
   
 CRITICAL FOR STORE_MEMORY:
 - Store ANYTHING the user asks for - be fully dynamic
@@ -7728,7 +7745,13 @@ Be smart and extract all relevant information. Return needs_discord_action=false
             response_text = response_text.split('```')[1].split('```')[0]
         
         parsed = await parse_ai_json_response(response_text, context_label="discord-command", goal=content)
-        return parsed if parsed else {"needs_discord_action": False}
+        if parsed:
+            channel_actions = parsed.get("channel_actions")
+            if channel_actions is None:
+                parsed["channel_actions"] = []
+            elif not isinstance(channel_actions, list):
+                parsed["channel_actions"] = []
+        return parsed if parsed else {"needs_discord_action": False, "channel_actions": []}
     except Exception as e:
         print(f"⚠️  Error parsing Discord command: {e}")
         return {"needs_discord_action": False}
@@ -7753,159 +7776,10 @@ async def generate_response(message: discord.Message, force_response: bool = Fal
         
         print(f"⏱️  [{username}] Starting response generation...")
         
-        # Check for Discord commands (go to channel, store memory, etc.) - EFFICIENT: only when likely needed
+        # Kick off Discord command parsing immediately (AI-only decisions for channel posts/memories)
         discord_command_result = None
         discord_command = None
-        if guild_id:
-            # Quick heuristic check first (no AI call) - only parse if likely a command
-            content_lower = (message.content or "").lower()
-            likely_discord_command = any(phrase in content_lower for phrase in [
-                'go to', 'send to', 'post in', 'channel', 'announcements',
-                'remind', 'reminder', 'birthday', 'birthdays',
-                'show me what reminders', 'show me reminders', 'list reminders',
-                'show me birthdays', 'list birthdays', 'only reply in this',
-                'store', 'remember', 'save this'
-            ])
-            
-            # Also check for channels/categories list request (add to heuristic)
-            wants_channels_list_heuristic = any(phrase in content_lower for phrase in [
-                'channels and categories', 'show me the channels', 'list the channels',
-                'can u see the channels', 'what channels', 'list channels'
-            ])
-            
-            if likely_discord_command or wants_channels_list_heuristic:
-                try:
-                    # Run in parallel with other processing to reduce latency
-                    discord_command = await ai_parse_discord_command(message, guild_id)
-                    wants_channels_list = discord_command.get('wants_channels_list', False)
-                    
-                    # Handle channels/categories list request (from combined AI decision)
-                    # NOTE: This is NOT a send_message action - user just wants to know what channels exist
-                    # Don't send to another channel, just provide info in the response
-                    if wants_channels_list:
-                        try:
-                            server_structure = await db.get_server_structure(guild_id)
-                            if server_structure:
-                                channels_list = server_structure.get('channels', [])
-                                categories_list = server_structure.get('categories', [])
-                                
-                                # Give AI the channel info and let IT decide how to respond (fully dynamic, no hardcoding)
-                                list_text = "\n\n⚠️ USER ASKED ABOUT CHANNELS/CATEGORIES:\n"
-                                list_text += "The user asked if you can see the channels/categories in this server.\n"
-                                list_text += "You have access to the channel information. Respond naturally - you can mention some channel names as examples (like 'general', 'announcements', etc.) but DON'T provide a full hardcoded list.\n"
-                                list_text += "Just confirm you can see them and maybe mention a few examples naturally in your response.\n"
-                                list_text += "Keep it conversational - don't format it as a list unless the user explicitly asks for a full list.\n"
-                                
-                                # Provide channel names for AI to reference (but don't force it to list them all)
-                                if channels_list:
-                                    channel_names = [ch.get('name', 'Unknown') for ch in channels_list[:30]]
-                                    list_text += f"\nAvailable channels (for reference): {', '.join(channel_names)}\n"
-                                
-                                consciousness_prompt += list_text
-                                print(f"📋 [{username}] AI decided user wants channels/categories info (from combined Discord command check)")
-                        except Exception as e:
-                            print(f"⚠️  [{username}] Error handling channels list request: {e}")
-                    
-                    # Only execute Discord actions if it's NOT just a channels list query
-                    # Channels list query should just respond normally, not send messages to other channels
-                    if discord_command.get('needs_discord_action') and not wants_channels_list:
-                        print(f"🎯 [{username}] Discord command detected: {discord_command.get('action_type')}")
-                        
-                        # Handle send_message action - AI decides channel and generates message
-                        if discord_command.get('action_type') == 'send_message':
-                            target_channel_name = discord_command.get('target_channel')
-                            target_role = discord_command.get('target_role')
-                            message_content = discord_command.get('message_content')  # AI-generated message
-                            
-                            if target_channel_name and message_content:
-                                try:
-                                    # AI-driven channel selection - find best match (fuzzy)
-                                    channel = None
-                                    target_lower = target_channel_name.lower()
-                                    
-                                    # Try exact match first
-                                    for ch in message.guild.text_channels:
-                                        if ch.name.lower() == target_lower or str(ch.id) == target_channel_name:
-                                            channel = ch
-                                            break
-                                    
-                                    # If no exact match, try fuzzy matching (AI picked channel name, find closest)
-                                    if not channel:
-                                        best_match = None
-                                        best_score = 0
-                                        for ch in message.guild.text_channels:
-                                            ch_name_lower = ch.name.lower()
-                                            # Check if target is contained in channel name or vice versa
-                                            if target_lower in ch_name_lower or ch_name_lower in target_lower:
-                                                score = len(set(target_lower) & set(ch_name_lower))
-                                                if score > best_score:
-                                                    best_score = score
-                                                    best_match = ch
-                                        channel = best_match
-                                    
-                                    if channel:
-                                        # Build message with mentions (AI already decided what to mention)
-                                        final_message = message_content  # Use AI-generated message
-                                        if target_role:
-                                            if target_role.lower() == '@everyone':
-                                                final_message = f"@everyone {final_message}"
-                                            else:
-                                                # Find role (AI picked the role name)
-                                                role = discord.utils.get(message.guild.roles, name=target_role)
-                                                if role:
-                                                    final_message = f"{role.mention} {final_message}"
-                                        
-                                        await channel.send(final_message)
-                                        discord_command_result = f"✅ Sent AI-generated message to #{channel.name}: {final_message}"
-                                    else:
-                                        discord_command_result = f"❌ Could not find channel matching '{target_channel_name}'"
-                                except Exception as e:
-                                    discord_command_result = f"❌ Error sending message: {str(e)}"
-                        
-                        # Handle store_memory action - AI decides structure dynamically
-                        elif discord_command.get('action_type') == 'store_memory':
-                            memory_type = discord_command.get('memory_type')  # AI decides type (can be anything)
-                            memory_key = discord_command.get('memory_key')  # AI creates unique key
-                            memory_data = discord_command.get('memory_data', {})  # AI creates dynamic structure
-                            
-                            # AI can store ANYTHING - fully dynamic
-                            if memory_type and memory_key and memory_data:
-                                try:
-                                    await memory.store_server_memory(
-                                        guild_id, memory_type, memory_key, memory_data, user_id
-                                    )
-                                    discord_command_result = f"✅ Stored {memory_type} memory: {memory_key} (fully dynamic structure)"
-                                except Exception as e:
-                                    discord_command_result = f"❌ Error storing memory: {str(e)}"
-                        
-                        # Handle query_memory action
-                        elif discord_command.get('action_type') == 'query_memory':
-                            query_type = discord_command.get('query_type', 'all')
-                            try:
-                                memories = await memory.get_server_memory(guild_id)
-                                if not memories:
-                                    discord_command_result = "No server memories found."
-                                else:
-                                    # Filter by query_type
-                                    if query_type != 'all':
-                                        memories = [m for m in memories if m.get('memory_type') == query_type]
-                                    
-                                    if not memories:
-                                        discord_command_result = f"No {query_type} memories found."
-                                    else:
-                                        # Format response
-                                        response_parts = []
-                                        for mem in memories[:20]:  # Limit to 20
-                                            mem_type = mem.get('memory_type', 'unknown')
-                                            mem_key = mem.get('memory_key', 'unknown')
-                                            mem_data = mem.get('memory_data', {})
-                                            response_parts.append(f"**{mem_type}** - {mem_key}: {json.dumps(mem_data, indent=2)}")
-                                        
-                                        discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
-                            except Exception as e:
-                                discord_command_result = f"❌ Error querying memory: {str(e)}"
-                except Exception as e:
-                    print(f"⚠️  Error handling Discord command: {e}")
+        discord_command_task = asyncio.create_task(ai_parse_discord_command(message, guild_id)) if guild_id else None
         
         # If Discord command was executed, add result to context for AI to respond
         # BUT: Don't add it if it was just a channels list query (that should be handled naturally in response)
@@ -8296,6 +8170,195 @@ CURRENT CONVERSATION CONTEXT:
             except Exception as e:
                 # Silently fail - this is optional info
                 pass
+        
+        if discord_command_task:
+            try:
+                discord_command = await discord_command_task
+            except Exception as e:
+                print(f"⚠️  [{username}] Error parsing Discord command: {e}")
+                discord_command = {"needs_discord_action": False, "channel_actions": []}
+        else:
+            discord_command = None
+
+        if discord_command:
+            wants_channels_list = discord_command.get('wants_channels_list', False)
+            if wants_channels_list and guild_id:
+                try:
+                    server_structure = await db.get_server_structure(guild_id)
+                    if server_structure:
+                        channels_list = server_structure.get('channels', [])
+                        list_text = "\n\n⚠️ USER ASKED ABOUT CHANNELS/CATEGORIES:\n"
+                        list_text += "You can see the server's channels and categories. Answer conversationally, referencing only what's helpful.\n"
+                        if channels_list:
+                            channel_names = [ch.get('name', 'Unknown') for ch in channels_list[:30]]
+                            list_text += f"Channel references: {', '.join(channel_names)}\n"
+                        consciousness_prompt += list_text
+                        print(f"📋 [{username}] AI decided user wants channels/categories info (AI instruction added)")
+                except Exception as e:
+                    print(f"⚠️  [{username}] Error handling channels list request: {e}")
+
+            if discord_command.get('needs_discord_action') and not wants_channels_list:
+                def _resolve_text_channel(identifier: Optional[str]):
+                    if not identifier or not message.guild:
+                        return None
+                    identifier = identifier.strip()
+                    mention_match = re.fullmatch(r'<#(\d+)>', identifier)
+                    if mention_match:
+                        identifier = mention_match.group(1)
+                    channel = None
+                    if identifier.isdigit():
+                        channel = message.guild.get_channel(int(identifier))
+                        if channel:
+                            return channel
+                    lowered = identifier.lstrip('#').lower()
+                    for ch in message.guild.text_channels:
+                        if ch.name.lower() == lowered:
+                            return ch
+                    for ch in message.guild.text_channels:
+                        if lowered and lowered in ch.name.lower():
+                            return ch
+                    return None
+
+                def _normalize_role_specs(specs):
+                    normalized = []
+                    for spec in specs or []:
+                        if spec:
+                            normalized.append(spec.strip())
+                    return normalized
+
+                def _normalize_user_specs(specs):
+                    normalized = []
+                    for spec in specs or []:
+                        if spec:
+                            normalized.append(spec.strip())
+                    return normalized
+
+                def _build_role_mentions(specs):
+                    tokens = []
+                    seen = set()
+                    for spec in _normalize_role_specs(specs):
+                        lower = spec.lower()
+                        if lower in ('@everyone', 'everyone'):
+                            if '@everyone' not in seen:
+                                seen.add('@everyone')
+                                tokens.append('@everyone')
+                            continue
+                        if lower in ('@here', 'here'):
+                            if '@here' not in seen:
+                                seen.add('@here')
+                                tokens.append('@here')
+                            continue
+                        role_id_match = re.fullmatch(r'<@&(\d+)>', spec)
+                        role_obj = None
+                        if role_id_match and message.guild:
+                            role_obj = message.guild.get_role(int(role_id_match.group(1)))
+                        elif message.guild:
+                            role_obj = discord.utils.get(message.guild.roles, name=spec)
+                            if not role_obj:
+                                role_obj = discord.utils.get(message.guild.roles, name=spec.lstrip('@'))
+                        if role_obj and role_obj.mention not in seen:
+                            seen.add(role_obj.mention)
+                            tokens.append(role_obj.mention)
+                    return tokens
+
+                def _build_user_mentions(specs):
+                    tokens = []
+                    seen = set()
+                    for spec in _normalize_user_specs(specs):
+                        member = None
+                        mention_match = re.fullmatch(r'<@!?(\d+)>', spec)
+                        if mention_match and message.guild:
+                            member = message.guild.get_member(int(mention_match.group(1)))
+                        elif message.guild:
+                            cleaned = spec.lstrip('@').lower()
+                            member = discord.utils.find(
+                                lambda m: (m.display_name and m.display_name.lower() == cleaned)
+                                or (m.name and m.name.lower() == cleaned),
+                                message.guild.members,
+                            )
+                        if member and member.mention not in seen:
+                            seen.add(member.mention)
+                            tokens.append(member.mention)
+                    return tokens
+
+                def _compose_mentions(role_specs, user_specs):
+                    role_tokens = _build_role_mentions(role_specs)
+                    user_tokens = _build_user_mentions(user_specs)
+                    return " ".join(role_tokens + user_tokens).strip()
+
+                channel_actions = discord_command.get('channel_actions') or []
+                if (not channel_actions) and discord_command.get('action_type') == 'send_message':
+                    fallback_roles = []
+                    if discord_command.get('target_role'):
+                        fallback_roles = [discord_command.get('target_role')]
+                    fallback_users = []
+                    if discord_command.get('target_user'):
+                        fallback_users = [discord_command.get('target_user')]
+                    channel_actions = [{
+                        "channel": discord_command.get('target_channel'),
+                        "message": discord_command.get('message_content'),
+                        "role_mentions": fallback_roles,
+                        "user_mentions": fallback_users,
+                    }]
+
+                action_logs = []
+                if channel_actions:
+                    for action in channel_actions:
+                        channel_spec = action.get('channel')
+                        action_message = (action.get('message') or action.get('message_content') or "").strip()
+                        if not channel_spec or not action_message:
+                            continue
+                        target_channel = _resolve_text_channel(channel_spec)
+                        if not target_channel:
+                            action_logs.append(f"❌ Could not find channel matching '{channel_spec}'")
+                            continue
+                        mention_prefix = _compose_mentions(
+                            action.get('role_mentions') or action.get('roles'),
+                            action.get('user_mentions')
+                        )
+                        final_message = f"{mention_prefix} {action_message}".strip()
+                        if not final_message:
+                            continue
+                        try:
+                            await target_channel.send(
+                                final_message,
+                                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
+                            )
+                            action_logs.append(f"✅ Sent message to #{target_channel.name}: {final_message}")
+                        except Exception as send_error:
+                            action_logs.append(f"❌ Error sending to #{target_channel.name}: {send_error}")
+                    if action_logs:
+                        discord_command_result = "\n".join(action_logs)
+
+                action_type = discord_command.get('action_type')
+                if action_type == 'store_memory':
+                    memory_type = discord_command.get('memory_type')
+                    memory_key = discord_command.get('memory_key')
+                    memory_data = discord_command.get('memory_data', {})
+                    if memory_type and memory_key and memory_data:
+                        try:
+                            await memory.store_server_memory(guild_id, memory_type, memory_key, memory_data, user_id)
+                            discord_command_result = f"✅ Stored {memory_type} memory: {memory_key}"
+                        except Exception as e:
+                            discord_command_result = f"❌ Error storing memory: {str(e)}"
+                elif action_type == 'query_memory':
+                    query_type = discord_command.get('query_type') or 'all'
+                    try:
+                        memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
+                        if not memories:
+                            discord_command_result = "No server memories found." if query_type == 'all' else f"No {query_type} memories found."
+                        else:
+                            if isinstance(memories, dict):
+                                memories = [memories]
+                            response_parts = []
+                            for mem in memories[:20]:
+                                mem_type = mem.get('memory_type', 'memory')
+                                mem_key = mem.get('memory_key', 'unknown')
+                                mem_data = mem.get('memory_data', {})
+                                response_parts.append(f"{mem_type} - {mem_key}: {json.dumps(mem_data, ensure_ascii=False)}")
+                            discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
+                    except Exception as e:
+                        discord_command_result = f"❌ Error querying memory: {str(e)}"
         
         plain_message = (message.content or "").strip()
         message_meta = await ai_analyze_message_meta(message)
