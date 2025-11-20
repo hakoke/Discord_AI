@@ -7927,26 +7927,38 @@ CRITICAL FOR STORE_MEMORY:
 
 REMINDER/SCHEDULE FORMAT:
 - When user says "remind me...", "set a reminder", "schedule a post", etc., include a detailed schedule object so downstream systems can run it automatically.
-- CRITICAL: Extract time duration from the user's message (e.g., "in 20 seconds", "in 5 minutes", "in 2 hours")
-- CRITICAL: Extract channel from the user's message if specified (e.g., "in #invite-bot", "in invite-bot", "<#channel_id>")
+- CRITICAL: Extract time duration from the user's message (e.g., "in 20 seconds", "in 5 minutes", "in 2 hours", "in 5 seconds")
+  * "in 5 seconds" = 5 seconds
+  * "in 2 minutes" = 120 seconds  
+  * "in 1 hour" = 3600 seconds
+  * "in 2 days" = 172800 seconds
+- CRITICAL: Extract channel from the user's message if specified
+  * Look for channel mentions: "#channelname", "in #channelname", "invite-bot", "in invite-bot"
+  * Match against available channels list to find the correct channel ID
+  * If channel name is mentioned, search available channels for a match and use that channel's ID
+- CRITICAL: Parse reminder syntax carefully:
+  * "remind me in [TIME] in [CHANNEL] to [TASK]" - extract TIME, CHANNEL, and TASK
+  * "remind me in [CHANNEL] in [TIME] to [TASK]" - same thing, order doesn't matter
+  * "remind me in [TIME] to [TASK]" - use current channel
 - Example memory_data for a one-off reminder:
   {{
       "intent": "reminder",
-      "reminder_text": "Take out the garbage",
-      "channel_id": "extracted_channel_id_or_current_channel",
-      "channel_name": "extracted_channel_name_or_current_channel",
+      "reminder_text": "take out the garbage",
+      "channel_id": "123456789012345678",
+      "channel_name": "invite-bot",
       "target_user_id": "{current_user_id}",
       "schedule": {{
           "type": "relative",
-          "seconds": 20
+          "seconds": 5
       }}
   }}
-- When user says "remind me in [channel] in [time] to [task]":
-  * Extract the channel mention/name from the message
-  * Extract the time duration (seconds, minutes, hours, days)
-  * Extract the reminder text/task
-  * Set channel_id to the extracted channel ID (or current channel if not specified)
-  * Set schedule.seconds to the extracted duration in seconds
+- CRITICAL EXAMPLES:
+  * "remind me in 5 seconds in invite-bot to take out the garbage"
+    → seconds: 5, channel_id: [ID of invite-bot channel], reminder_text: "take out the garbage"
+  * "remind me in invite-bot in 10 seconds to check this"
+    → seconds: 10, channel_id: [ID of invite-bot channel], reminder_text: "check this"
+  * "remind me in 2 minutes to call John"
+    → seconds: 120, channel_id: [current channel ID], reminder_text: "call John"
 - Use `"schedule": {{"type": "absolute", "time_iso": "2025-01-01T15:00:00Z"}}` for explicit timestamps, or `"type": "recurring"` with fields like `"cron"` / `"every_days"` when repeating.
 - ALWAYS include channel + user identifiers when possible so the automation knows where to post the reminder.
 
@@ -8688,7 +8700,8 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
   * **Events** - Store event information with dates and descriptions
   * **Channel Instructions** - "ONLY reply in this channel" - you'll remember and follow channel-specific rules
   * **Query Memory** - "show me what reminders we have", "show me people's birthdays", "list all events"
-  * **Discord Actions** - "go to announcements @ everyone and talk about our future plans" - you can send messages to specific channels and mention roles
+  * **Discord Actions** - "post hello in #invite-bot", "go to announcements @ everyone and talk about our future plans" - you can send messages to specific channels and mention roles
+  * **CRITICAL**: When posting messages to OTHER channels, the system posts the message FOR you. You DO NOT need to respond in the current channel. DO NOT say "Alright, I've posted..." or "Done!" or any confirmation. The message is posted automatically. Stay SILENT after posting to other channels unless there's an error.
   * All server memory is dynamic - you create the fields you need, and each server has its own isolated memory. You can store ANYTHING the server needs to remember!
 - ✅ **AI Policy Engine & Scheduler**: You autonomously enforce server-specific policies (channel-only replies, mention requirements, ignore/redirect rules) and run reminders/scheduled posts. For every stored memory you dynamically decide if action is needed, craft the channel messages, and keep latency negligible—all AI-driven per guild with zero hardcoding.
 - ✅ **Server Memory Viewer**: When users ask "what do you have stored about this server?" or run `/servermemory`, show a concise summary of stored reminders, events, rules, and automations—trim long JSON to the important bits.
@@ -8832,6 +8845,17 @@ CRITICAL - RESPONSE STYLE:
 - Just respond with the actual result or completion - no pre-work acknowledgments
 - If editing an image, show the edited image - don't say "I'll edit it" first
 - If searching, show the search results - don't say "I'll search for that" first
+
+CRITICAL - MESSAGE POSTING BEHAVIOR:
+- When you post a message to ANOTHER channel (not the current one), the system does it automatically
+- DO NOT respond in the current channel after posting to another channel
+- DO NOT say "Alright [name]! I've posted..." or "Done!" or any confirmation message
+- The ONLY exception: If the posting FAILED (you'll see an error in the system log), then briefly explain what went wrong
+- Examples:
+  * User: "post hello in #invite-bot" → You post to #invite-bot, then STAY COMPLETELY SILENT in current channel (no response needed)
+  * User: "remind me in 5 seconds to do X" → You schedule the reminder, then briefly confirm (e.g., "Reminder set for [time]")
+  * User: "go to #announcements and say hello" → You post to #announcements, then STAY COMPLETELY SILENT (no "I've posted" message)
+- Think of it like this: When you successfully post to another channel, your job is DONE. Don't announce it in the current channel.
 
 CURRENT DATE AND TIME:
 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ({datetime.now(timezone.utc).strftime('%A, %B %d, %Y at %I:%M %p UTC')})
@@ -9075,7 +9099,19 @@ CURRENT CONVERSATION CONTEXT:
             system_log = discord_command_result.strip()
             if system_log:
                 clipped_log = system_log[:1500]
-                consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n"
+                # Check if this was a message posting action
+                was_message_posting = discord_command and discord_command.get('action_type') == 'send_message'
+                if was_message_posting:
+                    # For message posting, tell AI to be SILENT unless there was an error
+                    if '✅' in system_log and '❌' not in system_log:
+                        # Success - tell AI to stay completely silent
+                        consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n\nCRITICAL INSTRUCTION: The message was successfully posted to the target channel. DO NOT respond in this channel. DO NOT send any confirmation message. DO NOT say 'Alright' or 'I've posted' or anything. The action is complete. Stay completely silent.\n"
+                    else:
+                        # Error occurred - AI can inform user
+                        consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n\nThe action failed. Briefly inform the user what went wrong (1-2 sentences max).\n"
+                else:
+                    # For other actions (reminders, queries), normal response
+                    consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n"
 
         if discord_memory_snapshot:
             snapshot_lite = _serialize_for_ai(discord_memory_snapshot[:8])
@@ -10520,6 +10556,16 @@ NO HARDCODING - YOU ARE IN FULL CONTROL!
         # Decide which model to use (thread-safe)
         async def decide_model():
             """Thread-safe model selection"""
+            # OPTIMIZATION: Image searches NEVER need smart model - always use fast
+            if wants_image_search or (image_search_results and len(image_search_results) > 0):
+                print(f"⚡ [{username}] Using FAST model for image search (optimization)")
+                return False
+            
+            # OPTIMIZATION: Small talk NEVER needs smart model - always use fast
+            if message_meta.get("small_talk"):
+                print(f"⚡ [{username}] Using FAST model for small talk (optimization)")
+                return False
+            
             decision_model = get_fast_model()
             
             model_decision_prompt = f"""User message: "{message.content}"
@@ -10543,9 +10589,13 @@ CASUAL CONVERSATION examples:
 - "what's up?"
 - "tell me a joke"
 - "what do you think about [opinion]?"
+- "give me images of X" (image search - use FAST)
+- "show me pictures of Y" (image search - use FAST)
 - Simple questions
 - General chat
 - Quick answers
+
+CRITICAL: Image search requests ALWAYS use FAST model - they don't need deep reasoning.
 
 Respond with ONLY one word: "SMART" or "FAST"
 
@@ -10556,6 +10606,8 @@ User: "explain the halting problem" -> SMART
 User: "lol that's funny" -> FAST
 User: "write a binary search algorithm" -> SMART
 User: "how are you?" -> FAST
+User: "show me 3 images of dubai" -> FAST
+User: "give me 2 images of georgia countryside" -> FAST
 
 Now decide: "{message.content}" -> """
             
