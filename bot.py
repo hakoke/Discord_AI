@@ -173,8 +173,8 @@ try:
     
     # PRIORITY 1: Check for local credentials file (committed to private repo)
     credentials_path = None
-    if os.path.exists('airy-boulevard-478121-f1-4cfd4ed69e00.json'):
-        credentials_path = 'airy-boulevard-478121-f1-4cfd4ed69e00.json'
+    if os.path.exists('airy-boulevard-478121-f1-b886d97c44f3.json'):
+        credentials_path = 'airy-boulevard-478121-f1-b886d97c44f3.json'
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
         print(f"✅ Using local credentials file from repo: {credentials_path}")
         
