@@ -12836,54 +12836,53 @@ Response: """
                                 else:
                                     await message.channel.send(chunk, reference=message)
                         else:
-                            try:
-                                # Only attach files if not already sent to channel_actions
-                                files_for_response = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
-                                await message.channel.send(response, files=files_for_response, reference=message)
-                            except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
-                                status = getattr(e, 'status', getattr(e, 'code', None))
-                            if status == 413:  # Payload Too Large
-                                print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
-                                # Compress all images and retry
-                                compressed_files = []
-                                if searched_images:
-                                    compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
-                                if generated_images:
-                                    compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
-                                
+                            # Only send if files weren't sent to another channel
+                            if not files_sent_to_channels:
                                 try:
-                                    files_for_response = compressed_files if not files_sent_to_channels else None
-                                    await message.channel.send(response, files=files_for_response, reference=message)
-                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
-                                    status2 = getattr(e2, 'status', getattr(e2, 'code', None))
-                                    if status2 == 413:  # Still too large even after compression
-                                        print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
-                                        # Send text first
-                                        await message.channel.send(response, reference=message)
-                                        # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
-                                        if compressed_files and not files_sent_to_channels:
-                                            for batch_start in range(0, len(compressed_files), 2):
-                                                batch = compressed_files[batch_start:batch_start + 2]
-                                                await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                    # Attach files to response (same channel)
+                                    await message.channel.send(response, files=files_to_attach, reference=message)
+                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
+                                    status = getattr(e, 'status', getattr(e, 'code', None))
+                                    if status == 413:  # Payload Too Large
+                                        print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
+                                        # Compress all images and retry
+                                        compressed_files = []
+                                        if searched_images:
+                                            compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
+                                        if generated_images:
+                                            compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                        
+                                        try:
+                                            await message.channel.send(response, files=compressed_files, reference=message)
+                                        except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
+                                            status2 = getattr(e2, 'status', getattr(e2, 'code', None))
+                                            if status2 == 413:  # Still too large even after compression
+                                                print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
+                                                # Send text first
+                                                await message.channel.send(response, reference=message)
+                                                # Send images in smaller batches (max 2 per message)
+                                                if compressed_files:
+                                                    for batch_start in range(0, len(compressed_files), 2):
+                                                        batch = compressed_files[batch_start:batch_start + 2]
+                                                        await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                            else:
+                                                raise
+                                    elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
+                                        print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
+                                        await asyncio.sleep(2)  # Wait 2 seconds
+                                        try:
+                                            # Retry once
+                                            await message.channel.send(response, files=files_to_attach, reference=message)
+                                            print(f"✅ [{message.author.display_name}] Successfully sent after retry")
+                                        except Exception as retry_error:
+                                            print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
+                                            # Try sending without files as last resort
+                                            try:
+                                                await message.channel.send(f"{response}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
+                                            except:
+                                                raise
                                     else:
                                         raise
-                            elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
-                                print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
-                                await asyncio.sleep(2)  # Wait 2 seconds
-                                try:
-                                    # Retry once - only attach files if not sent to channel_actions
-                                    files_for_retry = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
-                                    await message.channel.send(response, files=files_for_retry, reference=message)
-                                    print(f"✅ [{message.author.display_name}] Successfully sent after retry")
-                                except Exception as retry_error:
-                                    print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
-                                    # Try sending without files as last resort
-                                    try:
-                                        await message.channel.send(f"{response}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
-                                    except:
-                                        raise
-                            else:
-                                raise
                 
                 if generated_documents:
                     for doc in generated_documents:
