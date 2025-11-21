@@ -248,6 +248,9 @@ ENABLE_GEMINI_FILE_UPLOADS = _env_flag('ENABLE_GEMINI_FILE_UPLOADS', False)
 GEMINI_INLINE_IMAGE_LIMIT = _env_int('GEMINI_INLINE_IMAGE_LIMIT', 3 * 1024 * 1024)
 MAX_GENERATED_IMAGES = _env_int('MAX_GENERATED_IMAGES', 3)
 
+# Global storage for channel_actions by message ID (since Message objects don't allow arbitrary attributes)
+CHANNEL_ACTIONS_STORAGE: Dict[int, dict] = {}
+
 SUPPORTED_DOCUMENT_EXTENSIONS = {
     '.pdf': 'application/pdf',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -9262,8 +9265,10 @@ CURRENT CONVERSATION CONTEXT:
                     # Store channel_actions info for file routing in on_message
                     # Don't execute yet if we might have files to attach (images, screenshots, etc.)
                     # Files will be sent to channel_actions in on_message after they're prepared
-                    message._servermate_channel_actions = channel_actions
-                    message._servermate_channel_actions_executed = False
+                    CHANNEL_ACTIONS_STORAGE[message.id] = {
+                        'actions': channel_actions,
+                        'executed': False
+                    }
                     # Note: channel_actions will be executed in on_message with files attached
 
                 action_type = discord_command.get('action_type')
@@ -12374,9 +12379,7 @@ async def on_message(message: discord.Message):
                     typing_task = None
 
                 # Generate response (typing indicator runs in background)
-                # Store channel_actions info for file routing
-                message._servermate_channel_actions = None
-                message._servermate_files_sent_to_channels = False
+                # Note: channel_actions will be stored on message object in generate_response if needed
                 result = await generate_response(message, force_response)
 
                 print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
@@ -12588,13 +12591,17 @@ Response: """
                 # The prompt instructions handle this dynamically, so no post-processing needed here
                 
                 # Check if channel_actions were executed (files should go to those channels)
-                channel_actions = getattr(message, '_servermate_channel_actions', None)
+                # Retrieve from global storage by message ID
+                channel_actions = None
+                channel_actions_data = CHANNEL_ACTIONS_STORAGE.get(message.id)
+                if channel_actions_data:
+                    channel_actions = channel_actions_data.get('actions')
                 files_sent_to_channels = False
                 
                 # If channel_actions exist, execute them (with files if available)
-                if channel_actions:
+                if channel_actions and channel_actions_data:
                     # Check if channel_actions were already executed
-                    already_executed = getattr(message, '_servermate_channel_actions_executed', False)
+                    already_executed = channel_actions_data.get('executed', False)
                     if not already_executed:
                         file_count = len(files_to_attach) if files_to_attach else 0
                         print(f"📎 [{message.author.display_name}] Executing channel actions with {file_count} file(s)")
@@ -12605,7 +12612,8 @@ Response: """
                                 source=f"COMMAND:{message.author.display_name}",
                                 files=files_to_attach if files_to_attach else None
                             )
-                            message._servermate_channel_actions_executed = True
+                            # Mark as executed
+                            channel_actions_data['executed'] = True
                             if files_to_attach:
                                 files_sent_to_channels = True
                                 print(f"✅ [{message.author.display_name}] Files sent to target channel(s) via channel_actions")
@@ -12614,16 +12622,25 @@ Response: """
                             elif not files_to_attach:
                                 # Text-only channel action executed
                                 print(f"✅ [{message.author.display_name}] Channel actions executed (text-only)")
+                            # Clean up storage after execution
+                            if message.id in CHANNEL_ACTIONS_STORAGE:
+                                del CHANNEL_ACTIONS_STORAGE[message.id]
                         except Exception as channel_file_error:
                             print(f"⚠️  [{message.author.display_name}] Error executing channel_actions: {channel_file_error}")
                             import traceback
                             print(f"⚠️  [{message.author.display_name}] Traceback: {traceback.format_exc()}")
                             # Fall back to sending in current channel
                             files_sent_to_channels = False
+                            # Clean up storage on error
+                            if message.id in CHANNEL_ACTIONS_STORAGE:
+                                del CHANNEL_ACTIONS_STORAGE[message.id]
                     else:
                         # Already executed, files should have been sent
                         if files_to_attach:
                             files_sent_to_channels = True
+                        # Clean up storage
+                        if message.id in CHANNEL_ACTIONS_STORAGE:
+                            del CHANNEL_ACTIONS_STORAGE[message.id]
                 
                 # Send text response (with files only if not sent to channel_actions)
                 if response:
