@@ -2638,13 +2638,29 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
         (source_message.channel.id if source_message and source_message.channel else None)
     )
 
+    # Extract target_user_id - prioritize explicit targets over requester
+    # If user says "remind @dyno", target_user_id should be Dyno, NOT the requester
     target_user_id = (
         _extract_numeric_id(memory_data.get('target_user_id')) or
-        _extract_numeric_id(memory_data.get('user_id')) or
         _extract_numeric_id(memory_data.get('mention_user_id')) or
-        _extract_numeric_id(memory_data.get('assignee')) or
-        (source_message.author.id if source_message and source_message.author else None)
+        _extract_numeric_id(memory_data.get('assignee'))
     )
+    # If no explicit target, check user_mentions list (for cases where AI stored mention in list but not target_user_id)
+    if not target_user_id:
+        user_mentions_list = memory_data.get('user_mentions')
+        if user_mentions_list:
+            if isinstance(user_mentions_list, str):
+                try:
+                    user_mentions_list = json.loads(user_mentions_list)
+                except:
+                    user_mentions_list = [user_mentions_list]
+            if isinstance(user_mentions_list, list) and user_mentions_list:
+                # Extract first user ID from mentions
+                first_mention = user_mentions_list[0]
+                target_user_id = _extract_numeric_id(first_mention)
+    # Only use requester as fallback if NO target was specified (for "remind me" not "remind @someone")
+    if not target_user_id and source_message and source_message.author:
+        target_user_id = source_message.author.id
 
     target_role_id = (
         _extract_numeric_id(memory_data.get('target_role_id')) or
@@ -8035,6 +8051,8 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * "@everyone" → "mention_everyone": true
   * "@role" or role names → "role_mentions": ["@role", "<@&role_id>"]
   * User mentions → "user_mentions": ["@user", "<@user_id>"]
+  * **IMPORTANT**: If user says "remind @dyno" or "say @dyno", set "target_user_id": "<dyno_user_id>" (NOT the requester's ID)
+  * Only set "target_user_id" to requester's ID if user says "remind me" (no specific user mentioned)
 - Example memory_data for a one-off reminder:
   {{
       "intent": "reminder",
@@ -8561,15 +8579,39 @@ async def _deliver_native_reminder(reminder: dict):
                 if user_mention and user_mention not in mention_parts:
                     mention_parts.append(user_mention)
     
-    # Add individual target IDs (backward compatibility)
-    if target_user_id and f"<@{target_user_id}>" not in ' '.join(mention_parts):
-        mention_parts.append(f"<@{target_user_id}>")
-    if target_role_id and f"<@&{target_role_id}>" not in ' '.join(mention_parts):
-        mention_parts.append(f"<@&{target_role_id}>")
+    # Add individual target IDs (backward compatibility) - but only if not already in message_content
+    # Check if message_content already contains these mentions to avoid duplicates
+    message_content_lower = message_content.lower()
     
-    # Build final message
+    if target_user_id:
+        user_mention = f"<@{target_user_id}>"
+        # Only add if not already in mention_parts AND not already in message_content
+        if user_mention not in ' '.join(mention_parts) and user_mention not in message_content:
+            mention_parts.append(user_mention)
+    
+    if target_role_id:
+        role_mention = f"<@&{target_role_id}>"
+        # Only add if not already in mention_parts AND not already in message_content
+        if role_mention not in ' '.join(mention_parts) and role_mention not in message_content:
+            mention_parts.append(role_mention)
+    
+    # IMPORTANT: Only add requester if there's NO specific target_user_id
+    # If user said "remind @dyno", we should NOT mention the requester
+    if not target_user_id and requester_id:
+        requester_mention = f"<@{requester_id}>"
+        # Only add requester if not already mentioned
+        if requester_mention not in ' '.join(mention_parts) and requester_mention not in message_content:
+            mention_parts.append(requester_mention)
+    
+    # Build final message - check for duplicate mentions in message_content
     if mention_parts:
-        reminder_body = f"{' '.join(mention_parts)} {message_content}".strip()
+        # Remove any mentions from message_content that are already in mention_parts to avoid duplicates
+        final_content = message_content
+        for mention in mention_parts:
+            if mention in final_content:
+                # Remove duplicate mention from content (keep it in mention_parts only)
+                final_content = final_content.replace(mention, '').strip()
+        reminder_body = f"{' '.join(mention_parts)} {final_content}".strip()
     else:
         reminder_body = message_content.strip()
     
@@ -9218,13 +9260,16 @@ CURRENT CONVERSATION CONTEXT:
                         memory_data = dict(memory_data)
                         memory_data.setdefault('delivery', 'native_reminder')
                     
-                    # Store in server_memory if we have all required fields
+                    # Store in server_memory if we have all required fields (but don't show message for reminders)
                     if memory_type and memory_key and memory_data:
                         try:
                             await memory.store_server_memory(guild_id, memory_type, memory_key, memory_data, user_id)
-                            discord_command_result = f"✅ Stored {memory_type} memory: {memory_key}"
+                            # Only show "Stored memory" message for non-reminder memories
+                            if memory_type.lower() != 'reminder':
+                                discord_command_result = f"✅ Stored {memory_type} memory: {memory_key}"
                         except Exception as e:
-                            discord_command_result = f"❌ Error storing memory: {str(e)}"
+                            if memory_type.lower() != 'reminder':
+                                discord_command_result = f"❌ Error storing memory: {str(e)}"
                             print(f"⚠️  [{username}] Error storing memory: {e}")
                     
                     # Create reminder in reminders table (even if server_memory storage failed)
@@ -9254,7 +9299,12 @@ CURRENT CONVERSATION CONTEXT:
                                 metadata=reminder_payload.get('metadata')
                             )
                             if reminder_id:
-                                time_hint = discord.utils.format_dt(_aware_utc(trigger_at), style='R') if trigger_at else "soon"
+                                # Use current time for timestamp to ensure accurate countdown
+                                now_for_timestamp = datetime.now(timezone.utc)
+                                time_until_trigger = (trigger_at - now_for_timestamp).total_seconds()
+                                # Create a timestamp that's exactly time_until_trigger seconds from now
+                                accurate_trigger_time = now_for_timestamp + timedelta(seconds=time_until_trigger)
+                                time_hint = discord.utils.format_dt(_aware_utc(accurate_trigger_time), style='R') if accurate_trigger_time else "soon"
                                 channel_info = f" in <#{channel_id_for_reminder}>" if channel_id_for_reminder else ""
                                 recurring_info = ""
                                 if reminder_payload.get('is_recurring'):
