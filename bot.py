@@ -9466,10 +9466,10 @@ CURRENT CONVERSATION CONTEXT:
                 # Check if this was a message posting action
                 was_message_posting = discord_command and discord_command.get('action_type') == 'send_message'
                 if was_message_posting:
-                    # For message posting, tell AI to be SILENT unless there was an error
+                    # For message posting, give a short confirmation
                     if '✅' in system_log and '❌' not in system_log:
-                        # Success - tell AI to stay completely silent
-                        consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n\nCRITICAL INSTRUCTION: The message was successfully posted to the target channel. DO NOT respond in this channel. DO NOT send any confirmation message. DO NOT say 'Alright' or 'I've posted' or anything. The action is complete. Stay completely silent.\n"
+                        # Success - give brief confirmation
+                        consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n\nThe message was successfully posted. Give a brief confirmation (1 short sentence, e.g., 'Posted!' or 'Done!').\n"
                     else:
                         # Error occurred - AI can inform user
                         consciousness_prompt += f"\n\nSYSTEM ACTION LOG:\n{clipped_log}\n\nThe action failed. Briefly inform the user what went wrong (1-2 sentences max).\n"
