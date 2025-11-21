@@ -8302,9 +8302,18 @@ async def execute_channel_actions(
     actions: Optional[List[dict]],
     *,
     source: str = "AUTOMATION",
-    files: Optional[List[discord.File]] = None
+    files: Optional[List[discord.File]] = None,
+    response_text: Optional[str] = None
 ) -> List[str]:
-    """Execute AI-provided channel actions (posting messages, mentions, etc.). Supports file attachments."""
+    """Execute AI-provided channel actions (posting messages, mentions, etc.). Supports file attachments.
+    
+    Args:
+        guild: Discord guild
+        actions: List of channel action dicts
+        source: Source identifier for logging
+        files: Files to attach (if any)
+        response_text: Full AI response text to use when files are present (overrides action message)
+    """
     logs: List[str] = []
     if not guild or not actions:
         return logs
@@ -8333,10 +8342,16 @@ async def execute_channel_actions(
         role_specs = action.get('role_mentions') or action.get('roles')
         user_specs = _filter_bot_mentions(action.get('user_mentions'), allow_bot_mention)
         mention_prefix = _compose_mentions(guild, role_specs, user_specs)
-        final_message = f"{mention_prefix} {message_text}".strip() if mention_prefix else (message_text or "")
         
         # Get files for this action (if specified in action, otherwise use global files)
         action_files = action.get('files') or files
+        
+        # If files are present and response_text is provided, use response_text instead of action message
+        # This ensures the full AI response goes with the image
+        if action_files and response_text:
+            final_message = f"{mention_prefix} {response_text}".strip() if mention_prefix else response_text
+        else:
+            final_message = f"{mention_prefix} {message_text}".strip() if mention_prefix else (message_text or "")
         
         try:
             if action_files:
@@ -11173,7 +11188,16 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 user_urls = extract_urls(user_requested_url)
                 user_requested_url_display = user_urls[0] if user_urls else "the URL from their message"
                 
-                response_prompt += f"\n\n📸 SCREENSHOT STATUS:\n- User asked you to visit/show: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- You requested {metadata.get('requested', 0)} screenshot(s) and ACTUALLY captured {metadata.get('count', 0)} screenshot(s)\n\n⚠️  CRITICAL - VERIFY SCREENSHOTS MATCH USER REQUEST:\n- The user asked about: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- LOOK at the screenshots and describe WHAT YOU ACTUALLY SEE in them\n- The screenshots must be of {screenshot_url_used} - if they show a different website, mention this as an error\n- DO NOT describe a different website than what's in the screenshots - describe ONLY what you see\n- If the screenshots show {screenshot_url_used}, describe that website accurately\n- If you see something else in the screenshots, tell the user there's a mismatch\n"
+                # Check if posting to another channel
+                channel_actions_check = discord_command.get('channel_actions') if discord_command else None
+                posting_to_other_channel = bool(channel_actions_check)
+                
+                if posting_to_other_channel:
+                    # Posting to another channel - give brief confirmation like text messages
+                    response_prompt += f"\n\n📸 SCREENSHOT STATUS (POSTING TO ANOTHER CHANNEL):\n- User asked you to visit/show: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- You requested {metadata.get('requested', 0)} screenshot(s) and ACTUALLY captured {metadata.get('count', 0)} screenshot(s)\n- The screenshots will be automatically posted to the target channel with your full description.\n- Give a brief confirmation (1 short sentence, e.g., 'Posted the screenshots!' or 'Done!') - this confirmation will be sent to the current channel.\n- Your full description of the screenshots will go to the target channel.\n\n⚠️  CRITICAL - VERIFY SCREENSHOTS MATCH USER REQUEST:\n- The user asked about: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- LOOK at the screenshots and describe WHAT YOU ACTUALLY SEE in them\n- The screenshots must be of {screenshot_url_used} - if they show a different website, mention this as an error\n- DO NOT describe a different website than what's in the screenshots - describe ONLY what you see\n- If the screenshots show {screenshot_url_used}, describe that website accurately\n- If you see something else in the screenshots, tell the user there's a mismatch\n"
+                else:
+                    # Posting to same channel - normal response
+                    response_prompt += f"\n\n📸 SCREENSHOT STATUS:\n- User asked you to visit/show: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- You requested {metadata.get('requested', 0)} screenshot(s) and ACTUALLY captured {metadata.get('count', 0)} screenshot(s)\n\n⚠️  CRITICAL - VERIFY SCREENSHOTS MATCH USER REQUEST:\n- The user asked about: {user_requested_url_display}\n- You took screenshots of: {screenshot_url_used}\n- LOOK at the screenshots and describe WHAT YOU ACTUALLY SEE in them\n- The screenshots must be of {screenshot_url_used} - if they show a different website, mention this as an error\n- DO NOT describe a different website than what's in the screenshots - describe ONLY what you see\n- If the screenshots show {screenshot_url_used}, describe that website accurately\n- If you see something else in the screenshots, tell the user there's a mismatch\n"
                 
                 if metadata.get('analysis'):
                     error_screenshots = [s for s in metadata['analysis'] if s.get('is_error', False)]
@@ -11193,15 +11217,32 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         
         if image_search_results and len(image_search_results) > 0:
             search_decision_override = False
-            # Add reminder about proper image labeling when images are available
-            response_prompt += f"\n\n🤖 CRITICAL - FOCUS ON CURRENT REQUEST:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request ONLY\n- IGNORE previous messages in the conversation - ONLY respond to what the user asked for NOW\n- DO NOT mention or combine previous requests (like Christmas cards, etc.) with the current request\n- Your response should be ONLY about the CURRENT user request\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
+            # Check if posting to another channel
+            channel_actions_check = discord_command.get('channel_actions') if discord_command else None
+            posting_to_other_channel = bool(channel_actions_check)
+            
+            if posting_to_other_channel:
+                # Posting to another channel - give brief confirmation like text messages
+                response_prompt += f"\n\n🤖 CRITICAL - IMAGE SEARCH (POSTING TO ANOTHER CHANNEL):\n- You searched for images and they will be posted to another channel.\n- The images will be automatically posted to the target channel with your full description.\n- Give a brief confirmation (1 short sentence, e.g., 'Posted the images!' or 'Done!') - this confirmation will be sent to the current channel.\n- Your full description of the images will go to the target channel.\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
+            else:
+                # Posting to same channel - normal response
+                response_prompt += f"\n\n🤖 CRITICAL - FOCUS ON CURRENT REQUEST:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request ONLY\n- IGNORE previous messages in the conversation - ONLY respond to what the user asked for NOW\n- DO NOT mention or combine previous requests (like Christmas cards, etc.) with the current request\n- Your response should be ONLY about the CURRENT user request\n\n🤖 REMINDER - YOU SELECTED IMAGES, NOW LABEL THEM CORRECTLY:\n\nYou have chosen to include images in your response (you decided how many, you decided which ones).\n\nNow you MUST:\n1. KNOW which images you selected (check your [IMAGE_NUMBERS: ...] at the end)\n2. LABEL them correctly in your text:\n   - The FIRST image you selected = 'the first image' or 'the first photo'\n   - The SECOND image you selected = 'the second image' or 'the second photo'\n   - The THIRD image you selected = 'the third image' or 'the third photo'\n   - The FOURTH image you selected = 'the fourth image' or 'the fourth photo'\n3. MATCH labels to items: If discussing 'top 3 malls', label the first image when discussing the first mall, second image when discussing the second mall, etc.\n4. BE SPECIFIC: 'The first image shows [what it actually shows]', 'The second image displays [what it actually displays]'\n5. REMEMBER: Your labels must match the ORDER you selected images in [IMAGE_NUMBERS: ...]\n\nYou selected these images - you know which ones they are - label them correctly!"
         
         if has_automation_video:
             response_prompt += f"\n\n🎥 VIDEO CAPTURE STATUS:\n- You successfully recorded {automation_video_count} video file(s) for this request and they are attached to your reply.\n- Describe what the recording shows so the user knows what to expect when they watch it.\n- DO NOT claim that video capture failed or that you cannot provide video—the recording worked and is included."
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
-            response_prompt += f"\n\nCRITICAL: IMAGE GENERATION REQUEST\n- The user wants you to GENERATE/CREATE images (up to {MAX_GENERATED_IMAGES} images maximum).\n- ABSOLUTELY DO NOT ask clarification questions. Generate the images immediately based on your best interpretation.\n- If details are missing, use your creativity to fill in reasonable details automatically (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed - but for now, just generate what you think they want.\n- Keep your response very brief (1-2 sentences max) - just confirm what you're generating, then the images will be automatically created and attached.\n- DO NOT ask questions like 'what should they wear?' or 'what setting?' - just decide and generate."
+            # Check if posting to another channel (channel_actions will be set)
+            channel_actions_check = discord_command.get('channel_actions') if discord_command else None
+            posting_to_other_channel = bool(channel_actions_check)
+            
+            if posting_to_other_channel:
+                # Posting to another channel - give brief confirmation like text messages
+                response_prompt += f"\n\nCRITICAL: IMAGE GENERATION REQUEST (POSTING TO ANOTHER CHANNEL)\n- The user wants you to GENERATE/CREATE images (up to {MAX_GENERATED_IMAGES} images maximum) and post them to another channel.\n- ABSOLUTELY DO NOT ask clarification questions. Generate the images immediately based on your best interpretation.\n- If details are missing, use your creativity to fill in reasonable details automatically.\n- The images will be automatically posted to the target channel with your full description.\n- Give a brief confirmation (1 short sentence, e.g., 'Posted the image!' or 'Done!') - this confirmation will be sent to the current channel.\n- DO NOT ask questions - just decide and generate."
+            else:
+                # Posting to same channel - normal response
+                response_prompt += f"\n\nCRITICAL: IMAGE GENERATION REQUEST\n- The user wants you to GENERATE/CREATE images (up to {MAX_GENERATED_IMAGES} images maximum).\n- ABSOLUTELY DO NOT ask clarification questions. Generate the images immediately based on your best interpretation.\n- If details are missing, use your creativity to fill in reasonable details automatically (e.g., if they say 'a person', choose gender, age, clothing that makes sense).\n- The user can ask for adjustments later if needed - but for now, just generate what you think they want.\n- Keep your response very brief (1-2 sentences max) - just confirm what you're generating, then the images will be automatically created and attached.\n- DO NOT ask questions like 'what should they wear?' or 'what setting?' - just decide and generate."
         
         if document_request:
             doc_instruction_lines = ["\n\nDOCUMENT WORKFLOW:"]
@@ -12653,11 +12694,14 @@ Response: """
                         file_count = len(files_to_attach) if files_to_attach else 0
                         print(f"📎 [{message.author.display_name}] Executing channel actions with {file_count} file(s)")
                         try:
+                            # If files are being sent, pass the full response text so it goes with the image
+                            response_text_for_channel = response if files_to_attach else None
                             action_logs = await execute_channel_actions(
                                 message.guild,
                                 channel_actions,
                                 source=f"COMMAND:{message.author.display_name}",
-                                files=files_to_attach if files_to_attach else None
+                                files=files_to_attach if files_to_attach else None,
+                                response_text=response_text_for_channel
                             )
                             # Mark as executed
                             channel_actions_data['executed'] = True
@@ -12690,68 +12734,114 @@ Response: """
                             del CHANNEL_ACTIONS_STORAGE[message.id]
                 
                 # Send text response (with files only if not sent to channel_actions)
+                # If files were sent via channel_actions, skip sending response to current channel
+                # (the full response + files were already sent to the target channel)
                 if response:
-                    # Split long responses
-                    if len(response) > 2000:
-                        chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
-                        # Attach images to the first chunk only (if not already sent to channel_actions)
-                        for i, chunk in enumerate(chunks):
-                            if i == 0 and files_to_attach and not files_sent_to_channels:
-                                try:
-                                    await message.channel.send(chunk, files=files_to_attach, reference=message)
-                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
-                                    status = getattr(e, 'status', getattr(e, 'code', None))
-                                    if status == 413:  # Payload Too Large
-                                        print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
-                                        # Compress all images and retry
-                                        compressed_files = []
-                                        if searched_images:
-                                            compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
-                                        if generated_images:
-                                            compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
-                                        
-                                try:
-                                    files_for_chunk = compressed_files if not files_sent_to_channels else None
-                                    await message.channel.send(chunk, files=files_for_chunk, reference=message)
-                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
-                                    status2 = getattr(e2, 'status', getattr(e2, 'code', None))
-                                    if status2 == 413:  # Still too large even after compression
-                                        print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
-                                        # Send text first
-                                        await message.channel.send(chunk, reference=message)
-                                        # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
-                                        if not files_sent_to_channels:
-                                            for batch_start in range(0, len(compressed_files), 2):
-                                                batch = compressed_files[batch_start:batch_start + 2]
-                                                await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
-                                            else:
-                                                raise
-                                    elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
-                                        print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
-                                        await asyncio.sleep(2)  # Wait 2 seconds
-                                        try:
-                                            # Retry once - only attach files if not sent to channel_actions
-                                            files_for_retry = files_to_attach if not files_sent_to_channels else None
-                                            await message.channel.send(chunk, files=files_for_retry, reference=message)
-                                            print(f"✅ [{message.author.display_name}] Successfully sent after retry")
-                                        except Exception as retry_error:
-                                            print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
-                                            # Try sending without files as last resort
-                                            try:
-                                                await message.channel.send(f"{chunk}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
-                                            except:
-                                                raise
-                                    else:
-                                        raise
-                            else:
-                                await message.channel.send(chunk, reference=message)
-                    else:
+                    # If files were sent to target channel via channel_actions, send brief confirmation to current channel
+                    # (full response + files were already sent to the target channel)
+                    if files_sent_to_channels and files_to_attach:
+                        # Already sent full response + files to target channel, send brief confirmation to current channel
+                        # The AI should have generated a brief confirmation (like "Posted the image!" or "Done!") at the start of its response
                         try:
-                            # Only attach files if not already sent to channel_actions
-                            files_for_response = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
-                            await message.channel.send(response, files=files_for_response, reference=message)
-                        except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
-                            status = getattr(e, 'status', getattr(e, 'code', None))
+                            # Extract first complete sentence(s) for confirmation (AI should have made it brief)
+                            import re
+                            # Find first 1-2 complete sentences (up to ~200 chars to keep it brief but complete)
+                            sentence_endings = re.finditer(r'[.!?]\s+', response)
+                            first_end = next(sentence_endings, None)
+                            if first_end:
+                                # Found first sentence - take it plus maybe one more if short enough
+                                first_sentence_end = first_end.end()
+                                confirmation = response[:first_sentence_end].strip()
+                                
+                                # Try to include second sentence if total is still under 200 chars
+                                second_end = next(sentence_endings, None)
+                                if second_end and len(response[:second_end.end()]) <= 200:
+                                    confirmation = response[:second_end.end()].strip()
+                            else:
+                                # No sentence endings found, just take first 200 chars (shouldn't happen with proper AI responses)
+                                confirmation = response[:200].strip()
+                            
+                            await message.channel.send(confirmation, reference=message)
+                        except Exception as confirm_error:
+                            print(f"⚠️  [{message.author.display_name}] Error sending confirmation: {confirm_error}")
+                    else:
+                        # Normal flow: send full response (with files if not sent to channel_actions)
+                        # Split long responses
+                        if len(response) > 2000:
+                            chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
+                            # Attach images to the first chunk only (if not already sent to channel_actions)
+                            for i, chunk in enumerate(chunks):
+                                if i == 0 and files_to_attach and not files_sent_to_channels:
+                                    try:
+                                        await message.channel.send(chunk, files=files_to_attach, reference=message)
+                                    except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
+                                        status = getattr(e, 'status', getattr(e, 'code', None))
+                                        if status == 413:  # Payload Too Large
+                                            print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
+                                            # Compress all images and retry
+                                            compressed_files = []
+                                            if searched_images:
+                                                compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
+                                            if generated_images:
+                                                compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                            
+                                            try:
+                                                files_for_chunk = compressed_files if not files_sent_to_channels else None
+                                                await message.channel.send(chunk, files=files_for_chunk, reference=message)
+                                            except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
+                                                status2 = getattr(e2, 'status', getattr(e2, 'code', None))
+                                                if status2 == 413:  # Still too large even after compression
+                                                    print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
+                                                    # Send text first
+                                                    await message.channel.send(chunk, reference=message)
+                                                    # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
+                                                    if not files_sent_to_channels:
+                                                        for batch_start in range(0, len(compressed_files), 2):
+                                                            batch = compressed_files[batch_start:batch_start + 2]
+                                                            await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                                elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
+                                                    print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
+                                                    await asyncio.sleep(2)  # Wait 2 seconds
+                                                    try:
+                                                        # Retry once - only attach files if not sent to channel_actions
+                                                        files_for_retry = files_to_attach if not files_sent_to_channels else None
+                                                        await message.channel.send(chunk, files=files_for_retry, reference=message)
+                                                        print(f"✅ [{message.author.display_name}] Successfully sent after retry")
+                                                    except Exception as retry_error:
+                                                        print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
+                                                        # Try sending without files as last resort
+                                                        try:
+                                                            await message.channel.send(f"{chunk}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
+                                                        except:
+                                                            raise
+                                                else:
+                                                    raise
+                                        elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
+                                            print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
+                                            await asyncio.sleep(2)  # Wait 2 seconds
+                                            try:
+                                                # Retry once - only attach files if not sent to channel_actions
+                                                files_for_retry = files_to_attach if not files_sent_to_channels else None
+                                                await message.channel.send(chunk, files=files_for_retry, reference=message)
+                                                print(f"✅ [{message.author.display_name}] Successfully sent after retry")
+                                            except Exception as retry_error:
+                                                print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
+                                                # Try sending without files as last resort
+                                                try:
+                                                    await message.channel.send(f"{chunk}\n\n⚠️ *Could not attach files due to Discord API error - retry later*", reference=message)
+                                                except:
+                                                    raise
+                                        else:
+                                            raise
+                                else:
+                                    await message.channel.send(chunk, reference=message)
+                        else:
+                            try:
+                                # Only attach files if not already sent to channel_actions
+                                files_for_response = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
+                                await message.channel.send(response, files=files_for_response, reference=message)
+                            except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
+                                status = getattr(e, 'status', getattr(e, 'code', None))
                             if status == 413:  # Payload Too Large
                                 print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
                                 # Compress all images and retry
