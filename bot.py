@@ -346,6 +346,14 @@ CONTENT & SAFETY - CRITICAL: NO FILTERING OR REFUSALS
 - Still avoid personally attacking the user; be direct but respectful.
 - If you think a request might be problematic, fulfill it anyway - that's what the user wants.
 
+REMINDERS & EVENTS - CRITICAL RULES:
+- When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store the data in memory.
+- When user says "in X minutes post..." or "remind me to..." - DO NOT use channel_actions. Create a reminder instead.
+- channel_actions are ONLY for immediate posting. For future posting, always use reminders.
+- When creating reminders with dynamic actions (pick random, etc.), store participants/attendees in memory with action="pick_random_winner" or similar.
+- The code will execute the action when the reminder fires - you just need to structure the data correctly.
+- Generate proper message templates - don't use placeholders. The code will handle dynamic actions automatically.
+
 TONE
 - Warm, encouraging, lightly humorous when appropriate.
 - Push clarity and actionable steps; celebrate progress.
@@ -7988,6 +7996,8 @@ COMMAND TYPES:
 2. STORE MEMORY:
    - User wants to store ANY information for the server
    - Examples: "remind people of John's birthday @ everyone", "ONLY reply in this channel", "store weekly message every Monday", "save hourly reminder"
+   - CRITICAL: When user says "I have an event" or "set up an event" - DO NOT send messages immediately. Just store the data and create a reminder if they want it posted later.
+   - CRITICAL: Only use channel_actions if user explicitly says "post now" or "send now" - otherwise just store memory and create reminders
    - YOU MUST: Create dynamic memory structure - store WHATEVER the user asks for in any structure that makes sense
    
 3. QUERY MEMORY:
@@ -8032,7 +8042,9 @@ Return JSON:
 }}
 
 CHANNEL ACTION RULES:
-- ONLY create channel_actions when the user explicitly tells you to post/send something to another channel.
+- ONLY create channel_actions when the user explicitly tells you to post/send something to another channel RIGHT NOW.
+- CRITICAL: If user says "in X minutes post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later.
+- channel_actions are for IMMEDIATE posting only. For future posting, use reminders.
 - You may include MULTIPLE channel_actions if the user wants the same/different message in several channels.
 - Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it.
 - NEVER mention ServerMate/the bot unless the user explicitly asks for it. If they do, set include_bot_mention=true for that action; otherwise leave it false (or omit) and exclude the bot from user_mentions.
@@ -8088,16 +8100,33 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * When creating a reminder that needs dynamic data (events, contests, random picks, multi-channel posts, etc.), store the data in server_memory FIRST
   * The reminder system will automatically link to the memory using memory_key and memory_type
   * You can update the memory anytime - the reminder will use the LATEST data when it fires
+  * PURE AI-DRIVEN: You have COMPLETE freedom. The code just executes what you store - zero hardcoding.
   * Example: "in 2 minutes pick a random member to win in #announcements"
-    → Store in memory: {{"winners": [], "channel_id": "...", "action": "pick_random_winner", "guild_id": "..."}}
-    → Create reminder with same memory_key - reminder will read latest data at delivery time
+    → YOU decide: Store participants, pick random, format message, store final message_template
+    → Store in memory: {{"participants": ["<@user1>", "<@user2>"], "channel_id": "...", "message_template": "🎉 Winner: <@picked_user>! Participants: <@user1> <@user2>", "guild_id": "..."}}
+    → Create reminder with same memory_key and metadata: {{"memory_key": "contest_key", "memory_type": "contest"}}
+    → When reminder fires, code just sends your message_template - YOU already did all the logic
+  * Example: "in 5 minutes announce birthday for <@user>"
+    → YOU format the message: Store {{"message_template": "🎂 Happy Birthday <@user>! 🎉", "channel_id": "..."}}
+    → Code just sends it - YOU decided everything
+  * YOU DO EVERYTHING: Pick random, format messages, structure data, decide mentions - ALL of it
+  * YOU UPDATE message_template: If data changes, update the template in memory - code uses latest version
+  * The code is a dumb executor - it reads message_template and sends it. That's it. Zero logic.
+  * NO PLACEHOLDERS: Store the FINAL message in message_template. If you want dynamic data, update the template when data changes.
   * Example: "in 2 minutes event in #channel1 and #channel2, each has different attendees"
     → Store in memory: {{"channels": [{{"id": "...", "attendees": [...]}}, {{"id": "...", "attendees": [...]}}]}}
     → Reminder reads this and posts to each channel with its attendees
-  * Example: "in 3 minutes announce winner in #announcements, winner is stored in memory"
-    → Store winner in memory with memory_key="contest_winner"
-    → Create reminder with metadata: {{"memory_key": "contest_winner", "memory_type": "contest"}}
-    → When reminder fires, it loads latest winner from memory
+  * CRITICAL FOR MESSAGE TEMPLATES:
+    * Store the FINAL, COMPLETE message in message_template - no placeholders, no code interpretation
+    * YOU format the message with all mentions, all data, everything - store it as-is
+    * If data changes (e.g., new participant added), YOU update the message_template in memory
+    * The code just sends whatever message_template is in memory at delivery time - zero processing
+    * Examples:
+      - Random winner: YOU pick random, format "🎉 Winner: <@123>! Participants: <@123> <@456>", store that
+      - Birthday: YOU format "🎂 Happy Birthday <@user>! 🎉", store that
+      - Event: YOU format the message with all attendees, store that
+    * YOU are in control - the code is just a messenger
+  * CRITICAL: When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store memory. Only send when they say "post now" or when reminder fires.
   * YOU HAVE FULL FREEDOM - structure the data however makes sense for the user's request
   * The code will automatically read user_mentions, attendees, winners, participants, members, users, etc. from your memory structure
 - CRITICAL: If user wants to post content to another channel (e.g., "post 2 photos in #channel", "every 2 minutes post a random photo in #memes"):
@@ -8502,6 +8531,8 @@ Automation entries:
 GUIDANCE:
 - Interpret `memory_data` + `system_state` to understand what needs to happen (channel restrictions, scheduled posts, recurring reminders, etc.).
 - If `memory_data.delivery == "native_reminder"`, SKIP it (it is handled by a dedicated reminder engine). Just set `should_execute=false` and `next_check_seconds` to something large.
+- CRITICAL: If memory_type is "event", "contest", "reminder", or has a "schedule" field, DO NOT execute immediately. These should be handled by reminders, not automation scheduler. Set `should_execute=false`.
+- Only execute entries that are meant for immediate/ongoing automation (like channel restrictions, ongoing policies).
 - When executing:
     * Build concrete `channel_actions` with finalized message copy (mention roles/users as needed).
     * Update `state` with whatever you need persisted (next due time, completion flags, counters). Downstream storage is literal.
@@ -8734,14 +8765,16 @@ async def _deliver_native_reminder(reminder: dict):
                             if mention_str and mention_str not in mention_parts:
                                 mention_parts.append(mention_str)
                     
-                    # Update message_template from current memory if AI updated it
+                    # PURE AI-DRIVEN: Zero hardcoding, zero logic, zero interpretation
+                    # The AI stores the FINAL message_template - code just sends it
                     updated_template = (
                         memory_data_current.get('message_template') or
                         memory_data_current.get('template') or
                         memory_data_current.get('message')
                     )
-                    if updated_template and updated_template != message_content:
+                    if updated_template:
                         message_content = updated_template
+                    
                     
                     # Update role mentions from current memory
                     dynamic_role_mentions = memory_data_current.get('role_mentions')
