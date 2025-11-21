@@ -9202,68 +9202,94 @@ CURRENT CONVERSATION CONTEXT:
                     memory_key = discord_command.get('memory_key')
                     raw_memory_data = discord_command.get('memory_data') or {}
                     memory_data = raw_memory_data if isinstance(raw_memory_data, dict) else {"value": raw_memory_data}
+                    
+                    # Generate memory_key if missing (especially for reminders)
+                    if not memory_key and memory_type:
+                        if memory_type.lower() == 'reminder':
+                            # Generate a unique key for reminders
+                            reminder_text = memory_data.get('reminder_text') or memory_data.get('task') or 'reminder'
+                            memory_key = f"reminder_{user_id}_{int(datetime.now().timestamp())}"
+                        else:
+                            memory_key = f"{memory_type}_{user_id}_{int(datetime.now().timestamp())}"
+                        print(f"🔍 [{username}] Generated memory_key: {memory_key} (was missing)")
+                    
                     reminder_payload = _prepare_native_reminder_payload(memory_type, memory_key, memory_data, message)
                     if reminder_payload and reminder_payload.get('trigger_at'):
                         memory_data = dict(memory_data)
                         memory_data.setdefault('delivery', 'native_reminder')
+                    
+                    # Store in server_memory if we have all required fields
                     if memory_type and memory_key and memory_data:
                         try:
                             await memory.store_server_memory(guild_id, memory_type, memory_key, memory_data, user_id)
                             discord_command_result = f"✅ Stored {memory_type} memory: {memory_key}"
-                            if reminder_payload and reminder_payload.get('trigger_at'):
-                                trigger_at = reminder_payload['trigger_at']
-                                channel_id_for_reminder = reminder_payload.get('channel_id')
-                                # Use current channel if no channel specified
-                                if not channel_id_for_reminder and message.channel:
-                                    channel_id_for_reminder = message.channel.id
-                                try:
-                                    print(f"🔍 [{username}] Creating reminder in database: trigger_at={trigger_at}, is_recurring={reminder_payload.get('is_recurring')}")
-                                    reminder_id = await db.create_reminder(
-                                        user_id,
-                                        reminder_payload['reminder_text'],
-                                        _naive_utc(trigger_at),
-                                        guild_id,
-                                        str(channel_id_for_reminder) if channel_id_for_reminder else None,
-                                        str(reminder_payload.get('target_user_id')) if reminder_payload.get('target_user_id') else None,
-                                        str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None,
-                                        is_recurring=reminder_payload.get('is_recurring', False),
-                                        recurrence_interval_seconds=reminder_payload.get('recurrence_interval_seconds'),
-                                        recurrence_count=reminder_payload.get('recurrence_count'),
-                                        message_template=reminder_payload.get('message_template'),
-                                        role_mentions=reminder_payload.get('role_mentions'),
-                                        user_mentions=reminder_payload.get('user_mentions'),
-                                        mention_everyone=reminder_payload.get('mention_everyone', False),
-                                        metadata=reminder_payload.get('metadata')
-                                    )
-                                    if reminder_id:
-                                        time_hint = discord.utils.format_dt(_aware_utc(trigger_at), style='R') if trigger_at else "soon"
-                                        channel_info = f" in <#{channel_id_for_reminder}>" if channel_id_for_reminder else ""
-                                        recurring_info = ""
-                                        if reminder_payload.get('is_recurring'):
-                                            interval = reminder_payload.get('recurrence_interval_seconds', 0)
-                                            if interval:
-                                                if interval < 60:
-                                                    recurring_info = f" (every {interval}s"
-                                                elif interval < 3600:
-                                                    recurring_info = f" (every {interval//60}m"
-                                                else:
-                                                    recurring_info = f" (every {interval//3600}h"
-                                                count = reminder_payload.get('recurrence_count')
-                                                if count:
-                                                    recurring_info += f", {count} times)"
-                                                else:
-                                                    recurring_info += ", indefinitely)"
-                                        discord_command_result += f"\n⏰ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
-                                        print(f"✅ [{username}] Created reminder {reminder_id}: '{reminder_payload['reminder_text']}' at {trigger_at} (recurring={reminder_payload.get('is_recurring')})")
-                                    else:
-                                        print(f"⚠️  [{username}] Failed to create reminder: db.create_reminder returned None")
-                                except Exception as reminder_create_error:
-                                    import traceback
-                                    print(f"❌ [{username}] Error creating reminder: {reminder_create_error}")
-                                    print(f"❌ [{username}] Traceback: {traceback.format_exc()}")
-                                    discord_command_result += f"\n⚠️ Error scheduling reminder: {str(reminder_create_error)}"
                         except Exception as e:
                             discord_command_result = f"❌ Error storing memory: {str(e)}"
+                            print(f"⚠️  [{username}] Error storing memory: {e}")
+                    
+                    # Create reminder in reminders table (even if server_memory storage failed)
+                    if reminder_payload and reminder_payload.get('trigger_at'):
+                        trigger_at = reminder_payload['trigger_at']
+                        channel_id_for_reminder = reminder_payload.get('channel_id')
+                        # Use current channel if no channel specified
+                        if not channel_id_for_reminder and message.channel:
+                            channel_id_for_reminder = message.channel.id
+                        try:
+                            print(f"🔍 [{username}] Creating reminder in database: trigger_at={trigger_at}, is_recurring={reminder_payload.get('is_recurring')}")
+                            reminder_id = await db.create_reminder(
+                                user_id,
+                                reminder_payload['reminder_text'],
+                                _naive_utc(trigger_at),
+                                guild_id,
+                                str(channel_id_for_reminder) if channel_id_for_reminder else None,
+                                str(reminder_payload.get('target_user_id')) if reminder_payload.get('target_user_id') else None,
+                                str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None,
+                                is_recurring=reminder_payload.get('is_recurring', False),
+                                recurrence_interval_seconds=reminder_payload.get('recurrence_interval_seconds'),
+                                recurrence_count=reminder_payload.get('recurrence_count'),
+                                message_template=reminder_payload.get('message_template'),
+                                role_mentions=reminder_payload.get('role_mentions'),
+                                user_mentions=reminder_payload.get('user_mentions'),
+                                mention_everyone=reminder_payload.get('mention_everyone', False),
+                                metadata=reminder_payload.get('metadata')
+                            )
+                            if reminder_id:
+                                time_hint = discord.utils.format_dt(_aware_utc(trigger_at), style='R') if trigger_at else "soon"
+                                channel_info = f" in <#{channel_id_for_reminder}>" if channel_id_for_reminder else ""
+                                recurring_info = ""
+                                if reminder_payload.get('is_recurring'):
+                                    interval = reminder_payload.get('recurrence_interval_seconds', 0)
+                                    if interval:
+                                        if interval < 60:
+                                            recurring_info = f" (every {interval}s"
+                                        elif interval < 3600:
+                                            recurring_info = f" (every {interval//60}m"
+                                        else:
+                                            recurring_info = f" (every {interval//3600}h"
+                                        count = reminder_payload.get('recurrence_count')
+                                        if count:
+                                            recurring_info += f", {count} times)"
+                                        else:
+                                            recurring_info += ", indefinitely)"
+                                if not discord_command_result:
+                                    discord_command_result = f"✅ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
+                                else:
+                                    discord_command_result += f"\n⏰ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
+                                print(f"✅ [{username}] Created reminder {reminder_id}: '{reminder_payload['reminder_text']}' at {trigger_at} (recurring={reminder_payload.get('is_recurring')})")
+                            else:
+                                print(f"⚠️  [{username}] Failed to create reminder: db.create_reminder returned None")
+                                if not discord_command_result:
+                                    discord_command_result = "⚠️ Failed to create reminder in database"
+                                else:
+                                    discord_command_result += "\n⚠️ Failed to create reminder in database"
+                        except Exception as reminder_create_error:
+                            import traceback
+                            print(f"❌ [{username}] Error creating reminder: {reminder_create_error}")
+                            print(f"❌ [{username}] Traceback: {traceback.format_exc()}")
+                            if not discord_command_result:
+                                discord_command_result = f"⚠️ Error scheduling reminder: {str(reminder_create_error)}"
+                            else:
+                                discord_command_result += f"\n⚠️ Error scheduling reminder: {str(reminder_create_error)}"
                 elif action_type == 'query_memory':
                     query_type = discord_command.get('query_type') or 'all'
                     try:
