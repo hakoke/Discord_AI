@@ -2546,17 +2546,28 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
                                      memory_data: Any,
                                      source_message: Optional[discord.Message]) -> Optional[dict]:
     """Derive reminder metadata for the built-in reminder scheduler."""
+    print(f"🔍 [REMINDER] _prepare_native_reminder_payload called: memory_type={memory_type}, memory_key={memory_key}")
+    
     if not isinstance(memory_data, dict):
+        print(f"⚠️  [REMINDER] memory_data is not a dict: {type(memory_data)}")
         return None
+    
     normalized_type = (memory_type or "").lower()
     intent = str(memory_data.get('intent') or memory_data.get('action') or "").lower()
     schedule_block = memory_data.get('schedule') if isinstance(memory_data.get('schedule'), dict) else {}
+    
+    print(f"🔍 [REMINDER] normalized_type={normalized_type}, intent={intent}, has_schedule={bool(schedule_block)}")
+    print(f"🔍 [REMINDER] memory_data keys: {list(memory_data.keys())}")
+    
     if (
         'reminder' not in normalized_type
         and 'reminder' not in intent
         and not schedule_block
     ):
+        print(f"⚠️  [REMINDER] Not a reminder - returning None (type={normalized_type}, intent={intent}, schedule={bool(schedule_block)})")
         return None
+    
+    print(f"✅ [REMINDER] Recognized as reminder, processing...")
 
     def _collect_relative_seconds(data: Dict[str, Any]) -> float:
         total = 0.0
@@ -2601,10 +2612,13 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
     if not trigger_at:
         accum_seconds = _collect_relative_seconds(schedule_block)
         accum_seconds += _collect_relative_seconds(memory_data)
+        print(f"🔍 [REMINDER] Calculated accum_seconds: {accum_seconds} (from schedule_block: {_collect_relative_seconds(schedule_block)}, from memory_data: {_collect_relative_seconds(memory_data)})")
         if accum_seconds > 0:
             trigger_at = datetime.now(timezone.utc) + timedelta(seconds=max(5.0, accum_seconds))
+            print(f"✅ [REMINDER] Calculated trigger_at: {trigger_at}")
 
     if not trigger_at:
+        print(f"⚠️  [REMINDER] No trigger_at calculated - returning None")
         return None
 
     reminder_text = (
@@ -2639,15 +2653,81 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
     )
 
     mention_everyone = bool(memory_data.get('mention_everyone'))
-
-    return {
+    
+    # Extract recurring reminder info
+    is_recurring = bool(memory_data.get('is_recurring') or schedule_block.get('is_recurring') or schedule_block.get('recurring'))
+    recurrence_interval_seconds = None
+    recurrence_count = None
+    
+    if is_recurring:
+        # Get interval from schedule block or memory_data
+        interval_seconds = (
+            schedule_block.get('interval_seconds') or
+            schedule_block.get('every_seconds') or
+            memory_data.get('interval_seconds') or
+            memory_data.get('every_seconds')
+        )
+        if interval_seconds:
+            recurrence_interval_seconds = int(interval_seconds)
+        else:
+            # Calculate from other fields
+            interval_seconds = _collect_relative_seconds(schedule_block)
+            if interval_seconds == 0:
+                interval_seconds = _collect_relative_seconds(memory_data)
+            if interval_seconds > 0:
+                recurrence_interval_seconds = int(interval_seconds)
+        
+        # Get count (None = infinite)
+        recurrence_count = (
+            schedule_block.get('count') or
+            schedule_block.get('recurrence_count') or
+            memory_data.get('count') or
+            memory_data.get('recurrence_count')
+        )
+        if recurrence_count is not None:
+            recurrence_count = int(recurrence_count)
+    
+    # Extract message template (AI-generated message to reuse)
+    message_template = (
+        memory_data.get('message_template') or
+        memory_data.get('template') or
+        memory_data.get('message') or
+        reminder_text  # Fallback to reminder_text if no template
+    )
+    
+    # Extract mentions
+    role_mentions = memory_data.get('role_mentions') or schedule_block.get('role_mentions')
+    if isinstance(role_mentions, str):
+        role_mentions = [role_mentions]
+    
+    user_mentions = memory_data.get('user_mentions') or schedule_block.get('user_mentions')
+    if isinstance(user_mentions, str):
+        user_mentions = [user_mentions]
+    
+    # Extract metadata for dynamic conditions (birthdays, etc.)
+    metadata = memory_data.get('metadata') or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    
+    payload = {
         "trigger_at": trigger_at,
         "reminder_text": reminder_text,
         "channel_id": channel_id,
         "target_user_id": target_user_id,
         "target_role_id": target_role_id,
         "mention_everyone": mention_everyone,
+        "is_recurring": is_recurring,
+        "recurrence_interval_seconds": recurrence_interval_seconds,
+        "recurrence_count": recurrence_count,
+        "message_template": message_template,
+        "role_mentions": role_mentions,
+        "user_mentions": user_mentions,
+        "metadata": metadata,
     }
+    
+    print(f"✅ [REMINDER] Generated payload: trigger_at={trigger_at}, is_recurring={is_recurring}, interval={recurrence_interval_seconds}, count={recurrence_count}")
+    
+    return payload
 
 
 def _default_message_meta() -> Dict[str, Any]:
@@ -7925,13 +8005,17 @@ CRITICAL FOR STORE_MEMORY:
   * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
   * Store in whatever structure makes sense - be flexible and dynamic!
 
-REMINDER/SCHEDULE FORMAT:
-- When user says "remind me...", "set a reminder", "schedule a post", etc., include a detailed schedule object so downstream systems can run it automatically.
-- CRITICAL: Extract time duration from the user's message (e.g., "in 20 seconds", "in 5 minutes", "in 2 hours", "in 5 seconds")
-  * "in 5 seconds" = 5 seconds
-  * "in 2 minutes" = 120 seconds  
-  * "in 1 hour" = 3600 seconds
-  * "in 2 days" = 172800 seconds
+REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
+- When user says "remind me...", "set a reminder", "schedule a post", "remind us every X to...", etc., include a detailed schedule object so the code can execute it automatically.
+- CRITICAL: Extract time duration from the user's message (e.g., "in 20 seconds", "in 5 minutes", "in 2 hours", "every 2 days", "every 2 hours")
+  * "in 5 seconds" = 5 seconds (one-time)
+  * "in 2 minutes" = 120 seconds (one-time)
+  * "in 1 hour" = 3600 seconds (one-time)
+  * "in 2 days" = 172800 seconds (one-time)
+  * "every 2 days" = recurring, interval_seconds: 172800
+  * "every 2 hours" = recurring, interval_seconds: 7200
+  * "every week" = recurring, interval_seconds: 604800
+  * "for 2 weeks" = count: 14 (if daily), or calculate based on interval
 - CRITICAL: Extract channel from the user's message if specified
   * Look for channel mentions: "#channelname", "in #channelname", "invite-bot", "in invite-bot"
   * Match against available channels list to find the correct channel ID
@@ -7940,6 +8024,17 @@ REMINDER/SCHEDULE FORMAT:
   * "remind me in [TIME] in [CHANNEL] to [TASK]" - extract TIME, CHANNEL, and TASK
   * "remind me in [CHANNEL] in [TIME] to [TASK]" - same thing, order doesn't matter
   * "remind me in [TIME] to [TASK]" - use current channel
+  * "remind us every [INTERVAL] in [CHANNEL] to [TASK]" - recurring reminder
+  * "remind people of [EVENT] at [CHANNEL] @ [MENTIONS]" - extract all details
+- CRITICAL: For recurring reminders, ALWAYS set:
+  * "is_recurring": true
+  * "schedule": {{"interval_seconds": X}} or "interval_seconds": X in memory_data
+  * "recurrence_count": N (if limited) or null/omit for infinite
+  * "message_template": "AI-generated message to reuse" (code will reuse this, no AI needed after first time)
+- CRITICAL: Extract mentions dynamically:
+  * "@everyone" → "mention_everyone": true
+  * "@role" or role names → "role_mentions": ["@role", "<@&role_id>"]
+  * User mentions → "user_mentions": ["@user", "<@user_id>"]
 - Example memory_data for a one-off reminder:
   {{
       "intent": "reminder",
@@ -7952,15 +8047,45 @@ REMINDER/SCHEDULE FORMAT:
           "seconds": 5
       }}
   }}
+- Example memory_data for a recurring reminder:
+  {{
+      "intent": "reminder",
+      "reminder_text": "bump the server",
+      "message_template": "Hey everyone! Don't forget to bump the server! 🚀",
+      "channel_id": "123456789012345678",
+      "is_recurring": true,
+      "schedule": {{
+          "interval_seconds": 172800,
+          "count": null
+      }},
+      "role_mentions": ["@everyone"],
+      "mention_everyone": true
+  }}
+- Example for birthday reminders:
+  {{
+      "intent": "reminder",
+      "reminder_text": "birthday reminder",
+      "message_template": "🎉 Happy Birthday <@user_id>! Hope you have an amazing day! 🎂",
+      "channel_id": "123456789012345678",
+      "is_recurring": true,
+      "schedule": {{
+          "interval_seconds": 86400,
+          "type": "daily_check"
+      }},
+      "metadata": {{
+          "type": "birthday",
+          "check_function": "check_birthdays"
+      }}
+  }}
 - CRITICAL EXAMPLES:
   * "remind me in 5 seconds in invite-bot to take out the garbage"
-    → seconds: 5, channel_id: [ID of invite-bot channel], reminder_text: "take out the garbage"
-  * "remind me in invite-bot in 10 seconds to check this"
-    → seconds: 10, channel_id: [ID of invite-bot channel], reminder_text: "check this"
-  * "remind me in 2 minutes to call John"
-    → seconds: 120, channel_id: [current channel ID], reminder_text: "call John"
-- Use `"schedule": {{"type": "absolute", "time_iso": "2025-01-01T15:00:00Z"}}` for explicit timestamps, or `"type": "recurring"` with fields like `"cron"` / `"every_days"` when repeating.
+    → memory_data: {{"intent": "reminder", "reminder_text": "take out the garbage", "channel_id": "[ID]", "schedule": {{"seconds": 5}}}}
+  * "remind us every 2 days in #announcements to bump"
+    → memory_data: {{"intent": "reminder", "reminder_text": "bump", "message_template": "Time to bump the server! 🚀", "channel_id": "[ID]", "is_recurring": true, "schedule": {{"interval_seconds": 172800}}}}
+  * "remind people of birthdays at #birthday @ them"
+    → memory_data: {{"intent": "reminder", "reminder_text": "birthday", "message_template": "🎉 Happy Birthday!", "channel_id": "[ID]", "is_recurring": true, "schedule": {{"interval_seconds": 86400}}, "metadata": {{"type": "birthday"}}}}
 - ALWAYS include channel + user identifiers when possible so the automation knows where to post the reminder.
+- ALWAYS generate a "message_template" for recurring reminders - this is the message the code will reuse (no AI needed after first time).
 
 CRITICAL FOR wants_channels_list:
 - Set "wants_channels_list" true if user asks to see/list channels and/or categories (just a question, NOT sending a message)
@@ -8389,22 +8514,67 @@ async def run_server_automation_scheduler():
 
 
 async def _deliver_native_reminder(reminder: dict):
-    """Send a reminder message to the appropriate channel or user."""
+    """Send a reminder message to the appropriate channel or user (supports recurring and message templates)."""
     reminder_id = reminder.get('id')
+    
+    # Use message template if available, otherwise use reminder_text
+    message_template = reminder.get('message_template')
     reminder_text = reminder.get('reminder_text') or "Reminder"
+    message_content = message_template if message_template else reminder_text
+    
     channel_id = _extract_numeric_id(reminder.get('channel_id'))
     target_user_id = _extract_numeric_id(reminder.get('target_user_id'))
     target_role_id = _extract_numeric_id(reminder.get('target_role_id'))
     requester_id = _extract_numeric_id(reminder.get('user_id'))
-
+    mention_everyone = reminder.get('mention_everyone', False)
+    
+    # Build mentions from stored lists or individual IDs
     mention_parts = []
-    if target_user_id:
+    
+    # Add @everyone if requested
+    if mention_everyone:
+        mention_parts.append("@everyone")
+    
+    # Add role mentions from stored list
+    role_mentions = reminder.get('role_mentions')
+    if role_mentions:
+        if isinstance(role_mentions, str):
+            try:
+                role_mentions = json.loads(role_mentions)
+            except:
+                role_mentions = [role_mentions]
+        if isinstance(role_mentions, list):
+            for role_mention in role_mentions:
+                if role_mention and role_mention not in mention_parts:
+                    mention_parts.append(role_mention)
+    
+    # Add user mentions from stored list
+    user_mentions = reminder.get('user_mentions')
+    if user_mentions:
+        if isinstance(user_mentions, str):
+            try:
+                user_mentions = json.loads(user_mentions)
+            except:
+                user_mentions = [user_mentions]
+        if isinstance(user_mentions, list):
+            for user_mention in user_mentions:
+                if user_mention and user_mention not in mention_parts:
+                    mention_parts.append(user_mention)
+    
+    # Add individual target IDs (backward compatibility)
+    if target_user_id and f"<@{target_user_id}>" not in ' '.join(mention_parts):
         mention_parts.append(f"<@{target_user_id}>")
-    if target_role_id:
+    if target_role_id and f"<@&{target_role_id}>" not in ' '.join(mention_parts):
         mention_parts.append(f"<@&{target_role_id}>")
-
-    reminder_body = f"{' '.join(mention_parts)} Reminder: {reminder_text}".strip()
+    
+    # Build final message
+    if mention_parts:
+        reminder_body = f"{' '.join(mention_parts)} {message_content}".strip()
+    else:
+        reminder_body = message_content.strip()
+    
     sent = False
+    print(f"📤 [REMINDERS] Sending reminder {reminder_id}: '{reminder_body[:100]}...' to channel {channel_id}")
 
     channel_obj = None
     if channel_id:
@@ -8439,13 +8609,33 @@ async def _deliver_native_reminder(reminder: dict):
                 print(f"⚠️  [REMINDERS] Failed to DM reminder {reminder_id}: {dm_error}")
 
     if sent and reminder_id:
-        await db.complete_reminder(reminder_id)
+        # Check if this is a recurring reminder
+        is_recurring = reminder.get('is_recurring', False)
+        recurrence_interval_seconds = reminder.get('recurrence_interval_seconds')
+        recurrence_count = reminder.get('recurrence_count')
+        recurrence_executed_count = reminder.get('recurrence_executed_count', 0)
+        
+        if is_recurring and recurrence_interval_seconds:
+            new_executed_count = recurrence_executed_count + 1
+            
+            # Check if we've hit the count limit
+            if recurrence_count and new_executed_count >= recurrence_count:
+                print(f"✅ [REMINDERS] Recurring reminder {reminder_id} completed ({new_executed_count}/{recurrence_count} executions)")
+                await db.complete_reminder(reminder_id)
+            else:
+                # Schedule next occurrence
+                next_trigger_at = datetime.now(timezone.utc) + timedelta(seconds=recurrence_interval_seconds)
+                print(f"🔄 [REMINDERS] Scheduling next occurrence for reminder {reminder_id}: {next_trigger_at} (execution {new_executed_count})")
+                await db.update_recurring_reminder(reminder_id, _naive_utc(next_trigger_at), new_executed_count)
+        else:
+            # One-time reminder, mark as completed
+            await db.complete_reminder(reminder_id)
 
 
 async def run_native_reminder_scheduler():
-    """Background task that dispatches absolute reminders stored in the reminders table."""
+    """Background task that dispatches reminders stored in the reminders table (supports recurring reminders)."""
     await bot.wait_until_ready()
-    print("⏰ [REMINDERS] Scheduler started")
+    print("⏰ [REMINDERS] Native reminder scheduler started (polling every {}s)".format(REMINDER_POLL_INTERVAL))
     while not bot.is_closed():
         try:
             now = datetime.now(timezone.utc)
@@ -8457,7 +8647,8 @@ async def run_native_reminder_scheduler():
                         reminder_id = reminder.get('id')
                         reminder_text = reminder.get('reminder_text', 'Unknown')
                         trigger_at = reminder.get('trigger_at')
-                        print(f"⏰ [REMINDERS] Delivering reminder {reminder_id}: '{reminder_text}' (trigger: {trigger_at})")
+                        is_recurring = reminder.get('is_recurring', False)
+                        print(f"⏰ [REMINDERS] Delivering reminder {reminder_id}: '{reminder_text[:50]}...' (trigger: {trigger_at}, recurring: {is_recurring})")
                         await _deliver_native_reminder(reminder)
                         print(f"✅ [REMINDERS] Successfully delivered reminder {reminder_id}")
                     except Exception as reminder_error:
@@ -9026,6 +9217,7 @@ CURRENT CONVERSATION CONTEXT:
                                 if not channel_id_for_reminder and message.channel:
                                     channel_id_for_reminder = message.channel.id
                                 try:
+                                    print(f"🔍 [{username}] Creating reminder in database: trigger_at={trigger_at}, is_recurring={reminder_payload.get('is_recurring')}")
                                     reminder_id = await db.create_reminder(
                                         user_id,
                                         reminder_payload['reminder_text'],
@@ -9033,13 +9225,36 @@ CURRENT CONVERSATION CONTEXT:
                                         guild_id,
                                         str(channel_id_for_reminder) if channel_id_for_reminder else None,
                                         str(reminder_payload.get('target_user_id')) if reminder_payload.get('target_user_id') else None,
-                                        str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None
+                                        str(reminder_payload.get('target_role_id')) if reminder_payload.get('target_role_id') else None,
+                                        is_recurring=reminder_payload.get('is_recurring', False),
+                                        recurrence_interval_seconds=reminder_payload.get('recurrence_interval_seconds'),
+                                        recurrence_count=reminder_payload.get('recurrence_count'),
+                                        message_template=reminder_payload.get('message_template'),
+                                        role_mentions=reminder_payload.get('role_mentions'),
+                                        user_mentions=reminder_payload.get('user_mentions'),
+                                        mention_everyone=reminder_payload.get('mention_everyone', False),
+                                        metadata=reminder_payload.get('metadata')
                                     )
                                     if reminder_id:
                                         time_hint = discord.utils.format_dt(_aware_utc(trigger_at), style='R') if trigger_at else "soon"
                                         channel_info = f" in <#{channel_id_for_reminder}>" if channel_id_for_reminder else ""
-                                        discord_command_result += f"\n⏰ Reminder scheduled{channel_info} {time_hint}"
-                                        print(f"✅ [{username}] Created reminder {reminder_id}: '{reminder_payload['reminder_text']}' at {trigger_at}")
+                                        recurring_info = ""
+                                        if reminder_payload.get('is_recurring'):
+                                            interval = reminder_payload.get('recurrence_interval_seconds', 0)
+                                            if interval:
+                                                if interval < 60:
+                                                    recurring_info = f" (every {interval}s"
+                                                elif interval < 3600:
+                                                    recurring_info = f" (every {interval//60}m"
+                                                else:
+                                                    recurring_info = f" (every {interval//3600}h"
+                                                count = reminder_payload.get('recurrence_count')
+                                                if count:
+                                                    recurring_info += f", {count} times)"
+                                                else:
+                                                    recurring_info += ", indefinitely)"
+                                        discord_command_result += f"\n⏰ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
+                                        print(f"✅ [{username}] Created reminder {reminder_id}: '{reminder_payload['reminder_text']}' at {trigger_at} (recurring={reminder_payload.get('is_recurring')})")
                                     else:
                                         print(f"⚠️  [{username}] Failed to create reminder: db.create_reminder returned None")
                                 except Exception as reminder_create_error:

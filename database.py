@@ -111,7 +111,7 @@ class Database:
                 )
             ''')
             
-            # Reminders table - stores user and server reminders
+            # Reminders table - stores user and server reminders (supports recurring)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS reminders (
                     id SERIAL PRIMARY KEY,
@@ -124,8 +124,54 @@ class Database:
                     target_role_id TEXT,
                     is_completed BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    completed_at TIMESTAMP
+                    completed_at TIMESTAMP,
+                    is_recurring BOOLEAN DEFAULT FALSE,
+                    recurrence_interval_seconds INTEGER,
+                    recurrence_count INTEGER,
+                    recurrence_executed_count INTEGER DEFAULT 0,
+                    message_template TEXT,
+                    role_mentions JSONB,
+                    user_mentions JSONB,
+                    mention_everyone BOOLEAN DEFAULT FALSE,
+                    metadata JSONB
                 )
+            ''')
+            # Add new columns if they don't exist (for existing databases)
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN DEFAULT FALSE
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS recurrence_interval_seconds INTEGER
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS recurrence_count INTEGER
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS recurrence_executed_count INTEGER DEFAULT 0
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS message_template TEXT
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS role_mentions JSONB
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS user_mentions JSONB
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS mention_everyone BOOLEAN DEFAULT FALSE
+            ''')
+            await conn.execute('''
+                ALTER TABLE reminders 
+                ADD COLUMN IF NOT EXISTS metadata JSONB
             ''')
             
             # Scheduled messages table - stores periodic/recurring messages
@@ -647,15 +693,25 @@ class Database:
     # Reminder methods
     async def create_reminder(self, user_id: str, reminder_text: str, trigger_at: datetime,
                             guild_id: str = None, channel_id: str = None, 
-                            target_user_id: str = None, target_role_id: str = None):
-        """Create a reminder"""
+                            target_user_id: str = None, target_role_id: str = None,
+                            is_recurring: bool = False, recurrence_interval_seconds: int = None,
+                            recurrence_count: int = None, message_template: str = None,
+                            role_mentions: list = None, user_mentions: list = None,
+                            mention_everyone: bool = False, metadata: dict = None):
+        """Create a reminder (supports recurring reminders)"""
         async with self.pool.acquire() as conn:
             reminder_id = await conn.fetchval('''
                 INSERT INTO reminders 
-                (guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id,
+                 is_recurring, recurrence_interval_seconds, recurrence_count, message_template,
+                 role_mentions, user_mentions, mention_everyone, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING id
-            ''', guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id)
+            ''', guild_id, user_id, reminder_text, trigger_at, channel_id, target_user_id, target_role_id,
+                is_recurring, recurrence_interval_seconds, recurrence_count, message_template,
+                json.dumps(role_mentions) if role_mentions else None,
+                json.dumps(user_mentions) if user_mentions else None,
+                mention_everyone, json.dumps(metadata) if metadata else None)
             return reminder_id
     
     async def get_pending_reminders(self, before_time: datetime = None):
@@ -671,6 +727,15 @@ class Database:
                 ORDER BY trigger_at ASC
             ''', before_time)
             return [dict(row) for row in rows]
+    
+    async def update_recurring_reminder(self, reminder_id: int, next_trigger_at: datetime, executed_count: int):
+        """Update a recurring reminder with next trigger time"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE reminders
+                SET trigger_at = $1, recurrence_executed_count = $2, is_completed = FALSE
+                WHERE id = $3
+            ''', next_trigger_at, executed_count, reminder_id)
     
     async def complete_reminder(self, reminder_id: int):
         """Mark reminder as completed"""
