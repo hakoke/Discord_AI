@@ -7976,6 +7976,7 @@ COMMAND TYPES:
   - "list birthdays"
   - "what reminders do you have active?"
   - "show my reminders"
+  - CRITICAL: When querying reminders, set query_type="reminders" to read from the reminders database table (NOT server_memories). The reminders table is the source of truth for active reminders.
   
 4. CANCEL REMINDER:
   - User wants to stop/cancel/delete a reminder
@@ -9359,7 +9360,7 @@ CURRENT CONVERSATION CONTEXT:
                 elif action_type == 'query_memory':
                     query_type = discord_command.get('query_type') or 'all'
                     try:
-                        # If querying reminders, also check active reminders in database
+                        # If querying reminders, ONLY check active reminders in database (not server_memories)
                         if query_type in ['reminders', 'reminder', 'all']:
                             active_reminders = await db.get_active_reminders(guild_id, user_id)
                             if active_reminders:
@@ -9367,28 +9368,31 @@ CURRENT CONVERSATION CONTEXT:
                                 for rem in active_reminders[:10]:
                                     rem_text = rem.get('reminder_text', 'Unknown')
                                     is_recurring = rem.get('is_recurring', False)
+                                    channel_id = rem.get('channel_id')
+                                    channel_str = f" in <#{channel_id}>" if channel_id else ""
                                     recurring_str = " (recurring)" if is_recurring else ""
-                                    reminder_list.append(f"• {rem_text}{recurring_str}")
+                                    reminder_list.append(f"• {rem_text}{channel_str}{recurring_str}")
                                 discord_command_result = f"⏰ Your active reminders:\n" + "\n".join(reminder_list)
                                 if len(active_reminders) > 10:
                                     discord_command_result += f"\n... and {len(active_reminders) - 10} more (use /reminder to see all)"
                             else:
                                 discord_command_result = "You have no active reminders. Use /reminder to manage reminders."
                         
-                        # Also check server memories
-                        memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
-                        if memories:
-                            if isinstance(memories, dict):
-                                memories = [memories]
-                            discord_memory_snapshot = memories
-                            if not discord_command_result:
-                                response_parts = []
-                                for mem in memories[:20]:
-                                    mem_type = mem.get('memory_type', 'memory')
-                                    mem_key = mem.get('memory_key', 'unknown')
-                                    mem_data = mem.get('memory_data', {})
-                                    response_parts.append(f"{mem_type} - {mem_key}: {json.dumps(mem_data, ensure_ascii=False)}")
-                                discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
+                        # Only check server memories if NOT querying reminders (reminders come from database only)
+                        if query_type not in ['reminders', 'reminder']:
+                            memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
+                            if memories:
+                                if isinstance(memories, dict):
+                                    memories = [memories]
+                                discord_memory_snapshot = memories
+                                if not discord_command_result:
+                                    response_parts = []
+                                    for mem in memories[:20]:
+                                        mem_type = mem.get('memory_type', 'memory')
+                                        mem_key = mem.get('memory_key', 'unknown')
+                                        mem_data = mem.get('memory_data', {})
+                                        response_parts.append(f"{mem_type} - {mem_key}: {json.dumps(mem_data, ensure_ascii=False)}")
+                                    discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
                     except Exception as e:
                         discord_command_result = f"❌ Error querying memory: {str(e)}"
                 elif action_type == 'cancel_reminder':
@@ -9402,10 +9406,29 @@ CURRENT CONVERSATION CONTEXT:
                         discord_command_result = "⚠️ Could not determine which reminder to cancel. Please specify the reminder text."
                     else:
                         try:
+                            # Cancel reminders in the reminders table
                             cancelled_count = await db.cancel_reminders_by_text(guild_id, user_id, reminder_text)
-                            if cancelled_count and cancelled_count > 0:
-                                discord_command_result = f"✅ Cancelled {cancelled_count} reminder(s) matching '{reminder_text}'"
-                                print(f"✅ [{username}] Cancelled {cancelled_count} reminder(s) matching '{reminder_text}'")
+                            
+                            # Also delete server_memory entries for this reminder (they might be running via AI automation)
+                            server_memories = await memory.get_server_memory(guild_id, 'reminder')
+                            deleted_memories = 0
+                            if server_memories:
+                                if isinstance(server_memories, dict):
+                                    server_memories = [server_memories]
+                                for mem in server_memories:
+                                    mem_data = mem.get('memory_data', {})
+                                    mem_text = mem_data.get('reminder_text', '') or mem_data.get('task', '') or ''
+                                    if reminder_text.lower() in mem_text.lower() or mem_text.lower() in reminder_text.lower():
+                                        mem_key = mem.get('memory_key', '')
+                                        if mem_key:
+                                            await memory.delete_server_memory(guild_id, 'reminder', mem_key)
+                                            deleted_memories += 1
+                                            print(f"✅ [{username}] Deleted server_memory reminder: {mem_key}")
+                            
+                            total_cancelled = cancelled_count + deleted_memories
+                            if total_cancelled > 0:
+                                discord_command_result = f"✅ Cancelled {total_cancelled} reminder(s) matching '{reminder_text}' ({cancelled_count} from reminders table, {deleted_memories} from server memory)"
+                                print(f"✅ [{username}] Cancelled {total_cancelled} reminder(s) matching '{reminder_text}'")
                             else:
                                 discord_command_result = f"⚠️ No active reminders found matching '{reminder_text}'. Use /reminder to see your active reminders."
                         except Exception as e:
