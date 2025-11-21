@@ -746,6 +746,49 @@ class Database:
                 WHERE id = $1
             ''', reminder_id)
     
+    async def cancel_reminder(self, reminder_id: int):
+        """Cancel/delete a reminder (mark as completed)"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE reminders
+                SET is_completed = TRUE, completed_at = NOW()
+                WHERE id = $1
+            ''', reminder_id)
+    
+    async def cancel_reminders_by_text(self, guild_id: str, user_id: str, reminder_text: str):
+        """Cancel reminders matching text for a user in a guild"""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE reminders
+                SET is_completed = TRUE, completed_at = NOW()
+                WHERE guild_id = $1 AND user_id = $2 
+                AND LOWER(reminder_text) LIKE LOWER($3)
+                AND is_completed = FALSE
+            ''', guild_id, user_id, f'%{reminder_text}%')
+            return await conn.fetchval('''
+                SELECT COUNT(*) FROM reminders
+                WHERE guild_id = $1 AND user_id = $2 
+                AND LOWER(reminder_text) LIKE LOWER($3)
+                AND is_completed = TRUE
+            ''', guild_id, user_id, f'%{reminder_text}%')
+    
+    async def get_active_reminders(self, guild_id: str, user_id: str = None):
+        """Get active (non-completed) reminders for a guild, optionally filtered by user"""
+        async with self.pool.acquire() as conn:
+            if user_id:
+                rows = await conn.fetch('''
+                    SELECT * FROM reminders
+                    WHERE guild_id = $1 AND user_id = $2 AND is_completed = FALSE
+                    ORDER BY trigger_at ASC
+                ''', guild_id, user_id)
+            else:
+                rows = await conn.fetch('''
+                    SELECT * FROM reminders
+                    WHERE guild_id = $1 AND is_completed = FALSE
+                    ORDER BY trigger_at ASC
+                ''', guild_id)
+            return [dict(row) for row in rows]
+    
     async def get_user_reminders(self, user_id: str, include_completed: bool = False):
         """Get reminders for a user"""
         async with self.pool.acquire() as conn:

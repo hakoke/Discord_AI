@@ -320,6 +320,7 @@ AUTOMATION & MEDIA
 SLASH COMMANDS (only these exist)
 - `/profile [user]` → show detailed memory/personality profile.
 - `/help` → explain how to use you and list capabilities.
+- `/reminder` → view active reminders for the current server (user's reminders only).
 - `/servermemory [type] [limit]` → list stored server-wide memories/reminders/policies for the current guild.
 - `/stop` → cancel that user’s in-progress task.
 - `/website` → share the ServerMate site link.
@@ -7969,15 +7970,23 @@ COMMAND TYPES:
    - YOU MUST: Create dynamic memory structure - store WHATEVER the user asks for in any structure that makes sense
    
 3. QUERY MEMORY:
-   - "show me what reminders we have"
-   - "show me people's birthdays"
-   - "what reminders do we have?"
-   - "list birthdays"
+  - "show me what reminders we have"
+  - "show me people's birthdays"
+  - "what reminders do we have?"
+  - "list birthdays"
+  - "what reminders do you have active?"
+  - "show my reminders"
+  
+4. CANCEL REMINDER:
+  - User wants to stop/cancel/delete a reminder
+  - Examples: "stop reminding me to bump", "cancel my reminder about X", "delete the reminder for Y"
+  - Set action_type="cancel_reminder" and include "reminder_text" or "reminder_keyword" in memory_data
+  - Extract the reminder text/keyword from user's message (e.g., "bump", "take out garbage")
    
 Return JSON:
 {{
     "needs_discord_action": true/false,
-    "action_type": "send_message" | "store_memory" | "query_memory" | null,
+    "action_type": "send_message" | "store_memory" | "query_memory" | "cancel_reminder" | null,
     "channel_actions": [
         {{
             "channel": "channel name, ID, or <#mention>",
@@ -9350,22 +9359,59 @@ CURRENT CONVERSATION CONTEXT:
                 elif action_type == 'query_memory':
                     query_type = discord_command.get('query_type') or 'all'
                     try:
+                        # If querying reminders, also check active reminders in database
+                        if query_type in ['reminders', 'reminder', 'all']:
+                            active_reminders = await db.get_active_reminders(guild_id, user_id)
+                            if active_reminders:
+                                reminder_list = []
+                                for rem in active_reminders[:10]:
+                                    rem_text = rem.get('reminder_text', 'Unknown')
+                                    is_recurring = rem.get('is_recurring', False)
+                                    recurring_str = " (recurring)" if is_recurring else ""
+                                    reminder_list.append(f"• {rem_text}{recurring_str}")
+                                discord_command_result = f"⏰ Your active reminders:\n" + "\n".join(reminder_list)
+                                if len(active_reminders) > 10:
+                                    discord_command_result += f"\n... and {len(active_reminders) - 10} more (use /reminder to see all)"
+                            else:
+                                discord_command_result = "You have no active reminders. Use /reminder to manage reminders."
+                        
+                        # Also check server memories
                         memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
-                        if not memories:
-                            discord_command_result = "No server memories found." if query_type == 'all' else f"No {query_type} memories found."
-                        else:
+                        if memories:
                             if isinstance(memories, dict):
                                 memories = [memories]
                             discord_memory_snapshot = memories
-                            response_parts = []
-                            for mem in memories[:20]:
-                                mem_type = mem.get('memory_type', 'memory')
-                                mem_key = mem.get('memory_key', 'unknown')
-                                mem_data = mem.get('memory_data', {})
-                                response_parts.append(f"{mem_type} - {mem_key}: {json.dumps(mem_data, ensure_ascii=False)}")
-                            discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
+                            if not discord_command_result:
+                                response_parts = []
+                                for mem in memories[:20]:
+                                    mem_type = mem.get('memory_type', 'memory')
+                                    mem_key = mem.get('memory_key', 'unknown')
+                                    mem_data = mem.get('memory_data', {})
+                                    response_parts.append(f"{mem_type} - {mem_key}: {json.dumps(mem_data, ensure_ascii=False)}")
+                                discord_command_result = "📋 Server Memories:\n" + "\n\n".join(response_parts)
                     except Exception as e:
                         discord_command_result = f"❌ Error querying memory: {str(e)}"
+                elif action_type == 'cancel_reminder':
+                    # Cancel reminders matching the text
+                    reminder_text = discord_command.get('reminder_text') or discord_command.get('reminder_keyword') or ""
+                    memory_data = discord_command.get('memory_data') or {}
+                    if not reminder_text:
+                        reminder_text = memory_data.get('reminder_text') or memory_data.get('reminder_keyword') or ""
+                    
+                    if not reminder_text:
+                        discord_command_result = "⚠️ Could not determine which reminder to cancel. Please specify the reminder text."
+                    else:
+                        try:
+                            cancelled_count = await db.cancel_reminders_by_text(guild_id, user_id, reminder_text)
+                            if cancelled_count and cancelled_count > 0:
+                                discord_command_result = f"✅ Cancelled {cancelled_count} reminder(s) matching '{reminder_text}'"
+                                print(f"✅ [{username}] Cancelled {cancelled_count} reminder(s) matching '{reminder_text}'")
+                            else:
+                                discord_command_result = f"⚠️ No active reminders found matching '{reminder_text}'. Use /reminder to see your active reminders."
+                        except Exception as e:
+                            import traceback
+                            print(f"❌ [{username}] Error cancelling reminder: {e}\n{traceback.format_exc()}")
+                            discord_command_result = f"❌ Error cancelling reminder: {str(e)}"
         
         plain_message = (message.content or "").strip()
         message_meta = await ai_analyze_message_meta(message)
@@ -13207,6 +13253,7 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
+            "`/reminder` - View your active reminders for this server\n"
             "`/servermemory [type] [limit]` - Inspect stored server reminders/rules\n"
             "`/stop` - Stop my current response or automation for you\n"
             "`/website` - Visit the ServerMate website"
@@ -13236,6 +13283,94 @@ async def help_command(interaction: discord.Interaction):
     
     await interaction.followup.send(embed=embed)
 
+
+@bot.tree.command(name='reminder', description='View active reminders for this server')
+async def reminder_command(interaction: discord.Interaction):
+    """Slash command to view active reminders for the current server"""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild.id)
+    user_id = str(interaction.user.id)
+    
+    try:
+        # Get active reminders for this server (user's reminders only)
+        reminders = await db.get_active_reminders(guild_id, user_id)
+        
+        if not reminders:
+            await interaction.followup.send(
+                "You have no active reminders in this server.\n\n"
+                "To create a reminder, mention me and say something like:\n"
+                "`@ServerMate remind me in 10 seconds to take out the garbage`\n"
+                "`@ServerMate remind me every 2 days in #announcements to bump`",
+                ephemeral=True
+            )
+            return
+        
+        bot_name = os.getenv('BOT_NAME', 'ServerMate').title()
+        embed = discord.Embed(
+            title=f"⏰ {bot_name} Active Reminders",
+            description=f"You have {len(reminders)} active reminder{'s' if len(reminders) != 1 else ''} in this server:",
+            color=0x5865F2
+        )
+        
+        for reminder in reminders[:10]:  # Limit to 10
+            reminder_text = reminder.get('reminder_text', 'Unknown')
+            trigger_at = reminder.get('trigger_at')
+            channel_id = reminder.get('channel_id')
+            is_recurring = reminder.get('is_recurring', False)
+            
+            # Format trigger time
+            if trigger_at:
+                if isinstance(trigger_at, datetime):
+                    trigger_dt = trigger_at.replace(tzinfo=timezone.utc) if trigger_at.tzinfo is None else trigger_at
+                else:
+                    trigger_dt = datetime.fromisoformat(str(trigger_at).replace('Z', '+00:00'))
+                time_str = discord.utils.format_dt(trigger_dt, style='R')
+            else:
+                time_str = "Unknown"
+            
+            # Format channel
+            channel_str = ""
+            if channel_id:
+                channel_str = f" in <#{channel_id}>"
+            
+            # Format recurring info
+            recurring_str = ""
+            if is_recurring:
+                interval = reminder.get('recurrence_interval_seconds', 0)
+                if interval:
+                    if interval < 60:
+                        recurring_str = f" (every {interval}s"
+                    elif interval < 3600:
+                        recurring_str = f" (every {interval//60}m"
+                    else:
+                        recurring_str = f" (every {interval//3600}h"
+                    count = reminder.get('recurrence_count')
+                    if count:
+                        recurring_str += f", {count} times)"
+                    else:
+                        recurring_str += ", indefinitely)"
+            
+            field_value = f"**When:** {time_str}{recurring_str}\n**Channel:** {channel_str or 'DM'}\n**ID:** {reminder.get('id')}"
+            embed.add_field(name=reminder_text[:256], value=field_value, inline=False)
+        
+        if len(reminders) > 10:
+            embed.set_footer(text=f"Showing 10 of {len(reminders)} reminders")
+        
+        embed.add_field(
+            name="💡 Tip",
+            value="To cancel a reminder, mention me and say:\n`@ServerMate stop reminding me to [text]`",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        import traceback
+        print(f"Error in reminder command: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send(f"Error retrieving reminders: {e}", ephemeral=True)
 
 @bot.tree.command(name='servermemory', description='View stored server-wide memory entries')
 @app_commands.describe(memory_type='Filter by memory type (optional)', limit='Number of entries to show (1-20)')
