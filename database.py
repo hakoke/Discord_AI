@@ -737,6 +737,32 @@ class Database:
                 WHERE id = $3
             ''', next_trigger_at, executed_count, reminder_id)
     
+    async def update_reminder_mentions(self, reminder_id: int, user_mentions: list = None, message_template: str = None):
+        """Update a reminder's user_mentions and/or message_template"""
+        async with self.pool.acquire() as conn:
+            updates = []
+            params = []
+            param_index = 1
+            
+            if user_mentions is not None:
+                updates.append(f"user_mentions = ${param_index}")
+                params.append(json.dumps(user_mentions) if user_mentions else None)
+                param_index += 1
+            
+            if message_template is not None:
+                updates.append(f"message_template = ${param_index}")
+                params.append(message_template)
+                param_index += 1
+            
+            if updates:
+                params.append(reminder_id)
+                query = f'''
+                    UPDATE reminders
+                    SET {', '.join(updates)}
+                    WHERE id = ${param_index}
+                '''
+                await conn.execute(query, *params)
+    
     async def complete_reminder(self, reminder_id: int):
         """Mark reminder as completed"""
         async with self.pool.acquire() as conn:

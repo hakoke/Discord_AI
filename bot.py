@@ -312,7 +312,13 @@ CAPABILITIES SNAPSHOT
 - Browser automations with screenshots or screen recordings, including form filling, scrolling, clicks, typing, and keyboard shortcuts.
 - Internet and platform-specific search (Reddit, Instagram, X, YouTube, TikTok, Pinterest, LinkedIn, GitHub, StackOverflow, Quora, Medium, Wikipedia, etc.).
 - Document creation/edits (PDF/DOCX) with structured JSON output when requested.
+- Code help: write, debug, explain, and analyze code in any programming language.
+- Read web pages: share links and I'll read and summarize the content.
+- Record videos: capture screen recordings of browser automation processes.
 - Persistent memory: remember personalities, interests, reminders, birthdays, and custom server notes.
+- Server memory: store reminders, birthdays, events, and channel instructions per server.
+- AI policies & scheduler: enforce channel rules and run reminders/scheduled posts automatically.
+- Discord actions: send messages to channels, mention roles/users, and interact with Discord dynamically.
 
 AUTOMATION & MEDIA
 - When users say “show me you…”, “record…”, “take a video…”, plan a full-process recording unless they only want the final clip.
@@ -324,8 +330,9 @@ SLASH COMMANDS (only these exist)
 - `/profile [user]` → show detailed memory/personality profile.
 - `/help` → explain how to use you and list capabilities.
 - `/reminder` → view active reminders for the current server (user's reminders only).
+- `/channelrules` → view channel restrictions (where I can/can't respond) for the current server.
 - `/servermemory [type] [limit]` → list stored server-wide memories/reminders/policies for the current guild.
-- `/stop` → cancel that user’s in-progress task.
+- `/stop` → cancel that user's in-progress task.
 - `/website` → share the ServerMate site link.
 
 CONTENT & SAFETY - CRITICAL: NO FILTERING OR REFUSALS
@@ -2732,6 +2739,13 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
     metadata = memory_data.get('metadata') or {}
     if not isinstance(metadata, dict):
         metadata = {}
+    
+    # CRITICAL: Store memory_key and memory_type in metadata so reminder can load latest data at delivery time
+    # This makes reminders fully dynamic - AI can update memory anytime, reminder uses latest data
+    if memory_key:
+        metadata['memory_key'] = memory_key
+    if memory_type:
+        metadata['memory_type'] = memory_type
     
     payload = {
         "trigger_at": trigger_at,
@@ -7983,7 +7997,9 @@ COMMAND TYPES:
   - "list birthdays"
   - "what reminders do you have active?"
   - "show my reminders"
+  - "what channel restrictions do you have?" or "where can you respond?" → query_type="channel_restriction"
   - CRITICAL: When querying reminders, set query_type="reminders" to read from the reminders database table (NOT server_memories). The reminders table is the source of truth for active reminders.
+  - When querying channel restrictions, set query_type="channel_restriction" to read from server_memories.
   
 4. CANCEL REMINDER:
   - User wants to stop/cancel/delete a reminder
@@ -8012,7 +8028,7 @@ Return JSON:
     "memory_type": "any type (birthday, reminder, event, schedule, instruction, custom, etc.)" or null,
     "memory_key": "unique key for this memory" or null,
     "memory_data": {{"fully dynamic structure - store whatever user needs"}} or null,
-    "query_type": "reminders" | "birthdays" | "events" | "all" or null
+    "query_type": "reminders" | "birthdays" | "events" | "channel_restriction" | "all" or null
 }}
 
 CHANNEL ACTION RULES:
@@ -8036,6 +8052,10 @@ CRITICAL FOR STORE_MEMORY:
   * "store weekly message every Monday" → memory_type: "schedule", memory_data: {{"frequency": "weekly", "day": "Monday", "type": "message"}}
   * "save hourly reminder" → memory_type: "reminder", memory_data: {{"frequency": "hourly"}}
   * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
+  * "ONLY respond in #general" or "only respond in general" → memory_type: "channel_restriction", memory_data: {{"type": "only", "channel_id": "[ID]", "channel_name": "general"}}
+  * "DONT respond in #bot" or "don't respond in #bot" or "never respond in bot" → memory_type: "channel_restriction", memory_data: {{"type": "forbidden", "channel_id": "[ID]", "channel_name": "bot"}}
+  * Multiple channels: "only respond in #general and #announcements" → multiple channel_restriction entries
+  * Multiple forbidden: "dont respond in #bot or #spam" → multiple channel_restriction entries
   * Store in whatever structure makes sense - be flexible and dynamic!
 
 REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
@@ -8064,6 +8084,22 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * "schedule": {{"interval_seconds": X}} or "interval_seconds": X in memory_data
   * "recurrence_count": N (if limited) or null/omit for infinite
   * "message_template": "AI-generated message to reuse" (code will reuse this, no AI needed after first time)
+- CRITICAL: DYNAMIC REMINDERS - Store data in server_memory and link it to reminder:
+  * When creating a reminder that needs dynamic data (events, contests, random picks, multi-channel posts, etc.), store the data in server_memory FIRST
+  * The reminder system will automatically link to the memory using memory_key and memory_type
+  * You can update the memory anytime - the reminder will use the LATEST data when it fires
+  * Example: "in 2 minutes pick a random member to win in #announcements"
+    → Store in memory: {{"winners": [], "channel_id": "...", "action": "pick_random_winner", "guild_id": "..."}}
+    → Create reminder with same memory_key - reminder will read latest data at delivery time
+  * Example: "in 2 minutes event in #channel1 and #channel2, each has different attendees"
+    → Store in memory: {{"channels": [{{"id": "...", "attendees": [...]}}, {{"id": "...", "attendees": [...]}}]}}
+    → Reminder reads this and posts to each channel with its attendees
+  * Example: "in 3 minutes announce winner in #announcements, winner is stored in memory"
+    → Store winner in memory with memory_key="contest_winner"
+    → Create reminder with metadata: {{"memory_key": "contest_winner", "memory_type": "contest"}}
+    → When reminder fires, it loads latest winner from memory
+  * YOU HAVE FULL FREEDOM - structure the data however makes sense for the user's request
+  * The code will automatically read user_mentions, attendees, winners, participants, members, users, etc. from your memory structure
 - CRITICAL: If user wants to post content to another channel (e.g., "post 2 photos in #channel", "every 2 minutes post a random photo in #memes"):
   * You MUST generate the content (images, screenshots, etc.) FIRST, then include "channel_actions" in your discord_command response
   * The channel_actions will automatically receive any files/images you generate - they will be posted to the target channel
@@ -8585,6 +8621,7 @@ async def run_server_automation_scheduler():
 async def _deliver_native_reminder(reminder: dict):
     """Send a reminder message to the appropriate channel or user (supports recurring and message templates)."""
     reminder_id = reminder.get('id')
+    guild_id = reminder.get('guild_id')
     
     # Use message template if available, otherwise use reminder_text
     message_template = reminder.get('message_template')
@@ -8596,6 +8633,18 @@ async def _deliver_native_reminder(reminder: dict):
     target_role_id = _extract_numeric_id(reminder.get('target_role_id'))
     requester_id = _extract_numeric_id(reminder.get('user_id'))
     mention_everyone = reminder.get('mention_everyone', False)
+    
+    # DYNAMIC MEMORY LOADING: Check if reminder has linked memory_key - load latest data at delivery time
+    # This makes reminders fully dynamic - AI can update memory anytime, reminder uses latest data
+    reminder_metadata = reminder.get('metadata')
+    if isinstance(reminder_metadata, str):
+        try:
+            reminder_metadata = json.loads(reminder_metadata)
+        except:
+            reminder_metadata = {}
+    
+    memory_key = reminder_metadata.get('memory_key')
+    memory_type_from_meta = reminder_metadata.get('memory_type')
     
     # Build mentions from stored lists or individual IDs
     mention_parts = []
@@ -8617,7 +8666,106 @@ async def _deliver_native_reminder(reminder: dict):
                 if role_mention and role_mention not in mention_parts:
                     mention_parts.append(role_mention)
     
-    # Add user mentions from stored list
+    # DYNAMIC: Load latest data from linked memory if available
+    # AI can structure data however it wants - code just reads and executes
+    if memory_key and guild_id:
+        try:
+            # Load the memory entry linked to this reminder
+            linked_memory = await memory.get_server_memory(
+                guild_id, 
+                memory_type=memory_type_from_meta, 
+                memory_key=memory_key
+            )
+            
+            if linked_memory:
+                # Handle both dict and list responses
+                if isinstance(linked_memory, list):
+                    linked_memory = linked_memory[0] if linked_memory else None
+                
+                if linked_memory:
+                    memory_data_current = linked_memory.get('memory_data', {})
+                    if isinstance(memory_data_current, str):
+                        try:
+                            memory_data_current = json.loads(memory_data_current)
+                        except:
+                            memory_data_current = {}
+                    
+                    # Extract ANY user mentions from current memory (AI can structure however it wants)
+                    # Check common field names but be flexible
+                    dynamic_user_mentions = (
+                        memory_data_current.get('user_mentions') or
+                        memory_data_current.get('attendees') or
+                        memory_data_current.get('registered_users') or
+                        memory_data_current.get('participants') or
+                        memory_data_current.get('winners') or
+                        memory_data_current.get('members') or
+                        memory_data_current.get('users') or
+                        []
+                    )
+                    
+                    # Handle different formats
+                    if isinstance(dynamic_user_mentions, str):
+                        try:
+                            dynamic_user_mentions = json.loads(dynamic_user_mentions)
+                        except:
+                            dynamic_user_mentions = [a.strip() for a in dynamic_user_mentions.split(',') if a.strip()]
+                    
+                    if dynamic_user_mentions:
+                        # Convert all mentions to proper format
+                        for mention_item in dynamic_user_mentions:
+                            if not mention_item:
+                                continue
+                            
+                            mention_str = None
+                            if isinstance(mention_item, dict):
+                                user_id = mention_item.get('user_id') or mention_item.get('id') or mention_item.get('user')
+                                if user_id:
+                                    mention_str = f"<@{user_id}>"
+                            elif isinstance(mention_item, str):
+                                if mention_item.startswith('<@'):
+                                    mention_str = mention_item
+                                else:
+                                    user_id_match = re.search(r'\d+', mention_item)
+                                    if user_id_match:
+                                        mention_str = f"<@{user_id_match.group(0)}>"
+                            elif isinstance(mention_item, (int, float)):
+                                mention_str = f"<@{int(mention_item)}>"
+                            
+                            if mention_str and mention_str not in mention_parts:
+                                mention_parts.append(mention_str)
+                    
+                    # Update message_template from current memory if AI updated it
+                    updated_template = (
+                        memory_data_current.get('message_template') or
+                        memory_data_current.get('template') or
+                        memory_data_current.get('message')
+                    )
+                    if updated_template and updated_template != message_content:
+                        message_content = updated_template
+                    
+                    # Update role mentions from current memory
+                    dynamic_role_mentions = memory_data_current.get('role_mentions')
+                    if dynamic_role_mentions:
+                        if isinstance(dynamic_role_mentions, str):
+                            try:
+                                dynamic_role_mentions = json.loads(dynamic_role_mentions)
+                            except:
+                                dynamic_role_mentions = [dynamic_role_mentions]
+                        if isinstance(dynamic_role_mentions, list):
+                            for role_mention in dynamic_role_mentions:
+                                if role_mention and role_mention not in mention_parts:
+                                    mention_parts.append(role_mention)
+                    
+                    # Update mention_everyone from current memory
+                    if memory_data_current.get('mention_everyone') and "@everyone" not in mention_parts:
+                        mention_parts.insert(0, "@everyone")
+                    
+        except Exception as e:
+            print(f"⚠️  [REMINDERS] Error loading linked memory for reminder {reminder_id}: {e}")
+            import traceback
+            print(f"⚠️  [REMINDERS] Traceback: {traceback.format_exc()}")
+    
+    # Add user mentions from stored list (fallback/backward compatibility)
     user_mentions = reminder.get('user_mentions')
     if user_mentions:
         if isinstance(user_mentions, str):
@@ -8627,8 +8775,22 @@ async def _deliver_native_reminder(reminder: dict):
                 user_mentions = [user_mentions]
         if isinstance(user_mentions, list):
             for user_mention in user_mentions:
-                if user_mention and user_mention not in mention_parts:
-                    mention_parts.append(user_mention)
+                if user_mention:
+                    # Convert to mention format if needed
+                    if isinstance(user_mention, dict):
+                        user_id = user_mention.get('user_id') or user_mention.get('id')
+                        if user_id:
+                            user_mention = f"<@{user_id}>"
+                        else:
+                            continue
+                    elif not user_mention.startswith('<@'):
+                        # Try to extract ID if it's a string
+                        user_id_match = re.search(r'\d+', str(user_mention))
+                        if user_id_match:
+                            user_mention = f"<@{user_id_match.group(0)}>"
+                    
+                    if user_mention and user_mention not in mention_parts:
+                        mention_parts.append(user_mention)
     
     # Add individual target IDs (backward compatibility) - but only if not already in message_content
     # Check if message_content already contains these mentions to avoid duplicates
@@ -9027,17 +9189,22 @@ SLASH COMMANDS AVAILABLE:
   - When to use: When someone asks "where's your website?", "what's your website?", "show me your site", or wants to learn more about ServerMate online
 
 CRITICAL - COMMAND ACCURACY:
-- The slash commands that exist are: `/profile`, `/help`, `/stop`, and `/website`. DO NOT invent or mention any others.
+- The slash commands that exist are: `/profile`, `/help`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website`. DO NOT invent or mention any others.
 - You MUST know what each command does:
   - `/profile` = Shows personality profile/memory data (summary, history, interests, communication style, impressions, patterns)
   - `/help` = Shows help embed with how to use the bot, capabilities list, commands, and examples
+  - `/reminder` = View active reminders for the current server (user's reminders only)
+  - `/channelrules` = View channel restrictions (where I can/can't respond) for the current server
+  - `/servermemory [type] [limit]` = View stored server-wide memory entries (reminders, events, policies) for this guild
   - `/stop` = Stops your current in-progress response or automation (ONLY for your prompts)
   - `/website` = Opens an embed with link to the ServerMate website
 - If someone asks "how do I view my memory?", "how can I see what you remember about me?", "what do you know about me?", tell them to use `/profile` to view their memory/profile.
 - If someone asks "how do I get help?", "how do I use you?", "what commands are available?", "what can you do?", tell them to use `/help` to see the help information.
+- If someone asks "what reminders do I have?" or "show my reminders", tell them to use `/reminder` to view their active reminders.
+- If someone asks "where can you respond?" or "what channel restrictions do you have?", tell them to use `/channelrules` to view channel restrictions.
 - If someone asks "how do I stop you" or "cancel this" or "you're stuck", tell them to use `/stop` to cancel their current request.
 - If someone asks "where's your website?" or "what's your website?", tell them to use `/website` to get a link to the ServerMate website.
-- If someone asks "what commands do you have?", mention `/profile`, `/help`, `/stop`, and `/website` and explain what each does.
+- If someone asks "what commands do you have?", mention `/profile`, `/help`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website` and explain what each does.
 - DO NOT invent or mention commands like `/memory`, `/remember`, `/forget`, `/stats`, `/imagine`, or any other commands that don't exist.
 
 Examples of correct responses:
@@ -9417,8 +9584,57 @@ CURRENT CONVERSATION CONTEXT:
                             else:
                                 discord_command_result = "You have no active reminders. Use /reminder to manage reminders."
                         
-                        # Only check server memories if NOT querying reminders (reminders come from database only)
-                        if query_type not in ['reminders', 'reminder']:
+                        # Handle channel_restriction queries
+                        if query_type == 'channel_restriction':
+                            restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
+                            if restrictions:
+                                if isinstance(restrictions, dict):
+                                    restrictions = [restrictions]
+                                
+                                only_channels = []
+                                forbidden_channels = []
+                                
+                                for restriction in restrictions:
+                                    restriction_data = restriction.get('memory_data', {})
+                                    if isinstance(restriction_data, str):
+                                        try:
+                                            restriction_data = json.loads(restriction_data)
+                                        except:
+                                            continue
+                                    
+                                    restriction_type = restriction_data.get('type')
+                                    restriction_channel_name = restriction_data.get('channel_name', 'Unknown')
+                                    
+                                    # Try to get actual channel name
+                                    restriction_channel_id = restriction_data.get('channel_id')
+                                    if restriction_channel_id:
+                                        try:
+                                            channel = message.guild.get_channel(int(restriction_channel_id)) if message.guild else None
+                                            if channel:
+                                                restriction_channel_name = channel.name
+                                        except:
+                                            pass
+                                    
+                                    if restriction_type == "only":
+                                        only_channels.append(f"#{restriction_channel_name}")
+                                    elif restriction_type == "forbidden":
+                                        forbidden_channels.append(f"#{restriction_channel_name}")
+                                
+                                response_parts = []
+                                if only_channels:
+                                    response_parts.append(f"✅ **Only respond in:** {', '.join(only_channels)}")
+                                if forbidden_channels:
+                                    response_parts.append(f"🚫 **Never respond in:** {', '.join(forbidden_channels)}")
+                                
+                                if response_parts:
+                                    discord_command_result = "🚫 Channel Restrictions:\n" + "\n".join(response_parts) + "\n\nUse `/channelrules` to view all restrictions."
+                                else:
+                                    discord_command_result = "No channel restrictions are set. Use `/channelrules` to view restrictions."
+                            else:
+                                discord_command_result = "No channel restrictions are set. Use `/channelrules` to view restrictions."
+                        
+                        # Only check server memories if NOT querying reminders or channel_restrictions (reminders come from database only, channel_restrictions handled above)
+                        if query_type not in ['reminders', 'reminder', 'channel_restriction']:
                             memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
                             if memories:
                                 if isinstance(memories, dict):
@@ -12364,6 +12580,60 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
     
+    # Check channel restrictions (if in a guild)
+    if message.guild:
+        guild_id = str(message.guild.id)
+        channel_id = str(message.channel.id) if message.channel else None
+        try:
+            # Get channel restrictions for this server
+            restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
+            if restrictions:
+                if isinstance(restrictions, dict):
+                    restrictions = [restrictions]
+                
+                # Check if current channel is forbidden
+                for restriction in restrictions:
+                    restriction_data = restriction.get('memory_data', {})
+                    if isinstance(restriction_data, str):
+                        try:
+                            import json
+                            restriction_data = json.loads(restriction_data)
+                        except:
+                            continue
+                    
+                    restriction_type = restriction_data.get('type')
+                    restriction_channel_id = restriction_data.get('channel_id')
+                    
+                    if restriction_type == "forbidden" and restriction_channel_id == channel_id:
+                        # This channel is forbidden - don't respond
+                        print(f"🚫 [{message.author.display_name}] Channel restriction: Not responding in #{message.channel.name} (forbidden)")
+                        return
+                
+                # Check if we can ONLY respond in specific channels
+                only_channels = []
+                for restriction in restrictions:
+                    restriction_data = restriction.get('memory_data', {})
+                    if isinstance(restriction_data, str):
+                        try:
+                            import json
+                            restriction_data = json.loads(restriction_data)
+                        except:
+                            continue
+                    
+                    restriction_type = restriction_data.get('type')
+                    restriction_channel_id = restriction_data.get('channel_id')
+                    
+                    if restriction_type == "only" and restriction_channel_id:
+                        only_channels.append(restriction_channel_id)
+                
+                # If "only" restrictions exist and current channel is not in the list, don't respond
+                if only_channels and channel_id not in only_channels:
+                    print(f"🚫 [{message.author.display_name}] Channel restriction: Not responding in #{message.channel.name} (only allowed in {len(only_channels)} other channel(s))")
+                    return
+        except Exception as restriction_error:
+            print(f"⚠️  Error checking channel restrictions: {restriction_error}")
+            # Continue processing if restriction check fails
+    
     # Check if server is banned (if in a guild)
     if message.guild:
         guild_id = str(message.guild.id)
@@ -13523,6 +13793,7 @@ async def help_command(interaction: discord.Interaction):
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
             "`/reminder` - View your active reminders for this server\n"
+            "`/channelrules` - View channel restrictions (where I can/can't respond)\n"
             "`/servermemory [type] [limit]` - Inspect stored server reminders/rules\n"
             "`/stop` - Stop my current response or automation for you\n"
             "`/website` - Visit the ServerMate website"
@@ -13640,6 +13911,101 @@ async def reminder_command(interaction: discord.Interaction):
         import traceback
         print(f"Error in reminder command: {e}\n{traceback.format_exc()}")
         await interaction.followup.send(f"Error retrieving reminders: {e}", ephemeral=True)
+
+@bot.tree.command(name='channelrules', description='View channel restrictions for this server')
+async def channelrules_command(interaction: discord.Interaction):
+    """Slash command to view channel restrictions (where bot can/can't respond)"""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild.id)
+    
+    try:
+        # Get channel restrictions for this server
+        restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
+        if not restrictions:
+            await interaction.followup.send(
+                "No channel restrictions are set for this server.\n\n"
+                "To set restrictions, mention me and say:\n"
+                "`@ServerMate ONLY respond in #general`\n"
+                "`@ServerMate DONT respond in #bot`",
+                ephemeral=True
+            )
+            return
+        
+        if isinstance(restrictions, dict):
+            restrictions = [restrictions]
+        
+        bot_name = os.getenv('BOT_NAME', 'ServerMate').title()
+        embed = discord.Embed(
+            title=f"🚫 {bot_name} Channel Restrictions",
+            description=f"This server has {len(restrictions)} channel restriction{'s' if len(restrictions) != 1 else ''}:",
+            color=0x5865F2
+        )
+        
+        only_channels = []
+        forbidden_channels = []
+        
+        for restriction in restrictions[:20]:  # Limit to 20
+            restriction_data = restriction.get('memory_data', {})
+            if isinstance(restriction_data, str):
+                try:
+                    import json
+                    restriction_data = json.loads(restriction_data)
+                except:
+                    continue
+            
+            restriction_type = restriction_data.get('type')
+            restriction_channel_id = restriction_data.get('channel_id')
+            restriction_channel_name = restriction_data.get('channel_name', 'Unknown')
+            
+            # Try to get actual channel name
+            try:
+                channel = interaction.guild.get_channel(int(restriction_channel_id)) if restriction_channel_id else None
+                if channel:
+                    restriction_channel_name = channel.name
+            except:
+                pass
+            
+            if restriction_type == "only":
+                only_channels.append(f"#{restriction_channel_name}")
+            elif restriction_type == "forbidden":
+                forbidden_channels.append(f"#{restriction_channel_name}")
+        
+        if only_channels:
+            embed.add_field(
+                name="✅ Only Respond In",
+                value="\n".join(only_channels) if only_channels else "None",
+                inline=False
+            )
+        
+        if forbidden_channels:
+            embed.add_field(
+                name="🚫 Never Respond In",
+                value="\n".join(forbidden_channels) if forbidden_channels else "None",
+                inline=False
+            )
+        
+        if not only_channels and not forbidden_channels:
+            embed.add_field(
+                name="ℹ️ No Active Restrictions",
+                value="No channel restrictions are currently active.",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="💡 Tip",
+            value="To set restrictions, mention me and say:\n`@ServerMate ONLY respond in #channel`\n`@ServerMate DONT respond in #channel`",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        import traceback
+        print(f"Error in channelrules command: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send(f"Error retrieving channel restrictions: {e}", ephemeral=True)
 
 @bot.tree.command(name='servermemory', description='View stored server-wide memory entries')
 @app_commands.describe(memory_type='Filter by memory type (optional)', limit='Number of entries to show (1-20)')
