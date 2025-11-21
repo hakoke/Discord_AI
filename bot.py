@@ -10324,9 +10324,11 @@ Screenshot {idx + 1}:"""
                 print(f"📸 [{username}] Removed {removed_profiles} profile picture asset(s) (not requested)")
                 image_parts = filtered_profile_parts
                 if not image_parts:
-                    wants_image = False
+                    # Only disable edit/analysis if no images (they need images to work)
+                    # DON'T disable generation - it creates NEW images, doesn't need existing ones!
                     wants_image_edit = False
                     wants_image_analysis = False
+                    print(f"📸 [{username}] No image parts after filtering - disabled edit/analysis, but keeping generation enabled")
 
         # If no image analysis/edit/generation is needed and there are no fresh screenshots,
         # drop Discord visual assets from the vision payload to prevent irrelevant profile picture chatter.
