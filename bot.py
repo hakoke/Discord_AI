@@ -9315,12 +9315,9 @@ CURRENT CONVERSATION CONTEXT:
                                 # Only show countdown timer for one-time reminders (not recurring)
                                 time_hint = ""
                                 if not is_recurring:
-                                    # Use current time for timestamp to ensure accurate countdown
-                                    now_for_timestamp = datetime.now(timezone.utc)
-                                    time_until_trigger = (trigger_at - now_for_timestamp).total_seconds()
-                                    # Create a timestamp that's exactly time_until_trigger seconds from now
-                                    accurate_trigger_time = now_for_timestamp + timedelta(seconds=time_until_trigger)
-                                    time_hint = f" {discord.utils.format_dt(_aware_utc(accurate_trigger_time), style='R')}" if accurate_trigger_time else " soon"
+                                    # Use trigger_at directly - it's already the correct future time
+                                    # Discord will calculate the countdown from when the message is sent
+                                    time_hint = f" {discord.utils.format_dt(_aware_utc(trigger_at), style='R')}" if trigger_at else " soon"
                                 
                                 recurring_info = ""
                                 if is_recurring:
