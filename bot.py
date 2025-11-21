@@ -350,9 +350,11 @@ REMINDERS & EVENTS - CRITICAL RULES:
 - When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store the data in memory.
 - When user says "in X minutes post..." or "remind me to..." - DO NOT use channel_actions. Create a reminder instead.
 - channel_actions are ONLY for immediate posting. For future posting, always use reminders.
-- When creating reminders with dynamic actions (pick random, etc.), store participants/attendees in memory with action="pick_random_winner" or similar.
-- The code will execute the action when the reminder fires - you just need to structure the data correctly.
-- Generate proper message templates - don't use placeholders. The code will handle dynamic actions automatically.
+- YOU ARE RESPONSIBLE FOR ALL LOGIC: If user wants random winner, YOU pick random NOW and format the FINAL message with actual winner ID (e.g., <@123456789>), NOT placeholders like <@winner>.
+- Store the COMPLETE, FINAL message in message_template - with all actual user IDs, all actual mentions, everything formatted.
+- If data changes (new participant added), YOU pick a NEW random winner and update message_template with the new winner's actual ID.
+- The code is a dumb messenger - it sends whatever you store. If you store "<@winner>", it will send that literally.
+- CRITICAL: NO PLACEHOLDERS - use actual Discord user mentions like <@123456789>, not <@winner> or <participants>.
 
 TONE
 - Warm, encouraging, lightly humorous when appropriate.
@@ -8102,17 +8104,22 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * You can update the memory anytime - the reminder will use the LATEST data when it fires
   * PURE AI-DRIVEN: You have COMPLETE freedom. The code just executes what you store - zero hardcoding.
   * Example: "in 2 minutes pick a random member to win in #announcements"
-    → YOU decide: Store participants, pick random, format message, store final message_template
-    → Store in memory: {{"participants": ["<@user1>", "<@user2>"], "channel_id": "...", "message_template": "🎉 Winner: <@picked_user>! Participants: <@user1> <@user2>", "guild_id": "..."}}
+    → YOU decide: Store participants, pick random RIGHT NOW, format FINAL message with actual winner, store final message_template
+    → Pick random: Let's say <@user2> wins
+    → Store in memory: {{"participants": ["<@user1>", "<@user2>"], "channel_id": "...", "message_template": "🎉 Winner: <@user2>! Participants: <@user1> <@user2>", "guild_id": "..."}}
     → Create reminder with same memory_key and metadata: {{"memory_key": "contest_key", "memory_type": "contest"}}
-    → When reminder fires, code just sends your message_template - YOU already did all the logic
+    → When reminder fires, code just sends your message_template - YOU already picked winner and formatted message
+    → CRITICAL: If user adds more participants later, YOU pick a NEW random winner and update message_template with the new winner
   * Example: "in 5 minutes announce birthday for <@user>"
     → YOU format the message: Store {{"message_template": "🎂 Happy Birthday <@user>! 🎉", "channel_id": "..."}}
     → Code just sends it - YOU decided everything
   * YOU DO EVERYTHING: Pick random, format messages, structure data, decide mentions - ALL of it
   * YOU UPDATE message_template: If data changes, update the template in memory - code uses latest version
   * The code is a dumb executor - it reads message_template and sends it. That's it. Zero logic.
-  * NO PLACEHOLDERS: Store the FINAL message in message_template. If you want dynamic data, update the template when data changes.
+  * NO PLACEHOLDERS: Store the FINAL message in message_template with ACTUAL values.
+  * If user wants random winner: YOU pick random NOW (e.g., <@123456789>), format "🎉 Winner: <@123456789>! Participants: <@111> <@222>", store that.
+  * DO NOT store "<@winner>" or "<participants>" - the code will send that literally. Use actual Discord mentions like <@123456789>.
+  * If data changes, YOU update message_template with new actual values.
   * Example: "in 2 minutes event in #channel1 and #channel2, each has different attendees"
     → Store in memory: {{"channels": [{{"id": "...", "attendees": [...]}}, {{"id": "...", "attendees": [...]}}]}}
     → Reminder reads this and posts to each channel with its attendees
@@ -8122,9 +8129,11 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
     * If data changes (e.g., new participant added), YOU update the message_template in memory
     * The code just sends whatever message_template is in memory at delivery time - zero processing
     * Examples:
-      - Random winner: YOU pick random, format "🎉 Winner: <@123>! Participants: <@123> <@456>", store that
-      - Birthday: YOU format "🎂 Happy Birthday <@user>! 🎉", store that
-      - Event: YOU format the message with all attendees, store that
+      - Random winner: YOU pick random NOW (e.g., <@123>), format "🎉 Winner: <@123>! Participants: <@123> <@456>", store that EXACT message
+      - Birthday: YOU format "🎂 Happy Birthday <@user123>! 🎉" with actual user ID, store that
+      - Event: YOU format the message with all actual attendee mentions, store that
+    * CRITICAL: NO PLACEHOLDERS LIKE <winner> OR <participants> - USE ACTUAL VALUES: <@123456789>, <@987654321>, etc.
+    * If you store "<@winner>" or "<participants>", the code will send that literally - it's just a messenger
     * YOU are in control - the code is just a messenger
   * CRITICAL: When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store memory. Only send when they say "post now" or when reminder fires.
   * YOU HAVE FULL FREEDOM - structure the data however makes sense for the user's request
@@ -8659,12 +8668,6 @@ async def _deliver_native_reminder(reminder: dict):
     reminder_text = reminder.get('reminder_text') or "Reminder"
     message_content = message_template if message_template else reminder_text
     
-    channel_id = _extract_numeric_id(reminder.get('channel_id'))
-    target_user_id = _extract_numeric_id(reminder.get('target_user_id'))
-    target_role_id = _extract_numeric_id(reminder.get('target_role_id'))
-    requester_id = _extract_numeric_id(reminder.get('user_id'))
-    mention_everyone = reminder.get('mention_everyone', False)
-    
     # DYNAMIC MEMORY LOADING: Check if reminder has linked memory_key - load latest data at delivery time
     # This makes reminders fully dynamic - AI can update memory anytime, reminder uses latest data
     reminder_metadata = reminder.get('metadata')
@@ -8676,6 +8679,13 @@ async def _deliver_native_reminder(reminder: dict):
     
     memory_key = reminder_metadata.get('memory_key')
     memory_type_from_meta = reminder_metadata.get('memory_type')
+    
+    # Load channel_id from reminder first, but override with linked memory if available
+    channel_id = _extract_numeric_id(reminder.get('channel_id'))
+    target_user_id = _extract_numeric_id(reminder.get('target_user_id'))
+    target_role_id = _extract_numeric_id(reminder.get('target_role_id'))
+    requester_id = _extract_numeric_id(reminder.get('user_id'))
+    mention_everyone = reminder.get('mention_everyone', False)
     
     # Build mentions from stored lists or individual IDs
     mention_parts = []
@@ -8775,6 +8785,10 @@ async def _deliver_native_reminder(reminder: dict):
                     if updated_template:
                         message_content = updated_template
                     
+                    # Update channel_id from linked memory if available (AI might have updated it)
+                    memory_channel_id = _extract_numeric_id(memory_data_current.get('channel_id') or memory_data_current.get('winner_channel_id') or memory_data_current.get('target_channel_id'))
+                    if memory_channel_id:
+                        channel_id = memory_channel_id
                     
                     # Update role mentions from current memory
                     dynamic_role_mentions = memory_data_current.get('role_mentions')
