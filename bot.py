@@ -12764,7 +12764,8 @@ Response: """
                             await message.channel.send(confirmation, reference=message)
                         except Exception as confirm_error:
                             print(f"⚠️  [{message.author.display_name}] Error sending confirmation: {confirm_error}")
-                    else:
+                        # Don't send another message - confirmation was already sent, files already went to target channel
+                    elif not files_sent_to_channels:
                         # Normal flow: send full response (with files if not sent to channel_actions)
                         # Split long responses
                         if len(response) > 2000:
