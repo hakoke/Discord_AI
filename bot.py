@@ -968,6 +968,9 @@ async def search_images(query: str, num: int = 10) -> List[Dict[str, str]]:
 
 async def generate_image(prompt: str, num_images: int = 1) -> list:
     """Generate images using Imagen 3.0 via Vertex AI (queued for rate limiting)"""
+    print(f"🚀 [IMAGE GEN] generate_image() called with prompt: '{prompt[:100]}...', num_images: {num_images}")
+    print(f"🚀 [IMAGE GEN] IMAGEN_AVAILABLE = {IMAGEN_AVAILABLE}")
+    
     if not IMAGEN_AVAILABLE:
         print(f"⚠️  [IMAGE GEN] Imagen not available, skipping image generation")
         return None
@@ -975,6 +978,7 @@ async def generate_image(prompt: str, num_images: int = 1) -> list:
     try:
         print(f"🚀 [IMAGE GEN] Queuing image generation request through Flash queue...")
         api_queue = _get_api_queue('gemini-2.0-flash')
+        print(f"🚀 [IMAGE GEN] Got API queue, executing _generate_image_sync...")
         result = await api_queue.execute(_generate_image_sync, prompt, num_images)
         print(f"🏁 [IMAGE GEN] ✅ Image generation completed, result type: {type(result)}")
         if result:
@@ -10713,14 +10717,21 @@ Return ONLY the JSON object, nothing else:"""
             image_search_time = time.time() - image_search_start
             print(f"⏱️  [{username}] Image search completed in {image_search_time:.2f}s, found {len(image_search_results)} total images from {len(search_queries)} search(es)")
             
-            # If image search was performed, disable image generation (user wants search, not generation)
+            # If image search was performed, disable image generation ONLY if user explicitly wanted search
+            # If user wanted generation (wants_image=True) but search was also performed, keep wants_image=True
             if image_search_results:
-                print(f"🔍 [{username}] Image search found results - disabling image generation (user wants search, not generation)")
-                wants_image = False
+                if wants_image_search:
+                    print(f"🔍 [{username}] Image search found results - user wanted search, disabling image generation")
+                    wants_image = False
+                else:
+                    print(f"🔍 [{username}] Image search found results but user wants GENERATION (not search) - keeping wants_image=True")
             else:
-                # Image search was attempted but found no results - still disable generation and let AI inform user
-                print(f"⚠️  [{username}] Image search found no results - disabling image generation, AI will inform user")
-                wants_image = False
+                # Image search was attempted but found no results
+                if wants_image_search:
+                    print(f"⚠️  [{username}] Image search found no results - user wanted search, disabling generation, AI will inform user")
+                    wants_image = False
+                else:
+                    print(f"⚠️  [{username}] Image search found no results but user wants GENERATION - keeping wants_image=True")
         
         # Call decide_if_search_needed() and ensure we NEVER return its result directly
         if search_decision_override is not None:
@@ -11842,22 +11853,40 @@ Now decide: "{message.content}" -> """
                 import traceback
                 print(f"❌ [IMAGE EDIT] Traceback:\n{traceback.format_exc()}")
                 ai_response += "\n\n(Tried to edit your image but something went wrong)"
-        elif wants_image and not image_search_results:
-            # Generate new image (only if we're not using image search results)
+        elif wants_image and not (image_search_results and wants_image_search):
+            # Generate new image (only if user wants generation, not if they wanted search)
+            # If user wanted search and got results, skip generation
+            # If user wanted generation, generate even if search was also performed
+            print(f"🎨 [{username}] Entering image generation block: wants_image={wants_image}, image_search_results={len(image_search_results) if image_search_results else 0}, wants_image_search={wants_image_search}")
             try:
                 # Extract the prompt from the message
                 image_prompt = message.content
+                print(f"🎨 [{username}] Original prompt: '{image_prompt[:100]}...'")
                 # Clean up common trigger words to get the actual prompt
                 for trigger in ['generate', 'create', 'make me', 'draw', 'image', 'picture', 'photo']:
                     image_prompt = image_prompt.replace(trigger, '').strip()
                 
+                print(f"🎨 [{username}] Cleaned prompt: '{image_prompt[:100]}...' (length: {len(image_prompt)})")
+                
                 if len(image_prompt) > 10:  # Make sure there's an actual prompt
+                    print(f"🎨 [{username}] Prompt is valid (>10 chars), proceeding with image generation...")
                     requested_count = await ai_decide_image_count(message)
+                    print(f"🎨 [{username}] Requested image count: {requested_count}")
+                    print(f"🎨 [{username}] Calling generate_image() with prompt: '{image_prompt[:100]}...'")
                     generated_images = await generate_image(image_prompt, num_images=requested_count)
+                    print(f"🎨 [{username}] generate_image() returned: {type(generated_images)}, value: {generated_images}")
+                    if generated_images:
+                        print(f"🎨 [{username}] ✅ Successfully generated {len(generated_images)} image(s)")
+                    else:
+                        print(f"🎨 [{username}] ⚠️  generate_image() returned None/empty")
                     # Don't add "Generated image" text - images will be attached to the message automatically
                     # User can see the images directly, no need for extra text
+                else:
+                    print(f"🎨 [{username}] ⚠️  Prompt too short ({len(image_prompt)} chars), skipping generation")
             except Exception as e:
-                print(f"Image generation error: {e}")
+                print(f"❌ [{username}] Image generation error: {e}")
+                import traceback
+                print(f"❌ [{username}] Image generation traceback:\n{traceback.format_exc()}")
                 error_str = str(e).lower()
                 # Provide user-friendly message for content policy violations
                 if any(keyword in error_str for keyword in [
