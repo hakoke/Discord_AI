@@ -11796,6 +11796,14 @@ Now decide: "{message.content}" -> """
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
         
+        # DEBUG: Log state before image generation/edit check
+        print(f"🔍 [{username}] DEBUG image generation/edit state:")
+        print(f"🔍 [{username}]   - wants_image_edit: {wants_image_edit}")
+        print(f"🔍 [{username}]   - wants_image: {wants_image}")
+        print(f"🔍 [{username}]   - image_search_results: {len(image_search_results) if image_search_results else 0}")
+        print(f"🔍 [{username}]   - wants_image_search: {wants_image_search}")
+        print(f"🔍 [{username}]   - image_parts: {len(image_parts)}")
+        
         print(f"🔍 [{username}] Checking image edit: wants_image_edit={wants_image_edit}, image_parts={len(image_parts)}")
         if wants_image_edit:
             print(f"🛠️  [{username}] Image edit requested. Message: {message.content}")
@@ -11857,7 +11865,15 @@ Now decide: "{message.content}" -> """
             # Generate new image (only if user wants generation, not if they wanted search)
             # If user wanted search and got results, skip generation
             # If user wanted generation, generate even if search was also performed
-            print(f"🎨 [{username}] Entering image generation block: wants_image={wants_image}, image_search_results={len(image_search_results) if image_search_results else 0}, wants_image_search={wants_image_search}")
+            
+            # DEBUG: Log state before image generation
+            print(f"🔍 [{username}] DEBUG before image generation check:")
+            print(f"🔍 [{username}]   - wants_image_edit: {wants_image_edit}")
+            print(f"🔍 [{username}]   - wants_image: {wants_image}")
+            print(f"🔍 [{username}]   - image_search_results: {len(image_search_results) if image_search_results else 0}")
+            print(f"🔍 [{username}]   - wants_image_search: {wants_image_search}")
+            print(f"🔍 [{username}]   - Condition check: wants_image={wants_image}, not (image_search_results and wants_image_search)={not (image_search_results and wants_image_search)}")
+            print(f"🎨 [{username}] ✅ Entering image generation block: wants_image={wants_image}, image_search_results={len(image_search_results) if image_search_results else 0}, wants_image_search={wants_image_search}")
             try:
                 # Extract the prompt from the message
                 image_prompt = message.content
