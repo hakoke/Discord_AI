@@ -9299,15 +9299,21 @@ CURRENT CONVERSATION CONTEXT:
                                 metadata=reminder_payload.get('metadata')
                             )
                             if reminder_id:
-                                # Use current time for timestamp to ensure accurate countdown
-                                now_for_timestamp = datetime.now(timezone.utc)
-                                time_until_trigger = (trigger_at - now_for_timestamp).total_seconds()
-                                # Create a timestamp that's exactly time_until_trigger seconds from now
-                                accurate_trigger_time = now_for_timestamp + timedelta(seconds=time_until_trigger)
-                                time_hint = discord.utils.format_dt(_aware_utc(accurate_trigger_time), style='R') if accurate_trigger_time else "soon"
                                 channel_info = f" in <#{channel_id_for_reminder}>" if channel_id_for_reminder else ""
+                                is_recurring = reminder_payload.get('is_recurring', False)
+                                
+                                # Only show countdown timer for one-time reminders (not recurring)
+                                time_hint = ""
+                                if not is_recurring:
+                                    # Use current time for timestamp to ensure accurate countdown
+                                    now_for_timestamp = datetime.now(timezone.utc)
+                                    time_until_trigger = (trigger_at - now_for_timestamp).total_seconds()
+                                    # Create a timestamp that's exactly time_until_trigger seconds from now
+                                    accurate_trigger_time = now_for_timestamp + timedelta(seconds=time_until_trigger)
+                                    time_hint = f" {discord.utils.format_dt(_aware_utc(accurate_trigger_time), style='R')}" if accurate_trigger_time else " soon"
+                                
                                 recurring_info = ""
-                                if reminder_payload.get('is_recurring'):
+                                if is_recurring:
                                     interval = reminder_payload.get('recurrence_interval_seconds', 0)
                                     if interval:
                                         if interval < 60:
@@ -9321,10 +9327,11 @@ CURRENT CONVERSATION CONTEXT:
                                             recurring_info += f", {count} times)"
                                         else:
                                             recurring_info += ", indefinitely)"
+                                
                                 if not discord_command_result:
-                                    discord_command_result = f"✅ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
+                                    discord_command_result = f"✅ Reminder scheduled{channel_info}{time_hint}{recurring_info}"
                                 else:
-                                    discord_command_result += f"\n⏰ Reminder scheduled{channel_info} {time_hint}{recurring_info}"
+                                    discord_command_result += f"\n⏰ Reminder scheduled{channel_info}{time_hint}{recurring_info}"
                                 print(f"✅ [{username}] Created reminder {reminder_id}: '{reminder_payload['reminder_text']}' at {trigger_at} (recurring={reminder_payload.get('is_recurring')})")
                             else:
                                 print(f"⚠️  [{username}] Failed to create reminder: db.create_reminder returned None")
