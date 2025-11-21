@@ -8057,6 +8057,11 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * "schedule": {{"interval_seconds": X}} or "interval_seconds": X in memory_data
   * "recurrence_count": N (if limited) or null/omit for infinite
   * "message_template": "AI-generated message to reuse" (code will reuse this, no AI needed after first time)
+- CRITICAL: If user wants to post content to another channel (e.g., "post 2 photos in #channel", "every 2 minutes post a random photo in #memes"):
+  * You MUST generate the content (images, screenshots, etc.) FIRST, then include "channel_actions" in your discord_command response
+  * The channel_actions will automatically receive any files/images you generate - they will be posted to the target channel
+  * Example: User says "post 2 photos of dubai in #invite-bot" → Search for images, then set channel_actions with target channel
+  * The code will automatically route all generated files (searched images, generated images, screenshots) to the channel_actions target channel
 - CRITICAL: Extract mentions dynamically:
   * "@everyone" → "mention_everyone": true
   * "@role" or role names → "role_mentions": ["@role", "<@&role_id>"]
@@ -8289,9 +8294,10 @@ async def execute_channel_actions(
     guild: Optional[discord.Guild],
     actions: Optional[List[dict]],
     *,
-    source: str = "AUTOMATION"
+    source: str = "AUTOMATION",
+    files: Optional[List[discord.File]] = None
 ) -> List[str]:
-    """Execute AI-provided channel actions (posting messages, mentions, etc.)."""
+    """Execute AI-provided channel actions (posting messages, mentions, etc.). Supports file attachments."""
     logs: List[str] = []
     if not guild or not actions:
         return logs
@@ -8305,7 +8311,7 @@ async def execute_channel_actions(
             action.get('message_content') or
             ""
         ).strip()
-        if not channel_spec or not message_text:
+        if not channel_spec:
             continue
         channel = _resolve_text_channel(guild, channel_spec)
         if not channel:
@@ -8320,15 +8326,28 @@ async def execute_channel_actions(
         role_specs = action.get('role_mentions') or action.get('roles')
         user_specs = _filter_bot_mentions(action.get('user_mentions'), allow_bot_mention)
         mention_prefix = _compose_mentions(guild, role_specs, user_specs)
-        final_message = f"{mention_prefix} {message_text}".strip() if mention_prefix else message_text
-        if not final_message:
-            continue
+        final_message = f"{mention_prefix} {message_text}".strip() if mention_prefix else (message_text or "")
+        
+        # Get files for this action (if specified in action, otherwise use global files)
+        action_files = action.get('files') or files
+        
         try:
-            await channel.send(
-                final_message,
-                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
-            )
-            logs.append(f"✅ [{source}] Sent message to #{channel.name}")
+            if action_files:
+                # Send files (with message if provided, or placeholder if not)
+                message_to_send = final_message if final_message else "📎"
+                await channel.send(
+                    message_to_send,
+                    files=action_files,
+                    allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
+                )
+                logs.append(f"✅ [{source}] Sent message with {len(action_files)} file(s) to #{channel.name}")
+            else:
+                if final_message:  # Only send if there's a message
+                    await channel.send(
+                        final_message,
+                        allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True)
+                    )
+                    logs.append(f"✅ [{source}] Sent message to #{channel.name}")
         except Exception as send_error:
             logs.append(f"❌ [{source}] Error sending to #{channel.name}: {send_error}")
     return logs
@@ -9240,13 +9259,12 @@ CURRENT CONVERSATION CONTEXT:
                     }]
 
                 if channel_actions:
-                    action_logs = await execute_channel_actions(
-                        message.guild,
-                        channel_actions,
-                        source=f"COMMAND:{username}"
-                    )
-                    if action_logs:
-                        discord_command_result = "\n".join(action_logs)
+                    # Store channel_actions info for file routing in on_message
+                    # Don't execute yet if we might have files to attach (images, screenshots, etc.)
+                    # Files will be sent to channel_actions in on_message after they're prepared
+                    message._servermate_channel_actions = channel_actions
+                    message._servermate_channel_actions_executed = False
+                    # Note: channel_actions will be executed in on_message with files attached
 
                 action_type = discord_command.get('action_type')
                 if action_type == 'store_memory':
@@ -12356,6 +12374,9 @@ async def on_message(message: discord.Message):
                     typing_task = None
 
                 # Generate response (typing indicator runs in background)
+                # Store channel_actions info for file routing
+                message._servermate_channel_actions = None
+                message._servermate_files_sent_to_channels = False
                 result = await generate_response(message, force_response)
 
                 print(f"📥 [{message.author.display_name}] Received result from generate_response: type={type(result)}")
@@ -12566,14 +12587,52 @@ Response: """
                 # Note: The AI is already instructed in the prompt to reference images by position (first, second, third)
                 # The prompt instructions handle this dynamically, so no post-processing needed here
                 
-                # Send text response with all images attached (if any)
+                # Check if channel_actions were executed (files should go to those channels)
+                channel_actions = getattr(message, '_servermate_channel_actions', None)
+                files_sent_to_channels = False
+                
+                # If channel_actions exist, execute them (with files if available)
+                if channel_actions:
+                    # Check if channel_actions were already executed
+                    already_executed = getattr(message, '_servermate_channel_actions_executed', False)
+                    if not already_executed:
+                        file_count = len(files_to_attach) if files_to_attach else 0
+                        print(f"📎 [{message.author.display_name}] Executing channel actions with {file_count} file(s)")
+                        try:
+                            action_logs = await execute_channel_actions(
+                                message.guild,
+                                channel_actions,
+                                source=f"COMMAND:{message.author.display_name}",
+                                files=files_to_attach if files_to_attach else None
+                            )
+                            message._servermate_channel_actions_executed = True
+                            if files_to_attach:
+                                files_sent_to_channels = True
+                                print(f"✅ [{message.author.display_name}] Files sent to target channel(s) via channel_actions")
+                            if action_logs:
+                                print(f"✅ [{message.author.display_name}] Channel actions executed: {', '.join(action_logs)}")
+                            elif not files_to_attach:
+                                # Text-only channel action executed
+                                print(f"✅ [{message.author.display_name}] Channel actions executed (text-only)")
+                        except Exception as channel_file_error:
+                            print(f"⚠️  [{message.author.display_name}] Error executing channel_actions: {channel_file_error}")
+                            import traceback
+                            print(f"⚠️  [{message.author.display_name}] Traceback: {traceback.format_exc()}")
+                            # Fall back to sending in current channel
+                            files_sent_to_channels = False
+                    else:
+                        # Already executed, files should have been sent
+                        if files_to_attach:
+                            files_sent_to_channels = True
+                
+                # Send text response (with files only if not sent to channel_actions)
                 if response:
                     # Split long responses
                     if len(response) > 2000:
                         chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
-                        # Attach images to the first chunk only
+                        # Attach images to the first chunk only (if not already sent to channel_actions)
                         for i, chunk in enumerate(chunks):
-                            if i == 0 and files_to_attach:
+                            if i == 0 and files_to_attach and not files_sent_to_channels:
                                 try:
                                     await message.channel.send(chunk, files=files_to_attach, reference=message)
                                 except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
@@ -12587,26 +12646,29 @@ Response: """
                                         if generated_images:
                                             compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
                                         
-                                        try:
-                                            await message.channel.send(chunk, files=compressed_files, reference=message)
-                                        except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
-                                            status2 = getattr(e2, 'status', getattr(e2, 'code', None))
-                                            if status2 == 413:  # Still too large even after compression
-                                                print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
-                                                # Send text first
-                                                await message.channel.send(chunk, reference=message)
-                                                # Send images in smaller batches (max 2 per message)
-                                                for batch_start in range(0, len(compressed_files), 2):
-                                                    batch = compressed_files[batch_start:batch_start + 2]
-                                                    await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                try:
+                                    files_for_chunk = compressed_files if not files_sent_to_channels else None
+                                    await message.channel.send(chunk, files=files_for_chunk, reference=message)
+                                except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
+                                    status2 = getattr(e2, 'status', getattr(e2, 'code', None))
+                                    if status2 == 413:  # Still too large even after compression
+                                        print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
+                                        # Send text first
+                                        await message.channel.send(chunk, reference=message)
+                                        # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
+                                        if not files_sent_to_channels:
+                                            for batch_start in range(0, len(compressed_files), 2):
+                                                batch = compressed_files[batch_start:batch_start + 2]
+                                                await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
                                             else:
                                                 raise
                                     elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
                                         print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
                                         await asyncio.sleep(2)  # Wait 2 seconds
                                         try:
-                                            # Retry once
-                                            await message.channel.send(chunk, files=files_to_attach, reference=message)
+                                            # Retry once - only attach files if not sent to channel_actions
+                                            files_for_retry = files_to_attach if not files_sent_to_channels else None
+                                            await message.channel.send(chunk, files=files_for_retry, reference=message)
                                             print(f"✅ [{message.author.display_name}] Successfully sent after retry")
                                         except Exception as retry_error:
                                             print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
@@ -12621,7 +12683,9 @@ Response: """
                                 await message.channel.send(chunk, reference=message)
                     else:
                         try:
-                            await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
+                            # Only attach files if not already sent to channel_actions
+                            files_for_response = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
+                            await message.channel.send(response, files=files_for_response, reference=message)
                         except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
                             status = getattr(e, 'status', getattr(e, 'code', None))
                             if status == 413:  # Payload Too Large
@@ -12634,15 +12698,16 @@ Response: """
                                     compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
                                 
                                 try:
-                                    await message.channel.send(response, files=compressed_files, reference=message)
+                                    files_for_response = compressed_files if not files_sent_to_channels else None
+                                    await message.channel.send(response, files=files_for_response, reference=message)
                                 except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e2:
                                     status2 = getattr(e2, 'status', getattr(e2, 'code', None))
                                     if status2 == 413:  # Still too large even after compression
                                         print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
                                         # Send text first
                                         await message.channel.send(response, reference=message)
-                                        # Send images in smaller batches (max 2 per message)
-                                        if compressed_files:
+                                        # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
+                                        if compressed_files and not files_sent_to_channels:
                                             for batch_start in range(0, len(compressed_files), 2):
                                                 batch = compressed_files[batch_start:batch_start + 2]
                                                 await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
@@ -12652,8 +12717,9 @@ Response: """
                                 print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
                                 await asyncio.sleep(2)  # Wait 2 seconds
                                 try:
-                                    # Retry once
-                                    await message.channel.send(response, files=files_to_attach if files_to_attach else None, reference=message)
+                                    # Retry once - only attach files if not sent to channel_actions
+                                    files_for_retry = files_to_attach if (files_to_attach and not files_sent_to_channels) else None
+                                    await message.channel.send(response, files=files_for_retry, reference=message)
                                     print(f"✅ [{message.author.display_name}] Successfully sent after retry")
                                 except Exception as retry_error:
                                     print(f"❌ [{message.author.display_name}] Retry failed: {retry_error}")
