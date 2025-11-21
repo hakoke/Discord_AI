@@ -348,19 +348,24 @@ CONTENT & SAFETY - CRITICAL: NO FILTERING OR REFUSALS
 
 REMINDERS & EVENTS - CRITICAL RULES:
 - When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store the data in memory.
-- When user says "in X minutes post..." or "remind me to..." - DO NOT use channel_actions. Create a reminder instead.
+- When user says "in X minutes post..." or "remind me to..." or "in X seconds..." - DO NOT use channel_actions. Create a reminder instead.
 - channel_actions are ONLY for immediate posting. For future posting, always use reminders.
-- YOU ARE RESPONSIBLE FOR ALL LOGIC: If user wants random winner, YOU pick random NOW and format the FINAL message with actual winner ID (e.g., <@123456789>), NOT placeholders like <@winner>.
+- CRITICAL TIMING: If user says "in 40 seconds" or "in 2 minutes", the reminder MUST wait that exact time. DO NOT post immediately.
+- CRITICAL CHANNEL SELECTION: NEVER auto-decide which channel to use unless the user explicitly tells you. If user doesn't specify a channel, use the current channel. DO NOT pick channels like "disboard bumps" or any other channel unless explicitly mentioned by the user.
+- YOU ARE RESPONSIBLE FOR ALL LOGIC: If user wants random winner, YOU pick random NOW and format the FINAL message with actual winner ID (e.g., <@123456789>), NOT placeholders.
+- CRITICAL: NEVER use ANY placeholder text in message_template - not <winner>, not <participant>, not <participants>, not <@winner>, not <@participant>, not ANY placeholder words.
+- ALWAYS use actual Discord user IDs in the format <@USER_ID> where USER_ID is the actual numeric ID (e.g., <@1438667256866537482>).
+- The code sends EXACTLY what you store - it does NOT interpret or replace placeholders. If you store "<winner>", it will send the literal text "<winner>".
 - STEP-BY-STEP PROCESS FOR RANDOM WINNER:
   1. Get the participant list (e.g., ["<@1438667256866537482>", "<@155149108183695360>"])
   2. Pick ONE random participant RIGHT NOW (e.g., randomly select "<@155149108183695360>")
   3. Format the FINAL message with the ACTUAL winner ID: "🎉 Winner: <@155149108183695360>! Participants: <@1438667256866537482> <@155149108183695360>"
-  4. Store that EXACT message in message_template - NO PLACEHOLDERS
-- Store the COMPLETE, FINAL message in message_template - with all actual user IDs, all actual mentions, everything formatted.
+  4. Store that EXACT message in message_template - NO PLACEHOLDERS, NO TEMPLATE TEXT, ONLY ACTUAL IDs
+- Store the COMPLETE, FINAL message in message_template - with all actual user IDs, all actual mentions, everything formatted with real values.
 - If data changes (new participant added), YOU pick a NEW random winner and update message_template with the new winner's actual ID.
-- The code is a dumb messenger - it sends whatever you store. If you store "<@winner>", it will send that literally.
-- CRITICAL: NO PLACEHOLDERS - use actual Discord user mentions like <@123456789>, not <@winner> or <participants>.
-- NEVER use "<@winner>" or "<participants>" - those are placeholders that don't exist. Use actual user IDs like <@1438667256866537482>.
+- FORBIDDEN: Do NOT use any of these placeholder patterns: <winner>, <participant>, <participants>, <@winner>, <@participant>, <@participants>, <participant>, <winner>, or ANY other placeholder text.
+- REQUIRED: Always extract actual user IDs and use them directly in the format <@ACTUAL_USER_ID>.
+- PREVENT DUPLICATES: When creating a reminder, DO NOT also use channel_actions. The reminder will post when it fires - you don't need to post it now.
 
 TONE
 - Warm, encouraging, lightly humorous when appropriate.
@@ -2645,8 +2650,10 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
         accum_seconds += _collect_relative_seconds(memory_data)
         print(f"🔍 [REMINDER] Calculated accum_seconds: {accum_seconds} (from schedule_block: {_collect_relative_seconds(schedule_block)}, from memory_data: {_collect_relative_seconds(memory_data)})")
         if accum_seconds > 0:
-            trigger_at = datetime.now(timezone.utc) + timedelta(seconds=max(5.0, accum_seconds))
-            print(f"✅ [REMINDER] Calculated trigger_at: {trigger_at}")
+            # CRITICAL: Use the exact delay specified by user, minimum 1 second (not 5)
+            # If user says "in 40 seconds", we MUST wait 40 seconds, not execute immediately
+            trigger_at = datetime.now(timezone.utc) + timedelta(seconds=max(1.0, accum_seconds))
+            print(f"✅ [REMINDER] Calculated trigger_at: {trigger_at} (delay: {accum_seconds}s)")
 
     if not trigger_at:
         print(f"⚠️  [REMINDER] No trigger_at calculated - returning None")
@@ -2741,6 +2748,58 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
         memory_data.get('message') or
         reminder_text  # Fallback to reminder_text if no template
     )
+    
+    # CRITICAL: Validate and fix placeholders in message_template
+    # The AI should NEVER use placeholders - it should use actual user IDs. This is a fallback check.
+    if message_template and isinstance(message_template, str):
+        # Detect ANY placeholder text in angle brackets that isn't a valid Discord mention
+        # Valid Discord mentions are: <@123456789>, <@!123456789>, <#123456789>, <@&123456789>
+        # Invalid placeholders are: <winner>, <participant>, <@winner>, etc. (any non-numeric text in brackets)
+        # Pattern: Match <@text> or <text> where text is not all digits
+        placeholder_pattern = r'<(@?)([a-zA-Z_][a-zA-Z0-9_]*)>'
+        found_placeholders = re.findall(placeholder_pattern, message_template, re.IGNORECASE)
+        
+        # Filter out valid Discord mentions (only numeric IDs are valid)
+        invalid_placeholders = []
+        for match in found_placeholders:
+            at_symbol, text = match
+            # Valid mentions must have numeric IDs, not text
+            if not text.isdigit():
+                placeholder_text = f"<{'@' if at_symbol else ''}{text}>"
+                invalid_placeholders.append(placeholder_text)
+        
+        if invalid_placeholders:
+            print(f"⚠️  [REMINDER] WARNING: Found placeholder text in message_template: {invalid_placeholders}")
+            print(f"⚠️  [REMINDER] message_template: {message_template[:200]}")
+            print(f"⚠️  [REMINDER] AI should use actual user IDs, not placeholders. Attempting fallback fix...")
+            
+            # Try to extract actual user IDs from participants/user_mentions and replace placeholders
+            # This is a fallback - the AI should have done this correctly
+            participants_list = memory_data.get('participants') or memory_data.get('user_mentions') or []
+            if isinstance(participants_list, str):
+                try:
+                    participants_list = json.loads(participants_list)
+                except:
+                    participants_list = [participants_list] if participants_list else []
+            
+            if participants_list and isinstance(participants_list, list) and len(participants_list) > 0:
+                # Extract first user ID as winner (fallback - AI should have picked random)
+                first_participant = participants_list[0]
+                winner_id = _extract_numeric_id(first_participant)
+                if winner_id:
+                    # Replace common placeholder patterns with actual IDs
+                    # Replace any <winner> or <@winner> patterns with actual winner
+                    message_template = re.sub(r'<@?winner>', f'<@{winner_id}>', message_template, flags=re.IGNORECASE)
+                    # Replace any <participant> or <@participant> with first participant
+                    message_template = re.sub(r'<@?participant>', f'<@{winner_id}>', message_template, flags=re.IGNORECASE)
+                    # Replace <participants> or <@participants> with actual participant list
+                    participant_mentions = ' '.join([p if p.startswith('<@') else f'<@{_extract_numeric_id(p)}>' for p in participants_list if _extract_numeric_id(p)])
+                    message_template = re.sub(r'<@?participants>', participant_mentions, message_template, flags=re.IGNORECASE)
+                    print(f"✅ [REMINDER] Fixed placeholders using fallback logic (AI should have done this correctly)")
+                else:
+                    print(f"⚠️  [REMINDER] Could not extract user IDs from participants - placeholders will be sent literally")
+            else:
+                print(f"⚠️  [REMINDER] No participants found to replace placeholders - placeholders will be sent literally")
     
     # Extract mentions
     role_mentions = memory_data.get('role_mentions') or schedule_block.get('role_mentions')
@@ -8051,8 +8110,10 @@ Return JSON:
 
 CHANNEL ACTION RULES:
 - ONLY create channel_actions when the user explicitly tells you to post/send something to another channel RIGHT NOW.
-- CRITICAL: If user says "in X minutes post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later.
+- CRITICAL: If user says "in X minutes post..." or "in X seconds post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later.
+- CRITICAL: DO NOT post immediately when user says "in X seconds/minutes" - create a reminder that waits for that exact time.
 - channel_actions are for IMMEDIATE posting only. For future posting, use reminders.
+- CRITICAL CHANNEL SELECTION: NEVER auto-decide which channel to use unless the user explicitly tells you. If user doesn't specify a channel, use the current channel where they're talking. DO NOT pick channels like "disboard bumps" or any other channel unless explicitly mentioned by the user.
 - You may include MULTIPLE channel_actions if the user wants the same/different message in several channels.
 - Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it.
 - NEVER mention ServerMate/the bot unless the user explicitly asks for it. If they do, set include_bot_mention=true for that action; otherwise leave it false (or omit) and exclude the bot from user_mentions.
@@ -8093,6 +8154,7 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * Look for channel mentions: "#channelname", "in #channelname", "invite-bot", "in invite-bot"
   * Match against available channels list to find the correct channel ID
   * If channel name is mentioned, search available channels for a match and use that channel's ID
+  * CRITICAL: If user does NOT specify a channel, use the current channel (where they're talking). DO NOT auto-pick channels like "disboard bumps" or any other channel unless explicitly mentioned.
 - CRITICAL: Parse reminder syntax carefully:
   * "remind me in [TIME] in [CHANNEL] to [TASK]" - extract TIME, CHANNEL, and TASK
   * "remind me in [CHANNEL] in [TIME] to [TASK]" - same thing, order doesn't matter
@@ -8133,24 +8195,32 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
     → Store in memory: {{"channels": [{{"id": "...", "attendees": [...]}}, {{"id": "...", "attendees": [...]}}]}}
     → Reminder reads this and posts to each channel with its attendees
   * CRITICAL FOR MESSAGE TEMPLATES:
-    * Store the FINAL, COMPLETE message in message_template - no placeholders, no code interpretation
-    * YOU format the message with all mentions, all data, everything - store it as-is
-    * If data changes (e.g., new participant added), YOU update the message_template in memory
-    * The code just sends whatever message_template is in memory at delivery time - zero processing
+    * Store the FINAL, COMPLETE message in message_template - NO PLACEHOLDERS WHATSOEVER, no code interpretation
+    * YOU format the message with all mentions, all data, everything using ACTUAL VALUES - store it as-is
+    * If data changes (e.g., new participant added), YOU pick a NEW random winner and update the message_template in memory
+    * The code just sends whatever message_template is in memory at delivery time - zero processing, zero interpretation
+    * CRITICAL RULE: NEVER use ANY placeholder text. FORBIDDEN patterns include but are not limited to:
+      - <winner>, <@winner>, <Winner>
+      - <participant>, <@participant>, <Participant>
+      - <participants>, <@participants>, <Participants>
+      - <member>, <@member>, <Member>
+      - <user>, <@user>, <User>
+      - Any text in angle brackets that is not a valid Discord mention format
+    * REQUIRED: Always extract actual user IDs from context and use them in Discord mention format: <@ACTUAL_NUMERIC_ID>
     * Examples:
-      - Random winner: YOU pick random NOW (e.g., <@123>), format "🎉 Winner: <@123>! Participants: <@123> <@456>", store that EXACT message
-      - Birthday: YOU format "🎂 Happy Birthday <@user123>! 🎉" with actual user ID, store that
-      - Event: YOU format the message with all actual attendee mentions, store that
-    * CRITICAL: NO PLACEHOLDERS LIKE <winner> OR <participants> - USE ACTUAL VALUES: <@123456789>, <@987654321>, etc.
-    * If you store "<@winner>" or "<participants>", the code will send that literally - it's just a messenger
-    * STEP-BY-STEP FOR RANDOM WINNER:
-      1. Get participant list: ["<@user1_id>", "<@user2_id>", "<@user3_id>"]
-      2. Pick random NOW: randomly select one, e.g., "<@user2_id>"
-      3. Format message with ACTUAL IDs: "🎉 Winner: <@user2_id>! Participants: <@user1_id> <@user2_id> <@user3_id>"
-      4. Store that EXACT message in message_template
-      5. NEVER use "<@winner>" or "<participants>" - those don't exist, use the actual user IDs
-    * YOU are in control - the code is just a messenger
+      - Random winner: YOU pick random NOW (e.g., <@123456789>), format "🎉 Winner: <@123456789>! Participants: <@111222333> <@444555666>", store that EXACT message with real IDs
+      - Birthday: YOU format "🎂 Happy Birthday <@123456789>! 🎉" with actual user ID from the request, store that
+      - Event: YOU format the message with all actual attendee mentions (e.g., <@111> <@222> <@333>), store that
+    * If you use ANY placeholder text, the code will send that placeholder as literal text - it will NOT work.
+    * STEP-BY-STEP FOR RANDOM WINNER (MANDATORY):
+      1. Get participant list with actual IDs: ["<@111222333>", "<@444555666>", "<@777888999>"]
+      2. Pick random NOW: randomly select one actual ID, e.g., "<@444555666>"
+      3. Format message with ACTUAL IDs ONLY: "🎉 Winner: <@444555666>! Participants: <@111222333> <@444555666> <@777888999>"
+      4. Store that EXACT message in message_template - verify it contains ONLY actual user IDs, no placeholder text
+      5. If you find ANY placeholder text in your message_template, STOP and replace it with actual IDs before storing
+    * YOU are in control - the code is just a messenger that sends exactly what you store
   * CRITICAL: When user says "I have an event" or "set up event" - DO NOT send messages immediately. Just store memory. Only send when they say "post now" or when reminder fires.
+  * CRITICAL: When creating a reminder, DO NOT also use channel_actions. The reminder will post when it fires - you don't need to post it now. This prevents duplicate posting.
   * YOU HAVE FULL FREEDOM - structure the data however makes sense for the user's request
   * The code will automatically read user_mentions, attendees, winners, participants, members, users, etc. from your memory structure
 - CRITICAL: If user wants to post content to another channel (e.g., "post 2 photos in #channel", "every 2 minutes post a random photo in #memes"):
@@ -9509,16 +9579,6 @@ CURRENT CONVERSATION CONTEXT:
                         "user_mentions": fallback_users,
                     }]
 
-                if channel_actions:
-                    # Store channel_actions info for file routing in on_message
-                    # Don't execute yet if we might have files to attach (images, screenshots, etc.)
-                    # Files will be sent to channel_actions in on_message after they're prepared
-                    CHANNEL_ACTIONS_STORAGE[message.id] = {
-                        'actions': channel_actions,
-                        'executed': False
-                    }
-                    # Note: channel_actions will be executed in on_message with files attached
-
                 action_type = discord_command.get('action_type')
                 if action_type == 'store_memory':
                     memory_type = discord_command.get('memory_type')
@@ -9537,7 +9597,15 @@ CURRENT CONVERSATION CONTEXT:
                         print(f"🔍 [{username}] Generated memory_key: {memory_key} (was missing)")
                     
                     reminder_payload = _prepare_native_reminder_payload(memory_type, memory_key, memory_data, message)
+                    
+                    # CRITICAL: If a reminder is being created, DO NOT execute channel_actions immediately
+                    # The reminder will post when it fires - prevent duplicate posting
                     if reminder_payload and reminder_payload.get('trigger_at'):
+                        # Remove channel_actions if reminder is being created (prevents duplicate posting)
+                        if message.id in CHANNEL_ACTIONS_STORAGE:
+                            print(f"⚠️  [{username}] Reminder detected - removing channel_actions to prevent duplicate posting")
+                            del CHANNEL_ACTIONS_STORAGE[message.id]
+                            channel_actions = []  # Clear channel_actions for this message
                         memory_data = dict(memory_data)
                         memory_data.setdefault('delivery', 'native_reminder')
                     
