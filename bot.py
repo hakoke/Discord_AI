@@ -12694,8 +12694,37 @@ Response: """
                         file_count = len(files_to_attach) if files_to_attach else 0
                         print(f"📎 [{message.author.display_name}] Executing channel actions with {file_count} file(s)")
                         try:
-                            # If files are being sent, pass the full response text so it goes with the image
-                            response_text_for_channel = response if files_to_attach else None
+                            # If files are being sent, extract the content (not the confirmation) to send to target channel
+                            # The confirmation (first sentence) goes to current channel, content goes to target channel
+                            response_text_for_channel = None
+                            if files_to_attach and response:
+                                import re
+                                # Find first sentence(s) - this is the confirmation that goes to current channel
+                                sentence_endings = re.finditer(r'[.!?]\s+', response)
+                                first_end = next(sentence_endings, None)
+                                if first_end:
+                                    # Extract content after the confirmation (skip first 1-2 sentences)
+                                    first_sentence_end = first_end.end()
+                                    # Try to find second sentence if it's also part of confirmation
+                                    second_end = next(sentence_endings, None)
+                                    if second_end and len(response[:second_end.end()]) <= 200:
+                                        # Second sentence is also confirmation
+                                        content_start = second_end.end()
+                                    else:
+                                        # Only first sentence is confirmation
+                                        content_start = first_sentence_end
+                                    
+                                    # Get the actual content (everything after confirmation)
+                                    content = response[content_start:].strip()
+                                    if content:  # Only send if there's actual content
+                                        response_text_for_channel = content
+                                else:
+                                    # No sentence breaks, check if response is just a short confirmation
+                                    if len(response) > 200:
+                                        # Likely has content, send it all
+                                        response_text_for_channel = response
+                                    # Otherwise, it's just a short confirmation, don't send to target channel
+                            
                             action_logs = await execute_channel_actions(
                                 message.guild,
                                 channel_actions,
