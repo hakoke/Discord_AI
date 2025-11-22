@@ -9498,23 +9498,9 @@ CURRENT CONVERSATION CONTEXT:
             except Exception as mem_error:
                 print(f"⚠️  [{username}] Error fetching server memory: {mem_error}")
 
+        # CHANNEL RESTRICTIONS DISABLED - User requested all restrictions removed
+        # No policy evaluation - AI can respond anywhere, anytime
         policy_decision = None
-        if server_memories:
-            policy_decision = await evaluate_server_policies(message, server_memories)
-            # Policy actions will be checked after discord_command parsing to see if a reminder is being created
-            # We'll store policy_decision and check it later
-            if policy_decision:
-                if policy_decision.get('guidance'):
-                    consciousness_prompt += f"\n\n⚠️ SERVER POLICY GUIDANCE:\n{policy_decision['guidance']}\n"
-                if policy_decision.get('redirect_channel'):
-                    consciousness_prompt += (
-                        f"\n\n⚠️ SERVER POLICY: Respond by directing the user to "
-                        f"{policy_decision['redirect_channel']}.\n"
-                    )
-                if policy_decision.get('block_response'):
-                    system_message = policy_decision.get('system_message') or \
-                        "I'm not allowed to respond here due to server rules."
-                    return build_response_payload(system_message)
 
         if discord_command:
             wants_channels_list = discord_command.get('wants_channels_list', False)
@@ -9588,17 +9574,7 @@ CURRENT CONVERSATION CONTEXT:
                             "user_mentions": fallback_users,
                         }]
                 
-                # AI-DRIVEN: Check policy actions AFTER we know if AI created a reminder
-                if policy_decision and not is_creating_reminder:
-                    policy_actions = policy_decision.get('channel_actions') or []
-                    if policy_actions:
-                        policy_logs = await execute_channel_actions(
-                            message.guild,
-                            policy_actions,
-                            source=f"POLICY:{username}"
-                        )
-                        if policy_logs:
-                            print("\n".join(policy_logs))
+                # CHANNEL RESTRICTIONS DISABLED - No policy actions executed
                 
                 if action_type == 'store_memory':
                     
@@ -12989,36 +12965,63 @@ Response: """
                         file_count = len(files_to_attach) if files_to_attach else 0
                         print(f"📎 [{message.author.display_name}] Executing channel actions with {file_count} file(s)")
                         try:
-                            # If files are being sent, extract the content (not the confirmation) to send to target channel
-                            # The confirmation (first sentence) goes to current channel, content goes to target channel
+                            # AI-DRIVEN: Extract content to send to target channel
+                            # If user said "send X to #channel", the AI should format:
+                            # - First 1-2 sentences: confirmation (goes to current channel)
+                            # - Rest: actual content (goes to target channel with files)
                             response_text_for_channel = None
-                            if files_to_attach and response:
+                            if response:
                                 import re
                                 # Find first sentence(s) - this is the confirmation that goes to current channel
-                                sentence_endings = re.finditer(r'[.!?]\s+', response)
-                                first_end = next(sentence_endings, None)
-                                if first_end:
+                                sentence_endings = list(re.finditer(r'[.!?]\s+', response))
+                                
+                                if sentence_endings:
                                     # Extract content after the confirmation (skip first 1-2 sentences)
+                                    first_end = sentence_endings[0]
                                     first_sentence_end = first_end.end()
+                                    
                                     # Try to find second sentence if it's also part of confirmation
-                                    second_end = next(sentence_endings, None)
-                                    if second_end and len(response[:second_end.end()]) <= 200:
-                                        # Second sentence is also confirmation
-                                        content_start = second_end.end()
+                                    if len(sentence_endings) > 1:
+                                        second_end = sentence_endings[1]
+                                        if len(response[:second_end.end()]) <= 200:
+                                            # Second sentence is also confirmation
+                                            content_start = second_end.end()
+                                        else:
+                                            # Only first sentence is confirmation
+                                            content_start = first_sentence_end
                                     else:
-                                        # Only first sentence is confirmation
-                                        content_start = first_sentence_end
+                                        # Only one sentence - check if it's just confirmation
+                                        if len(response[:first_sentence_end]) <= 200:
+                                            # Short confirmation, rest is content
+                                            content_start = first_sentence_end
+                                        else:
+                                            # Long single sentence, treat as content
+                                            content_start = 0
                                     
                                     # Get the actual content (everything after confirmation)
-                                    content = response[content_start:].strip()
-                                    if content:  # Only send if there's actual content
-                                        response_text_for_channel = content
+                                    if content_start > 0:
+                                        content = response[content_start:].strip()
+                                        if content:  # Only send if there's actual content
+                                            response_text_for_channel = content
+                                    else:
+                                        # No confirmation, send full response
+                                        response_text_for_channel = response
                                 else:
-                                    # No sentence breaks, check if response is just a short confirmation
+                                    # No sentence breaks - if response is long, send it all; if short, it's just confirmation
                                     if len(response) > 200:
                                         # Likely has content, send it all
                                         response_text_for_channel = response
                                     # Otherwise, it's just a short confirmation, don't send to target channel
+                                
+                                # If no content extracted but we have files, use action message or minimal text
+                                if not response_text_for_channel and files_to_attach:
+                                    # Use first action's message if available, otherwise use empty string (files will be sent)
+                                    action_message = None
+                                    if channel_actions and len(channel_actions) > 0:
+                                        action_message = (channel_actions[0].get('message') or 
+                                                         channel_actions[0].get('content') or 
+                                                         channel_actions[0].get('message_content') or "")
+                                    response_text_for_channel = action_message if action_message else ""
                             
                             action_logs = await execute_channel_actions(
                                 message.guild,
@@ -13058,37 +13061,39 @@ Response: """
                             del CHANNEL_ACTIONS_STORAGE[message.id]
                 
                 # Send text response (with files only if not sent to channel_actions)
-                # If files were sent via channel_actions, skip sending response to current channel
-                # (the full response + files were already sent to the target channel)
+                # If channel_actions were executed, send confirmation to current channel, content went to target channel
                 if response:
-                    # If files were sent to target channel via channel_actions, send brief confirmation to current channel
-                    # (full response + files were already sent to the target channel)
-                    if files_sent_to_channels and files_to_attach:
-                        # Already sent full response + files to target channel, send brief confirmation to current channel
-                        # The AI should have generated a brief confirmation (like "Posted the image!" or "Done!") at the start of its response
+                    # If channel_actions were executed (with or without files), send brief confirmation to current channel
+                    # Content (and files if any) already went to target channel via channel_actions
+                    channel_actions_executed = (channel_actions and channel_actions_data and 
+                                               channel_actions_data.get('executed', False))
+                    
+                    if channel_actions_executed:
+                        # Content already sent to target channel via channel_actions, send brief confirmation to current channel
+                        # The AI should have generated a brief confirmation (like "Posted the image!" or "Done!") at the start
                         try:
                             # Extract first complete sentence(s) for confirmation (AI should have made it brief)
                             import re
                             # Find first 1-2 complete sentences (up to ~200 chars to keep it brief but complete)
-                            sentence_endings = re.finditer(r'[.!?]\s+', response)
-                            first_end = next(sentence_endings, None)
-                            if first_end:
-                                # Found first sentence - take it plus maybe one more if short enough
+                            sentence_endings = list(re.finditer(r'[.!?]\s+', response))
+                            if sentence_endings:
+                                first_end = sentence_endings[0]
                                 first_sentence_end = first_end.end()
                                 confirmation = response[:first_sentence_end].strip()
                                 
                                 # Try to include second sentence if total is still under 200 chars
-                                second_end = next(sentence_endings, None)
-                                if second_end and len(response[:second_end.end()]) <= 200:
-                                    confirmation = response[:second_end.end()].strip()
+                                if len(sentence_endings) > 1:
+                                    second_end = sentence_endings[1]
+                                    if len(response[:second_end.end()]) <= 200:
+                                        confirmation = response[:second_end.end()].strip()
                             else:
-                                # No sentence endings found, just take first 200 chars (shouldn't happen with proper AI responses)
+                                # No sentence endings found, just take first 200 chars
                                 confirmation = response[:200].strip()
                             
                             await message.channel.send(confirmation, reference=message)
                         except Exception as confirm_error:
                             print(f"⚠️  [{message.author.display_name}] Error sending confirmation: {confirm_error}")
-                        # Don't send another message - confirmation was already sent, files already went to target channel
+                        # Don't send another message - confirmation was already sent, content already went to target channel
                     elif not files_sent_to_channels:
                         # Normal flow: send full response (with files if not sent to channel_actions)
                         # Split long responses
@@ -13786,27 +13791,40 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
-    # Capabilities
+    # Capabilities - Split into multiple fields to stay under 1024 char limit
     embed.add_field(
-        name="✨ What I Can Do",
+        name="✨ Core Features",
         value=(
             "• **Chat & Answer Questions** - Ask me anything!\n"
             "• **Generate Images** - Create images from text descriptions\n"
             "• **Analyze Images** - Share images and I'll analyze them\n"
             "• **Search the Internet** - Get current information from the web\n"
             "• **Platform-Specific Search** - Search Reddit, YouTube, Instagram, etc.\n"
-            "• **Take Screenshots** - Visit any link and screenshot web pages (I decide how many and what actions to take!)\n"
-            "• **Record Videos** - Record screen videos of browser automation (e.g., \"go to youtube, click video, record 30 seconds\")\n"
-            "• **Browser Automation** - Click buttons, scroll pages, navigate websites, type into search boxes and text fields\n"
             "• **Code Help** - Write, debug, and explain code\n"
-            "• **Create Documents** - Generate PDF/Word files from code or content\n"
-            "• **Read Web Pages** - Share links and I'll read the content\n"
+            "• **Create Documents** - Generate PDF/Word files from code or content"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🌐 Browser & Automation",
+        value=(
+            "• **Take Screenshots** - Visit any link and screenshot web pages\n"
+            "• **Record Videos** - Record screen videos of browser automation\n"
+            "• **Browser Automation** - Click buttons, scroll pages, navigate websites\n"
+            "• **Read Web Pages** - Share links and I'll read the content"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="💾 Memory & Discord",
+        value=(
             "• **Remember Conversations** - I build personality profiles over time\n"
             "• **Multi-modal** - Process text, images, and documents together\n"
-            "• **Server Memory** - Store reminders, birthdays, events, and channel instructions per server\n"
-            "• **AI Policies & Scheduler** - Enforce channel rules and run reminders/scheduled posts automatically\n"
-            "• **Server Memory Viewer** - Summarize what I have stored about this server or use /servermemory\n"
-            "• **Discord Actions** - Send messages to channels, mention roles, and interact with Discord dynamically"
+            "• **Server Memory** - Store reminders, birthdays, events, and channel instructions\n"
+            "• **AI Scheduler** - Run reminders/scheduled posts automatically\n"
+            "• **Discord Actions** - Send messages to channels, mention roles, and interact dynamically"
         ),
         inline=False
     )
