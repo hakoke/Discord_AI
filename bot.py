@@ -10669,10 +10669,41 @@ Screenshot {idx + 1}:"""
                     image_parts = filtered_image_parts
         
         # Set profile_picture_to_attach if AI decided to attach it (from combined intention check)
+        # AI-DRIVEN: Attach whichever profile picture the AI is describing
         profile_picture_to_attach = None
-        if should_attach_profile_picture and profile_picture_data:
-            profile_picture_to_attach = profile_picture_data
-            print(f"📸 [{username}] AI decided to attach profile picture (from combined intention check)")
+        if should_attach_profile_picture:
+            # Check what the user is asking for to determine which profile picture to attach
+            msg_lower = message.content.lower()
+            
+            # Determine intent: whose profile picture does the user want to see?
+            wants_own_pfp = any(phrase in msg_lower for phrase in ['my profile', 'my pfp', 'my avatar', 'my picture'])
+            wants_bot_pfp = any(phrase in msg_lower for phrase in ['your profile', 'your pfp', 'your avatar', 'your picture'])
+            wants_mentioned_user_pfp = message.mentions and not wants_own_pfp and not wants_bot_pfp
+            
+            # Find the appropriate profile picture to attach
+            if wants_own_pfp and profile_picture_data:
+                # User wants their own profile picture
+                profile_picture_to_attach = profile_picture_data
+                print(f"📸 [{username}] Attaching user's own profile picture")
+            elif wants_bot_pfp:
+                # User wants the bot's profile picture - find it in image_parts
+                for img in image_parts:
+                    if img.get('discord_type') == 'profile_picture' and img.get('is_bot', False):
+                        profile_picture_to_attach = img['data']
+                        print(f"📸 [{username}] Attaching bot's profile picture")
+                        break
+            elif wants_mentioned_user_pfp and message.mentions:
+                # User wants a mentioned user's profile picture - find the first mentioned user's pfp
+                mentioned_user_id = str(message.mentions[0].id)
+                for img in image_parts:
+                    if img.get('discord_type') == 'profile_picture' and img.get('user_id') == mentioned_user_id:
+                        profile_picture_to_attach = img['data']
+                        print(f"📸 [{username}] Attaching mentioned user's profile picture ({message.mentions[0].display_name})")
+                        break
+            elif profile_picture_data:
+                # Fallback: attach user's own profile picture if AI decided to attach something
+                profile_picture_to_attach = profile_picture_data
+                print(f"📸 [{username}] Attaching user's profile picture (fallback)")
         
         # Check for document actions - even if no documents attached (user might want to create one)
         # Skip if image edit is requested (to avoid confusing image edits with document edits)
@@ -11623,16 +11654,19 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                         img_username = img.get('username')
                         is_author = img.get('is_author', False)
                         is_mentioned = img.get('is_mentioned', False)
+                        is_bot = img.get('is_bot', False)
                         
                         if discord_type == 'profile_picture':
                             if is_author:
-                                image_labels.append(f"- Image {idx}: THE USER'S PROFILE PICTURE ({img_username}'s avatar) - THIS IS THE MESSAGE AUTHOR'S PROFILE PICTURE - this is what {img_username} looks like")
+                                image_labels.append(f"- Image {idx}: THE USER'S PROFILE PICTURE ({img_username}'s avatar) - THIS IS THE MESSAGE AUTHOR'S PROFILE PICTURE")
                                 author_profile_picture_idx = idx
+                            elif is_bot:
+                                image_labels.append(f"- Image {idx}: THE BOT'S PROFILE PICTURE ({img_username}'s avatar) - THIS IS YOUR (THE BOT'S) PROFILE PICTURE")
                             elif is_mentioned:
-                                image_labels.append(f"- Image {idx}: {img_username}'s profile picture/avatar (mentioned user) - this is what {img_username} looks like")
+                                image_labels.append(f"- Image {idx}: {img_username.upper()}'S PROFILE PICTURE (mentioned user) - THIS IS {img_username.upper()}'S PROFILE PICTURE")
                             else:
-                                # Bot's profile picture or unknown user
-                                image_labels.append(f"- Image {idx}: Profile picture/avatar ({img_username if img_username else 'unknown user'}) - NOT the message author's profile picture - IGNORE when user asks about their own profile picture")
+                                # Unknown user
+                                image_labels.append(f"- Image {idx}: Profile picture/avatar ({img_username if img_username else 'unknown user'})")
                         elif discord_type == 'server_icon':
                             image_labels.append(f"- Image {idx}: SERVER ICON/GUILD ICON - THIS IS THE SERVER'S ICON, NOT A USER'S PROFILE PICTURE - IGNORE THIS when user asks about their own profile picture")
                             server_icon_idx = idx
@@ -11663,7 +11697,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     if server_icon_idx:
                         image_context += f"- Image {server_icon_idx} is the server/guild icon\n"
                     
-                    critical_instructions = f"{image_context}\n\nCRITICAL - USE YOUR INTELLIGENCE:\nBased on the user's message, determine what they're asking about and respond accordingly:\n- Read the image labels above carefully - they tell you exactly whose profile picture each image is\n- If the user asks about 'my profile picture' or 'my avatar', they mean THEIR OWN (the message author's)\n- If the user asks about 'your profile picture' or 'your avatar', they mean the BOT'S profile picture\n- If the user asks about channels, roles, or other non-image topics, don't describe images unless relevant\n- For browser automation requests, ignore profile pictures and server icons entirely\n- Only describe images that are actually relevant to what the user is asking about\n- Use natural language understanding to determine intent - you're smart enough to figure this out"
+                    critical_instructions = f"{image_context}\n\nCRITICAL - PROFILE PICTURE IDENTIFICATION:\n- Read the image labels above - they EXPLICITLY tell you whose profile picture each image is\n- 'THE USER'S PROFILE PICTURE' = the message author's profile picture (when user says 'my profile picture')\n- 'THE BOT'S PROFILE PICTURE' = YOUR profile picture (when user says 'your profile picture')\n- '[USERNAME]'S PROFILE PICTURE' = that specific user's profile picture (when user asks about @username)\n\nCRITICAL - RESPONSE RULES:\n- If user asks 'what's my profile picture?' → ONLY describe THE USER'S PROFILE PICTURE (ignore all other images)\n- If user asks 'what's YOUR profile picture?' → ONLY describe THE BOT'S PROFILE PICTURE (ignore all other images)\n- If user asks 'what is @Dyno profile picture?' → ONLY describe DYNO'S PROFILE PICTURE (ignore all other images)\n- DO NOT describe multiple profile pictures unless the user explicitly asks for multiple\n- DO NOT describe images that are not relevant to the user's question\n- Use the exact labels provided - they tell you EXACTLY whose profile picture each image is"
                     
                     response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\n🚨 CRITICAL FOR BROWSER AUTOMATION: If the user is asking for browser automation/videos (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record'), DO NOT mention or describe profile pictures or server icons in your response - they are completely irrelevant to browser automation tasks. Focus ONLY on the automation task and any screenshots/videos that were captured.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
