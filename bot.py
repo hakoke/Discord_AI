@@ -9894,7 +9894,10 @@ CURRENT CONVERSATION CONTEXT:
             consciousness_prompt += f"\n\nDISCORD CONTEXT - FULL SERVER ACCESS (you have access to ALL of this information and can use it when needed):\n{discord_metadata}\n\nYou can:\n- Reference any channels, roles, stickers, GIFs, profile pictures, etc. when relevant\n- Edit profile pictures of mentioned users (e.g., 'edit @william's profile picture to be a black guy')\n- Use any server information to answer questions or perform actions\n- Access all visual assets (stickers, GIFs, profile pictures) that are available\n- Make decisions about what to do with this information based on the user's request"
         
         # If replying to a message, also get images from that message
-        if message.reference and not image_parts:  # Only if user didn't send their own images
+        # CRITICAL: Check if image_parts only contains profile pictures (not real images to edit)
+        # Profile pictures have 'source' == 'profile_picture', so we should still extract replied message images
+        has_real_images = any(img.get('source') not in ['profile_picture', 'asset_profile_picture'] for img in image_parts)
+        if message.reference and not has_real_images:  # Only if user didn't send their own real images (profile pics don't count)
             try:
                 replied_msg = await message.channel.fetch_message(message.reference.message_id)
                 if replied_msg.attachments:
