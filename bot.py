@@ -8024,10 +8024,10 @@ COMMAND TYPES:
 1. SEND MESSAGE TO CHANNEL:
    - User wants you to SEND a message to a DIFFERENT channel (not just respond in the current channel)
    - Examples: 
-     * "send Hey guys! in #invite-bot" → action_type="send_message", channel_actions=[{"channel": "invite-bot", "message": "Hey guys!"}]
-     * "send a photo of georgia to #invite-bot" → action_type="send_message", channel_actions=[{"channel": "invite-bot", "message": ""}] (photo will be attached)
-     * "post Hello! in #announcements" → action_type="send_message", channel_actions=[{"channel": "announcements", "message": "Hello!"}]
-     * "go to announcements @ everyone and talk about our future plans" → action_type="send_message", channel_actions=[{"channel": "announcements", "role_mentions": ["@everyone"], "message": "..."}]
+     * "send Hey guys! in #invite-bot" → action_type="send_message", channel_actions=[{{"channel": "invite-bot", "message": "Hey guys!"}}]
+     * "send a photo of georgia to #invite-bot" → action_type="send_message", channel_actions=[{{"channel": "invite-bot", "message": ""}}] (photo will be attached)
+     * "post Hello! in #announcements" → action_type="send_message", channel_actions=[{{"channel": "announcements", "message": "Hello!"}}]
+     * "go to announcements @ everyone and talk about our future plans" → action_type="send_message", channel_actions=[{{"channel": "announcements", "role_mentions": ["@everyone"], "message": "..."}}]
    - CRITICAL: "can you see the channels" or "what channel is good for X" is NOT a send_message action - those are just questions, respond normally
    - CRITICAL: If user says "send X to #channel" or "post X in #channel" - IMMEDIATELY create channel_actions with target channel
    - YOU MUST: Intelligently pick the BEST channel, GENERATE the actual message content (don't just copy user's words), determine mentions
