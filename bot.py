@@ -8022,7 +8022,7 @@ CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cann
 COMMAND TYPES:
 
 1. SEND MESSAGE TO CHANNEL:
-   - User wants you to SEND a message to a DIFFERENT channel (not just respond in the current channel)
+   - User wants you to SEND a message to a SPECIFIC CHANNEL (explicitly mentioned by name/ID)
    - Examples: 
      * "send Hey guys! in #invite-bot" → action_type="send_message", channel_actions=[{{"channel": "invite-bot", "message": "Hey guys!"}}]
      * "send a photo of georgia to #invite-bot" → action_type="send_message", channel_actions=[{{"channel": "invite-bot", "message": ""}}] (photo will be attached)
@@ -8030,8 +8030,9 @@ COMMAND TYPES:
      * "go to announcements @ everyone and talk about our future plans" → action_type="send_message", channel_actions=[{{"channel": "announcements", "role_mentions": ["@everyone"], "message": "..."}}]
    - CRITICAL: "can you see the channels" or "what channel is good for X" is NOT a send_message action - those are just questions, respond normally
    - CRITICAL: If user says "send X to #channel" or "post X in #channel" - IMMEDIATELY create channel_actions with target channel
+   - CRITICAL: If user does NOT mention a specific channel (e.g., "get me an image of elon musk", "show me a photo of X"), do NOT create channel_actions - just respond normally in current channel
    - YOU MUST: Intelligently pick the BEST channel, GENERATE the actual message content (don't just copy user's words), determine mentions
-   - ONLY set action_type="send_message" if user explicitly wants you to POST/SEND a message to another channel
+   - ONLY set action_type="send_message" if user explicitly mentions a channel name/ID to send to
    
 2. STORE MEMORY:
    - User wants to store ANY information for the server
@@ -8080,20 +8081,20 @@ Return JSON:
 }}
 
 CHANNEL ACTION RULES:
-- CRITICAL: If user says "send X to #channel" or "post X in #channel" or "send X in #channel" - IMMEDIATELY create channel_actions with the target channel and message.
-- CRITICAL: If user says "send a photo of X to #channel" or "post an image to #channel" - create channel_actions. The image will be automatically routed to that channel.
-- CRITICAL: When user says "send" or "post" to a specific channel, create channel_actions - even if you're generating content (images, text, etc.). The content will be sent to the target channel.
-- ONLY create channel_actions when the user explicitly tells you to post/send something to another channel RIGHT NOW.
-- CRITICAL: If user says "in X minutes post..." or "in X seconds post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later.
-- CRITICAL: DO NOT post immediately when user says "in X seconds/minutes" - create a reminder that waits for that exact time.
-- channel_actions are for IMMEDIATE posting only. For future posting, use reminders.
-- CRITICAL CHANNEL SELECTION: NEVER auto-decide which channel to use unless the user explicitly tells you. If user doesn't specify a channel, use the current channel where they're talking. DO NOT pick channels like "disboard bumps" or any other channel unless explicitly mentioned by the user.
-- You may include MULTIPLE channel_actions if the user wants the same/different message in several channels.
-- Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it.
-- NEVER mention ServerMate/the bot unless the user explicitly asks for it. If they do, set include_bot_mention=true for that action; otherwise leave it false (or omit) and exclude the bot from user_mentions.
-- Messages must be fully written by you. Do not echo "post this" or copy raw instructions—compose the final announcement or reply exactly as it should appear in the other channel.
-- If the user combines requests ("create two images and post them in #art @mods", "summarize this and drop it in #updates and #announcements"), still generate the content AND provide channel_actions that describe the follow-up posts.
-- When channel_actions exist, start your response with a single short confirmation sentence (e.g., "Posted that in #invite-bot.") before any further explanation so the confirmation can be reused without extra fluff.
+- CRITICAL: ONLY create channel_actions when user EXPLICITLY mentions a channel name/ID to send to (e.g., "send X to #channel", "post X in #announcements")
+- CRITICAL: If user does NOT mention a specific channel (e.g., "get me an image of elon musk", "show me a photo", "generate X"), do NOT create channel_actions - just set needs_discord_action=false and let the AI respond normally
+- CRITICAL: If user says "send X to #channel" or "post X in #channel" or "send X in #channel" - IMMEDIATELY create channel_actions with the target channel and message
+- CRITICAL: If user says "send a photo of X to #channel" or "post an image to #channel" - create channel_actions. The image will be automatically routed to that channel
+- CRITICAL: When user says "send" or "post" WITH a specific channel name, create channel_actions - even if you're generating content (images, text, etc.). The content will be sent to the target channel
+- CRITICAL: If user says "in X minutes post..." or "in X seconds post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later
+- CRITICAL: DO NOT post immediately when user says "in X seconds/minutes" - create a reminder that waits for that exact time
+- channel_actions are for IMMEDIATE posting to EXPLICITLY MENTIONED channels only. For future posting, use reminders. For normal requests in current channel, do NOT use channel_actions
+- You may include MULTIPLE channel_actions if the user wants the same/different message in several channels
+- Each action can include multiple role or user mentions. Use actual names/IDs/mentions from the context; include "@everyone"/"@here" only when the user requests it
+- NEVER mention ServerMate/the bot unless the user explicitly asks for it. If they do, set include_bot_mention=true for that action; otherwise leave it false (or omit) and exclude the bot from user_mentions
+- Messages must be fully written by you. Do not echo "post this" or copy raw instructions—compose the final announcement or reply exactly as it should appear in the other channel
+- If the user combines requests ("create two images and post them in #art @mods", "summarize this and drop it in #updates and #announcements"), still generate the content AND provide channel_actions that describe the follow-up posts
+- When channel_actions exist AND target a different channel, start your response with a single short confirmation sentence (e.g., "Posted that in #invite-bot.") before any further explanation so the confirmation can be reused without extra fluff
 
 CRITICAL FOR SEND_MESSAGE:
 - If user says "make a short announcement @ing everyone in announcements about the future of this server":
@@ -12948,9 +12949,11 @@ Response: """
                             img_bytes.seek(0)
                             file = discord.File(fp=img_bytes, filename=f'generated_{idx+1}.png')
                             files_to_attach.append(file)
-                            print(f"📎 [{message.author.display_name}] ✅ Generated image {idx+1} added")
+                            print(f"📎 [{message.author.display_name}] ✅ Generated image {idx+1} added (total files_to_attach: {len(files_to_attach)})")
                         except Exception as img_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to prepare generated image {idx+1}: {img_error}")
+                            import traceback
+                            print(f"📎 [{message.author.display_name}] Traceback: {traceback.format_exc()}")
                 else:
                     print(f"📎 [{message.author.display_name}] ⚠️  No generated_images to attach (value: {generated_images})")
                 
@@ -13088,16 +13091,26 @@ Response: """
                             del CHANNEL_ACTIONS_STORAGE[message.id]
                 
                 # Send text response (with files only if not sent to channel_actions)
-                # If channel_actions were executed, send confirmation to current channel, content went to target channel
+                # If channel_actions were executed, check if target channel is DIFFERENT from current channel
                 if response:
-                    # If channel_actions were executed (with or without files), send brief confirmation to current channel
-                    # Content (and files if any) already went to target channel via channel_actions
+                    # Check if channel_actions were executed
                     channel_actions_executed = (channel_actions and channel_actions_data and 
                                                channel_actions_data.get('executed', False))
                     
-                    if channel_actions_executed:
-                        # Content already sent to target channel via channel_actions, send brief confirmation to current channel
-                        # The AI should have generated a brief confirmation (like "Posted the image!" or "Done!") at the start
+                    # Check if target channel is DIFFERENT from current channel
+                    target_is_different_channel = False
+                    if channel_actions_executed and channel_actions:
+                        for action in channel_actions:
+                            channel_spec = action.get('channel') or action.get('target_channel')
+                            if channel_spec:
+                                target_channel = _resolve_text_channel(message.guild, channel_spec)
+                                if target_channel and target_channel.id != message.channel.id:
+                                    target_is_different_channel = True
+                                    break
+                    
+                    if channel_actions_executed and target_is_different_channel:
+                        # Target channel is DIFFERENT - send brief confirmation to current channel
+                        # Content (and files) already went to target channel via channel_actions
                         try:
                             # Extract first complete sentence(s) for confirmation (AI should have made it brief)
                             import re
@@ -13121,8 +13134,13 @@ Response: """
                         except Exception as confirm_error:
                             print(f"⚠️  [{message.author.display_name}] Error sending confirmation: {confirm_error}")
                         # Don't send another message - confirmation was already sent, content already went to target channel
+                    elif channel_actions_executed and not target_is_different_channel:
+                        # Target channel is SAME as current channel - message already sent via channel_actions
+                        # Don't send anything else (files and text already sent together)
+                        pass
                     elif not files_sent_to_channels:
                         # Normal flow: send full response (with files if not sent to channel_actions)
+                        print(f"📤 [{message.author.display_name}] Normal flow: sending response with {len(files_to_attach) if files_to_attach else 0} file(s)")
                         # Split long responses
                         if len(response) > 2000:
                             chunks = [response[i:i+2000] for i in range(0, len(response), 2000)]
