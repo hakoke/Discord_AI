@@ -2701,8 +2701,10 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
                 first_mention = user_mentions_list[0]
                 target_user_id = _extract_numeric_id(first_mention)
     # Only use requester as fallback if NO target was specified (for "remind me" not "remind @someone")
-    if not target_user_id and source_message and source_message.author:
-        target_user_id = source_message.author.id
+    # AI-DRIVEN: Only use requester as fallback if AI didn't set target_user_id
+    # The AI should have set target_user_id correctly in memory_data based on user intent
+    # If AI set target_user_id, use it. If AI didn't set it, don't add requester - AI decided it's not a "remind me" scenario
+    # NO HARDCODED CHECKS - trust what the AI stored in memory_data
 
     target_role_id = (
         _extract_numeric_id(memory_data.get('target_role_id')) or
@@ -2746,6 +2748,8 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
             recurrence_count = int(recurrence_count)
     
     # Extract message template (AI-generated message to reuse)
+    # AI-DRIVEN: The AI is responsible for formatting the message correctly with actual user IDs
+    # Code just sends whatever the AI stores - no fallback fixes, no placeholder replacement
     message_template = (
         memory_data.get('message_template') or
         memory_data.get('template') or
@@ -2753,100 +2757,15 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
         reminder_text  # Fallback to reminder_text if no template
     )
     
-    # CRITICAL: Validate and fix placeholders in message_template
-    # The AI should NEVER use placeholders - it should use actual user IDs. This is a fallback check.
+    # AI-DRIVEN: Log warning if placeholders detected, but DO NOT fix them
+    # The AI should have formatted the message correctly - if it didn't, it will be sent as-is
     if message_template and isinstance(message_template, str):
-        # Detect ANY placeholder text in angle brackets that isn't a valid Discord mention
-        # Valid Discord mentions are: <@123456789>, <@!123456789>, <#123456789>, <@&123456789>
-        # Invalid placeholders are: <winner>, <participant>, <@winner>, etc. (any non-numeric text in brackets)
-        # Pattern: Match <@text> or <text> where text is not all digits
         placeholder_pattern = r'<(@?)([a-zA-Z_][a-zA-Z0-9_]*)>'
         found_placeholders = re.findall(placeholder_pattern, message_template, re.IGNORECASE)
-        
-        # Filter out valid Discord mentions (only numeric IDs are valid)
-        invalid_placeholders = []
-        for match in found_placeholders:
-            at_symbol, text = match
-            # Valid mentions must have numeric IDs, not text
-            if not text.isdigit():
-                placeholder_text = f"<{'@' if at_symbol else ''}{text}>"
-                invalid_placeholders.append(placeholder_text)
-        
+        invalid_placeholders = [f"<{'@' if at_symbol else ''}{text}>" for at_symbol, text in found_placeholders if not text.isdigit()]
         if invalid_placeholders:
-            print(f"⚠️  [REMINDER] WARNING: Found placeholder text in message_template: {invalid_placeholders}")
-            print(f"⚠️  [REMINDER] message_template: {message_template[:200]}")
-            print(f"⚠️  [REMINDER] AI should use actual user IDs, not placeholders. Attempting fallback fix...")
-            
-            # Try to extract actual user IDs from participants/user_mentions and replace placeholders
-            # This is a fallback - the AI should have done this correctly
-            participants_list = memory_data.get('participants') or memory_data.get('user_mentions') or []
-            if isinstance(participants_list, str):
-                try:
-                    participants_list = json.loads(participants_list)
-                except:
-                    participants_list = [participants_list] if participants_list else []
-            
-            # Try to get participants from memory_data
-            if not participants_list or not isinstance(participants_list, list) or len(participants_list) == 0:
-                # If no participants, try to fetch from role if role_id is provided
-                role_id = memory_data.get('role_id')
-                if role_id:
-                    role_id_numeric = _extract_numeric_id(role_id)
-                    if role_id_numeric:
-                        # Try to fetch guild and role members
-                        guild_id = memory_data.get('guild_id')
-                        if guild_id:
-                            try:
-                                guild = bot.get_guild(int(guild_id))
-                                if guild:
-                                    role = guild.get_role(int(role_id_numeric))
-                                    if role:
-                                        # Fetch all members with this role
-                                        members = [member for member in guild.members if role in member.roles]
-                                        if members:
-                                            participants_list = [f"<@{member.id}>" for member in members]
-                                            print(f"✅ [REMINDER] Fetched {len(participants_list)} members from role {role.name}")
-                            except Exception as e:
-                                print(f"⚠️  [REMINDER] Error fetching role members: {e}")
-            
-            if participants_list and isinstance(participants_list, list) and len(participants_list) > 0:
-                # Extract first user ID as winner (fallback - AI should have picked random)
-                first_participant = participants_list[0]
-                winner_id = _extract_numeric_id(first_participant)
-                if winner_id:
-                    # Replace ALL placeholder patterns with actual IDs - catch ANY placeholder text
-                    # Replace any pattern like <@WINNER_ID>, <@winner>, <winner>, <@participant>, etc.
-                    import random
-                    # Pick random participant if we have multiple
-                    random_participant = random.choice(participants_list) if len(participants_list) > 1 else first_participant
-                    random_winner_id = _extract_numeric_id(random_participant) or winner_id
-                    
-                    # Replace ALL invalid placeholder patterns (anything that's not a valid numeric Discord mention)
-                    # This catches <@WINNER_ID>, <@winner>, <winner>, <@participant>, <participants>, etc.
-                    def replace_placeholder(match):
-                        full_match = match.group(0)
-                        # Check if it's a valid numeric mention (shouldn't match, but double-check)
-                        inner = match.group(2) if len(match.groups()) >= 2 else ''
-                        if inner.isdigit():
-                            return full_match  # Valid mention, don't replace
-                        # Replace with actual winner ID
-                        return f'<@{random_winner_id}>'
-                    
-                    # Replace all placeholder patterns
-                    message_template = re.sub(placeholder_pattern, replace_placeholder, message_template, flags=re.IGNORECASE)
-                    
-                    # Also replace common specific patterns as fallback
-                    message_template = re.sub(r'<@?winner[_\w]*>', f'<@{random_winner_id}>', message_template, flags=re.IGNORECASE)
-                    message_template = re.sub(r'<@?participant[_\w]*>', f'<@{random_winner_id}>', message_template, flags=re.IGNORECASE)
-                    
-                    # Replace <participants> or <@participants> with actual participant list
-                    participant_mentions = ' '.join([p if p.startswith('<@') else f'<@{_extract_numeric_id(p)}>' for p in participants_list if _extract_numeric_id(p)])
-                    message_template = re.sub(r'<@?participants[_\w]*>', participant_mentions, message_template, flags=re.IGNORECASE)
-                    print(f"✅ [REMINDER] Fixed placeholders using fallback logic (AI should have done this correctly)")
-                else:
-                    print(f"⚠️  [REMINDER] Could not extract user IDs from participants - placeholders will be sent literally")
-            else:
-                print(f"⚠️  [REMINDER] No participants found to replace placeholders - placeholders will be sent literally")
+            print(f"⚠️  [REMINDER] AI used placeholder text (will be sent literally): {invalid_placeholders}")
+            print(f"⚠️  [REMINDER] AI should have used actual user IDs like <@123456789>, not placeholders")
     
     # Extract mentions
     role_mentions = memory_data.get('role_mentions') or schedule_block.get('role_mentions')
@@ -8279,7 +8198,9 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * "@role" or role names → "role_mentions": ["@role", "<@&role_id>"]
   * User mentions → "user_mentions": ["@user", "<@user_id>"]
   * **IMPORTANT**: If user says "remind @dyno" or "say @dyno", set "target_user_id": "<dyno_user_id>" (NOT the requester's ID)
-  * Only set "target_user_id" to requester's ID if user says "remind me" (no specific user mentioned)
+  * Only set "target_user_id" to requester's ID if user explicitly says "remind me" (e.g., "remind me in 30 seconds to take out the garbage")
+  * If user says "in 30 seconds post..." or "in 1 minute post...", DO NOT set target_user_id - it's just a scheduled post, not a reminder for anyone
+  * DO NOT add the requester to user_mentions or message_template unless they explicitly said "remind me"
 - Example memory_data for a one-off reminder:
   {{
       "intent": "reminder",
@@ -8916,41 +8837,15 @@ async def _deliver_native_reminder(reminder: dict):
                     if updated_template:
                         message_content = updated_template
                     
-                    # FINAL FALLBACK: If placeholders still exist, try to fetch role members and replace
+                    # AI-DRIVEN: Log warning if placeholders detected at delivery, but DO NOT fix them
+                    # The AI is responsible for correct formatting - code just sends what AI stored
                     if message_content and isinstance(message_content, str):
                         placeholder_pattern = r'<(@?)([a-zA-Z_][a-zA-Z0-9_]*)>'
                         found_placeholders = re.findall(placeholder_pattern, message_content, re.IGNORECASE)
                         invalid_placeholders = [f"<{'@' if at_symbol else ''}{text}>" for at_symbol, text in found_placeholders if not text.isdigit()]
-                        
                         if invalid_placeholders:
-                            # Try to fetch role members if role_id is in memory
-                            role_id = memory_data_current.get('role_id')
-                            if role_id and guild_id:
-                                role_id_numeric = _extract_numeric_id(role_id)
-                                if role_id_numeric:
-                                    try:
-                                        guild = bot.get_guild(int(guild_id))
-                                        if guild:
-                                            role = guild.get_role(int(role_id_numeric))
-                                            if role:
-                                                members = [member for member in guild.members if role in member.roles]
-                                                if members:
-                                                    import random
-                                                    random_member = random.choice(members)
-                                                    winner_id = random_member.id
-                                                    
-                                                    # Replace all placeholder patterns
-                                                    def replace_placeholder(match):
-                                                        inner = match.group(2) if len(match.groups()) >= 2 else ''
-                                                        if inner.isdigit():
-                                                            return match.group(0)
-                                                        return f'<@{winner_id}>'
-                                                    
-                                                    message_content = re.sub(placeholder_pattern, replace_placeholder, message_content, flags=re.IGNORECASE)
-                                                    message_content = re.sub(r'<@?winner[_\w]*>', f'<@{winner_id}>', message_content, flags=re.IGNORECASE)
-                                                    print(f"✅ [REMINDER] Fixed placeholders at delivery time using role {role.name}")
-                                    except Exception as e:
-                                        print(f"⚠️  [REMINDER] Error fixing placeholders at delivery: {e}")
+                            print(f"⚠️  [REMINDER-DELIVERY] AI used placeholder text (will be sent literally): {invalid_placeholders}")
+                            print(f"⚠️  [REMINDER-DELIVERY] AI should have used actual user IDs like <@123456789>")
                     
                     # Update channel_id from linked memory if available (AI might have updated it)
                     memory_channel_id = _extract_numeric_id(memory_data_current.get('channel_id') or memory_data_current.get('winner_channel_id') or memory_data_current.get('target_channel_id'))
@@ -9022,9 +8917,12 @@ async def _deliver_native_reminder(reminder: dict):
         if role_mention not in ' '.join(mention_parts) and role_mention not in message_content:
             mention_parts.append(role_mention)
     
-    # IMPORTANT: Only add requester if there's NO specific target_user_id
+    # IMPORTANT: Only add requester if target_user_id is explicitly set to requester (user said "remind me")
     # If user said "remind @dyno", we should NOT mention the requester
-    if not target_user_id and requester_id:
+    # If user said "in 30 seconds post...", we should NOT mention the requester (they didn't say "remind me")
+    # target_user_id will be set to requester only if user explicitly said "remind me", otherwise it's None for "post" commands
+    if target_user_id == requester_id:
+        # User explicitly said "remind me" - add requester mention
         requester_mention = f"<@{requester_id}>"
         # Only add requester if not already mentioned
         if requester_mention not in ' '.join(mention_parts) and requester_mention not in message_content:
@@ -9603,16 +9501,9 @@ CURRENT CONVERSATION CONTEXT:
         policy_decision = None
         if server_memories:
             policy_decision = await evaluate_server_policies(message, server_memories)
+            # Policy actions will be checked after discord_command parsing to see if a reminder is being created
+            # We'll store policy_decision and check it later
             if policy_decision:
-                policy_actions = policy_decision.get('channel_actions') or []
-                if policy_actions:
-                    policy_logs = await execute_channel_actions(
-                        message.guild,
-                        policy_actions,
-                        source=f"POLICY:{username}"
-                    )
-                    if policy_logs:
-                        print("\n".join(policy_logs))
                 if policy_decision.get('guidance'):
                     consciousness_prompt += f"\n\n⚠️ SERVER POLICY GUIDANCE:\n{policy_decision['guidance']}\n"
                 if policy_decision.get('redirect_channel'):
@@ -9643,22 +9534,13 @@ CURRENT CONVERSATION CONTEXT:
                     print(f"⚠️  [{username}] Error handling channels list request: {e}")
 
             if discord_command.get('needs_discord_action') and not wants_channels_list:
-                channel_actions = discord_command.get('channel_actions') or []
-                if (not channel_actions) and discord_command.get('action_type') == 'send_message':
-                    fallback_roles = []
-                    if discord_command.get('target_role'):
-                        fallback_roles = [discord_command.get('target_role')]
-                    fallback_users = []
-                    if discord_command.get('target_user'):
-                        fallback_users = [discord_command.get('target_user')]
-                    channel_actions = [{
-                        "channel": discord_command.get('target_channel'),
-                        "message": discord_command.get('message_content'),
-                        "role_mentions": fallback_roles,
-                        "user_mentions": fallback_users,
-                    }]
-
                 action_type = discord_command.get('action_type')
+                
+                # AI-DRIVEN: Check if AI decided to create a reminder (through reminder_payload)
+                # NO HARDCODED CHECKS - the AI makes all decisions through discord_command parsing
+                is_creating_reminder = False
+                reminder_payload = None
+                
                 if action_type == 'store_memory':
                     memory_type = discord_command.get('memory_type')
                     memory_key = discord_command.get('memory_key')
@@ -9675,18 +9557,50 @@ CURRENT CONVERSATION CONTEXT:
                             memory_key = f"{memory_type}_{user_id}_{int(datetime.now().timestamp())}"
                         print(f"🔍 [{username}] Generated memory_key: {memory_key} (was missing)")
                     
+                    # AI-DRIVEN: Check if AI created a reminder payload (AI decides this, not code)
                     reminder_payload = _prepare_native_reminder_payload(memory_type, memory_key, memory_data, message)
-                    
-                    # CRITICAL: If a reminder is being created, DO NOT execute channel_actions immediately
-                    # The reminder will post when it fires - prevent duplicate posting
                     if reminder_payload and reminder_payload.get('trigger_at'):
-                        # Remove channel_actions if reminder is being created (prevents duplicate posting)
+                        # AI decided to create a reminder - prevent duplicate posting
+                        is_creating_reminder = True
+                        # Remove channel_actions if reminder is being created (AI-driven decision)
                         if message.id in CHANNEL_ACTIONS_STORAGE:
-                            print(f"⚠️  [{username}] Reminder detected - removing channel_actions to prevent duplicate posting")
+                            print(f"⚠️  [{username}] AI created reminder - removing channel_actions to prevent duplicate posting")
                             del CHANNEL_ACTIONS_STORAGE[message.id]
-                            channel_actions = []  # Clear channel_actions for this message
                         memory_data = dict(memory_data)
                         memory_data.setdefault('delivery', 'native_reminder')
+                
+                # AI-DRIVEN: Only process channel_actions if AI did NOT create a reminder
+                # AI makes all decisions - code just follows AI's flags
+                channel_actions = []
+                if not is_creating_reminder:
+                    channel_actions = discord_command.get('channel_actions') or []
+                    if (not channel_actions) and discord_command.get('action_type') == 'send_message':
+                        fallback_roles = []
+                        if discord_command.get('target_role'):
+                            fallback_roles = [discord_command.get('target_role')]
+                        fallback_users = []
+                        if discord_command.get('target_user'):
+                            fallback_users = [discord_command.get('target_user')]
+                        channel_actions = [{
+                            "channel": discord_command.get('target_channel'),
+                            "message": discord_command.get('message_content'),
+                            "role_mentions": fallback_roles,
+                            "user_mentions": fallback_users,
+                        }]
+                
+                # AI-DRIVEN: Check policy actions AFTER we know if AI created a reminder
+                if policy_decision and not is_creating_reminder:
+                    policy_actions = policy_decision.get('channel_actions') or []
+                    if policy_actions:
+                        policy_logs = await execute_channel_actions(
+                            message.guild,
+                            policy_actions,
+                            source=f"POLICY:{username}"
+                        )
+                        if policy_logs:
+                            print("\n".join(policy_logs))
+                
+                if action_type == 'store_memory':
                     
                     # Store in server_memory if we have all required fields (but don't show message for reminders)
                     if memory_type and memory_key and memory_data:
@@ -13062,7 +12976,12 @@ Response: """
                     channel_actions = channel_actions_data.get('actions')
                 files_sent_to_channels = False
                 
+                # AI-DRIVEN: Check if AI created a reminder for this message (stored in discord_command check above)
+                # If channel_actions were cleared from storage above, they won't be here - that's AI-driven decision
+                # NO HARDCODED CHECKS - if channel_actions exist here, AI decided they should execute
+                
                 # If channel_actions exist, execute them (with files if available)
+                # The AI already decided whether to create a reminder or use channel_actions above
                 if channel_actions and channel_actions_data:
                     # Check if channel_actions were already executed
                     already_executed = channel_actions_data.get('executed', False)
