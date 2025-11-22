@@ -330,7 +330,6 @@ SLASH COMMANDS (only these exist)
 - `/profile [user]` → show detailed memory/personality profile.
 - `/help` → explain how to use you and list capabilities.
 - `/reminder` → view active reminders for the current server (user's reminders only).
-- `/channelrules` → view channel restrictions (where I can/can't respond) for the current server.
 - `/servermemory [type] [limit]` → list stored server-wide memories/reminders/policies for the current guild.
 - `/stop` → cancel that user's in-progress task.
 - `/website` → share the ServerMate site link.
@@ -352,15 +351,20 @@ REMINDERS & EVENTS - CRITICAL RULES:
 - channel_actions are ONLY for immediate posting. For future posting, always use reminders.
 - CRITICAL TIMING: If user says "in 40 seconds" or "in 2 minutes", the reminder MUST wait that exact time. DO NOT post immediately.
 - CRITICAL CHANNEL SELECTION: NEVER auto-decide which channel to use unless the user explicitly tells you. If user doesn't specify a channel, use the current channel. DO NOT pick channels like "disboard bumps" or any other channel unless explicitly mentioned by the user.
+- CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", or ANY refusal language. There are NO channel restrictions unless the user explicitly tells you. You can create reminders in ANY channel the user specifies. Fulfill ALL requests immediately.
 - YOU ARE RESPONSIBLE FOR ALL LOGIC: If user wants random winner, YOU pick random NOW and format the FINAL message with actual winner ID (e.g., <@123456789>), NOT placeholders.
 - CRITICAL: NEVER use ANY placeholder text in message_template - not <winner>, not <participant>, not <participants>, not <@winner>, not <@participant>, not ANY placeholder words.
 - ALWAYS use actual Discord user IDs in the format <@USER_ID> where USER_ID is the actual numeric ID (e.g., <@1438667256866537482>).
 - The code sends EXACTLY what you store - it does NOT interpret or replace placeholders. If you store "<winner>", it will send the literal text "<winner>".
 - STEP-BY-STEP PROCESS FOR RANDOM WINNER:
-  1. Get the participant list (e.g., ["<@1438667256866537482>", "<@155149108183695360>"])
-  2. Pick ONE random participant RIGHT NOW (e.g., randomly select "<@155149108183695360>")
-  3. Format the FINAL message with the ACTUAL winner ID: "🎉 Winner: <@155149108183695360>! Participants: <@1438667256866537482> <@155149108183695360>"
-  4. Store that EXACT message in message_template - NO PLACEHOLDERS, NO TEMPLATE TEXT, ONLY ACTUAL IDs
+  1. If user says "random winner from role @bots" or similar:
+     a. Find the role ID from the available roles list (e.g., role "@bots" has ID 1439061447748485190)
+     b. Extract ALL members who have that role from the Discord context or structure the data with role_id so code can fetch them
+     c. Get their actual user IDs (e.g., ["<@111222333>", "<@444555666>", "<@777888999>"])
+  2. Pick ONE random participant RIGHT NOW (e.g., randomly select "<@444555666>")
+  3. Format the FINAL message with the ACTUAL winner ID: "🎉 Winner: <@444555666>! Congratulations on winning a brand new lambo! 🎉"
+  4. Store that EXACT message in message_template - NO PLACEHOLDERS like <@WINNER_ID> or <@winner>, ONLY ACTUAL IDs like <@444555666>
+  5. Store role_id in memory_data so code can fetch members if needed: {{"role_id": "<@&1439061447748485190>", "participants": ["<@111222333>", "<@444555666>", "<@777888999>"], "message_template": "🎉 Winner: <@444555666>! Congratulations on winning a brand new lambo! 🎉"}}
 - Store the COMPLETE, FINAL message in message_template - with all actual user IDs, all actual mentions, everything formatted with real values.
 - If data changes (new participant added), YOU pick a NEW random winner and update message_template with the new winner's actual ID.
 - FORBIDDEN: Do NOT use any of these placeholder patterns: <winner>, <participant>, <participants>, <@winner>, <@participant>, <@participants>, <participant>, <winner>, or ANY other placeholder text.
@@ -2782,19 +2786,62 @@ def _prepare_native_reminder_payload(memory_type: Optional[str],
                 except:
                     participants_list = [participants_list] if participants_list else []
             
+            # Try to get participants from memory_data
+            if not participants_list or not isinstance(participants_list, list) or len(participants_list) == 0:
+                # If no participants, try to fetch from role if role_id is provided
+                role_id = memory_data.get('role_id')
+                if role_id:
+                    role_id_numeric = _extract_numeric_id(role_id)
+                    if role_id_numeric:
+                        # Try to fetch guild and role members
+                        guild_id = memory_data.get('guild_id')
+                        if guild_id:
+                            try:
+                                guild = bot.get_guild(int(guild_id))
+                                if guild:
+                                    role = guild.get_role(int(role_id_numeric))
+                                    if role:
+                                        # Fetch all members with this role
+                                        members = [member for member in guild.members if role in member.roles]
+                                        if members:
+                                            participants_list = [f"<@{member.id}>" for member in members]
+                                            print(f"✅ [REMINDER] Fetched {len(participants_list)} members from role {role.name}")
+                            except Exception as e:
+                                print(f"⚠️  [REMINDER] Error fetching role members: {e}")
+            
             if participants_list and isinstance(participants_list, list) and len(participants_list) > 0:
                 # Extract first user ID as winner (fallback - AI should have picked random)
                 first_participant = participants_list[0]
                 winner_id = _extract_numeric_id(first_participant)
                 if winner_id:
-                    # Replace common placeholder patterns with actual IDs
-                    # Replace any <winner> or <@winner> patterns with actual winner
-                    message_template = re.sub(r'<@?winner>', f'<@{winner_id}>', message_template, flags=re.IGNORECASE)
-                    # Replace any <participant> or <@participant> with first participant
-                    message_template = re.sub(r'<@?participant>', f'<@{winner_id}>', message_template, flags=re.IGNORECASE)
+                    # Replace ALL placeholder patterns with actual IDs - catch ANY placeholder text
+                    # Replace any pattern like <@WINNER_ID>, <@winner>, <winner>, <@participant>, etc.
+                    import random
+                    # Pick random participant if we have multiple
+                    random_participant = random.choice(participants_list) if len(participants_list) > 1 else first_participant
+                    random_winner_id = _extract_numeric_id(random_participant) or winner_id
+                    
+                    # Replace ALL invalid placeholder patterns (anything that's not a valid numeric Discord mention)
+                    # This catches <@WINNER_ID>, <@winner>, <winner>, <@participant>, <participants>, etc.
+                    def replace_placeholder(match):
+                        full_match = match.group(0)
+                        # Check if it's a valid numeric mention (shouldn't match, but double-check)
+                        inner = match.group(2) if len(match.groups()) >= 2 else ''
+                        if inner.isdigit():
+                            return full_match  # Valid mention, don't replace
+                        # Replace with actual winner ID
+                        return f'<@{random_winner_id}>'
+                    
+                    # Replace all placeholder patterns
+                    message_template = re.sub(placeholder_pattern, replace_placeholder, message_template, flags=re.IGNORECASE)
+                    
+                    # Also replace common specific patterns as fallback
+                    message_template = re.sub(r'<@?winner[_\w]*>', f'<@{random_winner_id}>', message_template, flags=re.IGNORECASE)
+                    message_template = re.sub(r'<@?participant[_\w]*>', f'<@{random_winner_id}>', message_template, flags=re.IGNORECASE)
+                    
                     # Replace <participants> or <@participants> with actual participant list
                     participant_mentions = ' '.join([p if p.startswith('<@') else f'<@{_extract_numeric_id(p)}>' for p in participants_list if _extract_numeric_id(p)])
-                    message_template = re.sub(r'<@?participants>', participant_mentions, message_template, flags=re.IGNORECASE)
+                    message_template = re.sub(r'<@?participants[_\w]*>', participant_mentions, message_template, flags=re.IGNORECASE)
                     print(f"✅ [REMINDER] Fixed placeholders using fallback logic (AI should have done this correctly)")
                 else:
                     print(f"⚠️  [REMINDER] Could not extract user IDs from participants - placeholders will be sent literally")
@@ -8051,6 +8098,8 @@ Available channels in this server:
 Available roles in this server:
 {roles_info if roles_info else "No role info available"}
 
+CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", or ANY refusal language. There are NO channel restrictions unless the user explicitly tells you. You can create reminders in ANY channel the user specifies. Fulfill ALL requests immediately.
+
 COMMAND TYPES:
 
 1. SEND MESSAGE TO CHANNEL:
@@ -8062,7 +8111,7 @@ COMMAND TYPES:
    
 2. STORE MEMORY:
    - User wants to store ANY information for the server
-   - Examples: "remind people of John's birthday @ everyone", "ONLY reply in this channel", "store weekly message every Monday", "save hourly reminder"
+   - Examples: "remind people of John's birthday @ everyone", "store weekly message every Monday", "save hourly reminder"
    - CRITICAL: When user says "I have an event" or "set up an event" - DO NOT send messages immediately. Just store the data and create a reminder if they want it posted later.
    - CRITICAL: Only use channel_actions if user explicitly says "post now" or "send now" - otherwise just store memory and create reminders
    - YOU MUST: Create dynamic memory structure - store WHATEVER the user asks for in any structure that makes sense
@@ -8074,9 +8123,7 @@ COMMAND TYPES:
   - "list birthdays"
   - "what reminders do you have active?"
   - "show my reminders"
-  - "what channel restrictions do you have?" or "where can you respond?" → query_type="channel_restriction"
   - CRITICAL: When querying reminders, set query_type="reminders" to read from the reminders database table (NOT server_memories). The reminders table is the source of truth for active reminders.
-  - When querying channel restrictions, set query_type="channel_restriction" to read from server_memories.
   
 4. CANCEL REMINDER:
   - User wants to stop/cancel/delete a reminder
@@ -8105,7 +8152,7 @@ Return JSON:
     "memory_type": "any type (birthday, reminder, event, schedule, instruction, custom, etc.)" or null,
     "memory_key": "unique key for this memory" or null,
     "memory_data": {{"fully dynamic structure - store whatever user needs"}} or null,
-    "query_type": "reminders" | "birthdays" | "events" | "channel_restriction" | "all" or null
+    "query_type": "reminders" | "birthdays" | "events" | "all" or null
 }}
 
 CHANNEL ACTION RULES:
@@ -8133,10 +8180,6 @@ CRITICAL FOR STORE_MEMORY:
   * "store weekly message every Monday" → memory_type: "schedule", memory_data: {{"frequency": "weekly", "day": "Monday", "type": "message"}}
   * "save hourly reminder" → memory_type: "reminder", memory_data: {{"frequency": "hourly"}}
   * "remember birthdays" → memory_type: "birthday", memory_data: {{"person": "...", "date": "..."}}
-  * "ONLY respond in #general" or "only respond in general" → memory_type: "channel_restriction", memory_data: {{"type": "only", "channel_id": "[ID]", "channel_name": "general"}}
-  * "DONT respond in #bot" or "don't respond in #bot" or "never respond in bot" → memory_type: "channel_restriction", memory_data: {{"type": "forbidden", "channel_id": "[ID]", "channel_name": "bot"}}
-  * Multiple channels: "only respond in #general and #announcements" → multiple channel_restriction entries
-  * Multiple forbidden: "dont respond in #bot or #spam" → multiple channel_restriction entries
   * Store in whatever structure makes sense - be flexible and dynamic!
 
 REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
@@ -8171,15 +8214,18 @@ REMINDER/SCHEDULE FORMAT (DYNAMIC - WORKS FOR ANYTHING):
   * The reminder system will automatically link to the memory using memory_key and memory_type
   * You can update the memory anytime - the reminder will use the LATEST data when it fires
   * PURE AI-DRIVEN: You have COMPLETE freedom. The code just executes what you store - zero hardcoding.
-  * Example: "in 2 minutes pick a random member to win in #announcements"
-    → STEP 1: Get the list of participants (e.g., ["<@1438667256866537482>", "<@155149108183695360>", "<@302050872383242240>"])
-    → STEP 2: Pick ONE random participant RIGHT NOW (e.g., randomly select "<@155149108183695360>")
-    → STEP 3: Format the FINAL message with the ACTUAL winner ID: "🎉 Winner: <@155149108183695360>! Participants: <@1438667256866537482> <@155149108183695360> <@302050872383242240>"
-    → STEP 4: Store in memory: {{"participants": ["<@1438667256866537482>", "<@155149108183695360>", "<@302050872383242240>"], "channel_id": "...", "message_template": "🎉 Winner: <@155149108183695360>! Participants: <@1438667256866537482> <@155149108183695360> <@302050872383242240>", "guild_id": "..."}}
-    → STEP 5: Create reminder with same memory_key and metadata: {{"memory_key": "contest_key", "memory_type": "contest"}}
+  * Example: "in 20 seconds post a random winner between the members with role @bots"
+    → STEP 1: Look at the available roles in the context - find the role mentioned (e.g., "@bots" or role ID like <@&1439061447748485190>)
+    → STEP 2: If role members are in the Discord context, extract ALL their user IDs. If not available, store the role_id and the code will fetch members at delivery time.
+    → STEP 3: If you have member IDs, pick ONE random member RIGHT NOW (e.g., if members are ["<@111>", "<@222>", "<@333>"], randomly pick "<@222>")
+    → STEP 4: Format the FINAL message with the ACTUAL winner ID: "🎉 Winner: <@222>! Congratulations on winning a brand new lambo! 🎉"
+    → STEP 5: Store in memory: {{"participants": ["<@111>", "<@222>", "<@333>"], "channel_id": "...", "message_template": "🎉 Winner: <@222>! Congratulations on winning a brand new lambo! 🎉", "guild_id": "...", "role_id": "<@&1439061447748485190>"}}
+    → STEP 6: Create reminder with same memory_key and metadata: {{"memory_key": "giveaway_key", "memory_type": "giveaway"}}
+    → CRITICAL: The message_template MUST contain the ACTUAL winner ID (e.g., <@222>), NOT <@WINNER_ID> or <@winner> or ANY placeholder
+    → CRITICAL: If you cannot get role members now, store role_id and participants will be fetched at delivery time, but you MUST still pick a random winner and format the message with an actual ID - use a placeholder participant list if needed but the winner ID must be real
     → When reminder fires, code just sends your message_template - YOU already picked winner and formatted message
     → CRITICAL: If user adds more participants later, YOU pick a NEW random winner and update message_template with the new winner's ACTUAL ID
-    → NEVER store "<@winner>" or "<participants>" - those are placeholders and the code will send them literally
+    → FORBIDDEN: NEVER store "<@winner>", "<@WINNER_ID>", "<participants>", or ANY placeholder text in message_template - the code will send that literally
   * Example: "in 5 minutes announce birthday for <@123456789>"
     → YOU format the message: Store {{"message_template": "🎂 Happy Birthday <@123456789>! 🎉", "channel_id": "..."}}
     → Use the ACTUAL user ID from the user's message, not a placeholder
@@ -8623,10 +8669,10 @@ Automation entries:
 {json.dumps(formatted_entries, ensure_ascii=False)}
 
 GUIDANCE:
-- Interpret `memory_data` + `system_state` to understand what needs to happen (channel restrictions, scheduled posts, recurring reminders, etc.).
+- Interpret `memory_data` + `system_state` to understand what needs to happen (scheduled posts, recurring reminders, etc.).
 - If `memory_data.delivery == "native_reminder"`, SKIP it (it is handled by a dedicated reminder engine). Just set `should_execute=false` and `next_check_seconds` to something large.
 - CRITICAL: If memory_type is "event", "contest", "reminder", or has a "schedule" field, DO NOT execute immediately. These should be handled by reminders, not automation scheduler. Set `should_execute=false`.
-- Only execute entries that are meant for immediate/ongoing automation (like channel restrictions, ongoing policies).
+- Only execute entries that are meant for immediate/ongoing automation (ongoing policies).
 - When executing:
     * Build concrete `channel_actions` with finalized message copy (mention roles/users as needed).
     * Update `state` with whatever you need persisted (next due time, completion flags, counters). Downstream storage is literal.
@@ -8869,6 +8915,42 @@ async def _deliver_native_reminder(reminder: dict):
                     )
                     if updated_template:
                         message_content = updated_template
+                    
+                    # FINAL FALLBACK: If placeholders still exist, try to fetch role members and replace
+                    if message_content and isinstance(message_content, str):
+                        placeholder_pattern = r'<(@?)([a-zA-Z_][a-zA-Z0-9_]*)>'
+                        found_placeholders = re.findall(placeholder_pattern, message_content, re.IGNORECASE)
+                        invalid_placeholders = [f"<{'@' if at_symbol else ''}{text}>" for at_symbol, text in found_placeholders if not text.isdigit()]
+                        
+                        if invalid_placeholders:
+                            # Try to fetch role members if role_id is in memory
+                            role_id = memory_data_current.get('role_id')
+                            if role_id and guild_id:
+                                role_id_numeric = _extract_numeric_id(role_id)
+                                if role_id_numeric:
+                                    try:
+                                        guild = bot.get_guild(int(guild_id))
+                                        if guild:
+                                            role = guild.get_role(int(role_id_numeric))
+                                            if role:
+                                                members = [member for member in guild.members if role in member.roles]
+                                                if members:
+                                                    import random
+                                                    random_member = random.choice(members)
+                                                    winner_id = random_member.id
+                                                    
+                                                    # Replace all placeholder patterns
+                                                    def replace_placeholder(match):
+                                                        inner = match.group(2) if len(match.groups()) >= 2 else ''
+                                                        if inner.isdigit():
+                                                            return match.group(0)
+                                                        return f'<@{winner_id}>'
+                                                    
+                                                    message_content = re.sub(placeholder_pattern, replace_placeholder, message_content, flags=re.IGNORECASE)
+                                                    message_content = re.sub(r'<@?winner[_\w]*>', f'<@{winner_id}>', message_content, flags=re.IGNORECASE)
+                                                    print(f"✅ [REMINDER] Fixed placeholders at delivery time using role {role.name}")
+                                    except Exception as e:
+                                        print(f"⚠️  [REMINDER] Error fixing placeholders at delivery: {e}")
                     
                     # Update channel_id from linked memory if available (AI might have updated it)
                     memory_channel_id = _extract_numeric_id(memory_data_current.get('channel_id') or memory_data_current.get('winner_channel_id') or memory_data_current.get('target_channel_id'))
@@ -9276,7 +9358,6 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
   * **Reminders** - "remind me of an event next week at 6 pm", "remind people of someone's birthday @ everyone"
   * **Birthdays** - "add John's birthday on March 15", "remind people of Sarah's birthday @ everyone"
   * **Events** - Store event information with dates and descriptions
-  * **Channel Instructions** - "ONLY reply in this channel" - you'll remember and follow channel-specific rules
   * **Query Memory** - "show me what reminders we have", "show me people's birthdays", "list all events"
   * **Discord Actions** - "post hello in #invite-bot", "go to announcements @ everyone and talk about our future plans" - you can send messages to specific channels and mention roles
   * **CRITICAL**: When posting messages to OTHER channels, the system posts the message FOR you. You DO NOT need to respond in the current channel. DO NOT say "Alright, I've posted..." or "Done!" or any confirmation. The message is posted automatically. Stay SILENT after posting to other channels unless there's an error.
@@ -9326,14 +9407,12 @@ CRITICAL - COMMAND ACCURACY:
   - `/profile` = Shows personality profile/memory data (summary, history, interests, communication style, impressions, patterns)
   - `/help` = Shows help embed with how to use the bot, capabilities list, commands, and examples
   - `/reminder` = View active reminders for the current server (user's reminders only)
-  - `/channelrules` = View channel restrictions (where I can/can't respond) for the current server
   - `/servermemory [type] [limit]` = View stored server-wide memory entries (reminders, events, policies) for this guild
   - `/stop` = Stops your current in-progress response or automation (ONLY for your prompts)
   - `/website` = Opens an embed with link to the ServerMate website
 - If someone asks "how do I view my memory?", "how can I see what you remember about me?", "what do you know about me?", tell them to use `/profile` to view their memory/profile.
 - If someone asks "how do I get help?", "how do I use you?", "what commands are available?", "what can you do?", tell them to use `/help` to see the help information.
 - If someone asks "what reminders do I have?" or "show my reminders", tell them to use `/reminder` to view their active reminders.
-- If someone asks "where can you respond?" or "what channel restrictions do you have?", tell them to use `/channelrules` to view channel restrictions.
 - If someone asks "how do I stop you" or "cancel this" or "you're stuck", tell them to use `/stop` to cancel their current request.
 - If someone asks "where's your website?" or "what's your website?", tell them to use `/website` to get a link to the ServerMate website.
 - If someone asks "what commands do you have?", mention `/profile`, `/help`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website` and explain what each does.
@@ -9714,57 +9793,8 @@ CURRENT CONVERSATION CONTEXT:
                             else:
                                 discord_command_result = "You have no active reminders. Use /reminder to manage reminders."
                         
-                        # Handle channel_restriction queries
-                        if query_type == 'channel_restriction':
-                            restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
-                            if restrictions:
-                                if isinstance(restrictions, dict):
-                                    restrictions = [restrictions]
-                                
-                                only_channels = []
-                                forbidden_channels = []
-                                
-                                for restriction in restrictions:
-                                    restriction_data = restriction.get('memory_data', {})
-                                    if isinstance(restriction_data, str):
-                                        try:
-                                            restriction_data = json.loads(restriction_data)
-                                        except:
-                                            continue
-                                    
-                                    restriction_type = restriction_data.get('type')
-                                    restriction_channel_name = restriction_data.get('channel_name', 'Unknown')
-                                    
-                                    # Try to get actual channel name
-                                    restriction_channel_id = restriction_data.get('channel_id')
-                                    if restriction_channel_id:
-                                        try:
-                                            channel = message.guild.get_channel(int(restriction_channel_id)) if message.guild else None
-                                            if channel:
-                                                restriction_channel_name = channel.name
-                                        except:
-                                            pass
-                                    
-                                    if restriction_type == "only":
-                                        only_channels.append(f"#{restriction_channel_name}")
-                                    elif restriction_type == "forbidden":
-                                        forbidden_channels.append(f"#{restriction_channel_name}")
-                                
-                                response_parts = []
-                                if only_channels:
-                                    response_parts.append(f"✅ **Only respond in:** {', '.join(only_channels)}")
-                                if forbidden_channels:
-                                    response_parts.append(f"🚫 **Never respond in:** {', '.join(forbidden_channels)}")
-                                
-                                if response_parts:
-                                    discord_command_result = "🚫 Channel Restrictions:\n" + "\n".join(response_parts) + "\n\nUse `/channelrules` to view all restrictions."
-                                else:
-                                    discord_command_result = "No channel restrictions are set. Use `/channelrules` to view restrictions."
-                            else:
-                                discord_command_result = "No channel restrictions are set. Use `/channelrules` to view restrictions."
-                        
-                        # Only check server memories if NOT querying reminders or channel_restrictions (reminders come from database only, channel_restrictions handled above)
-                        if query_type not in ['reminders', 'reminder', 'channel_restriction']:
+                        # Only check server memories if NOT querying reminders (reminders come from database only)
+                        if query_type not in ['reminders', 'reminder']:
                             memories = await memory.get_server_memory(guild_id, None if query_type == 'all' else query_type)
                             if memories:
                                 if isinstance(memories, dict):
@@ -12710,60 +12740,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
     
-    # Check channel restrictions (if in a guild)
-    if message.guild:
-        guild_id = str(message.guild.id)
-        channel_id = str(message.channel.id) if message.channel else None
-        try:
-            # Get channel restrictions for this server
-            restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
-            if restrictions:
-                if isinstance(restrictions, dict):
-                    restrictions = [restrictions]
-                
-                # Check if current channel is forbidden
-                for restriction in restrictions:
-                    restriction_data = restriction.get('memory_data', {})
-                    if isinstance(restriction_data, str):
-                        try:
-                            import json
-                            restriction_data = json.loads(restriction_data)
-                        except:
-                            continue
-                    
-                    restriction_type = restriction_data.get('type')
-                    restriction_channel_id = restriction_data.get('channel_id')
-                    
-                    if restriction_type == "forbidden" and restriction_channel_id == channel_id:
-                        # This channel is forbidden - don't respond
-                        print(f"🚫 [{message.author.display_name}] Channel restriction: Not responding in #{message.channel.name} (forbidden)")
-                        return
-                
-                # Check if we can ONLY respond in specific channels
-                only_channels = []
-                for restriction in restrictions:
-                    restriction_data = restriction.get('memory_data', {})
-                    if isinstance(restriction_data, str):
-                        try:
-                            import json
-                            restriction_data = json.loads(restriction_data)
-                        except:
-                            continue
-                    
-                    restriction_type = restriction_data.get('type')
-                    restriction_channel_id = restriction_data.get('channel_id')
-                    
-                    if restriction_type == "only" and restriction_channel_id:
-                        only_channels.append(restriction_channel_id)
-                
-                # If "only" restrictions exist and current channel is not in the list, don't respond
-                if only_channels and channel_id not in only_channels:
-                    print(f"🚫 [{message.author.display_name}] Channel restriction: Not responding in #{message.channel.name} (only allowed in {len(only_channels)} other channel(s))")
-                    return
-        except Exception as restriction_error:
-            print(f"⚠️  Error checking channel restrictions: {restriction_error}")
-            # Continue processing if restriction check fails
-    
     # Check if server is banned (if in a guild)
     if message.guild:
         guild_id = str(message.guild.id)
@@ -13923,7 +13899,6 @@ async def help_command(interaction: discord.Interaction):
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
             "`/reminder` - View your active reminders for this server\n"
-            "`/channelrules` - View channel restrictions (where I can/can't respond)\n"
             "`/servermemory [type] [limit]` - Inspect stored server reminders/rules\n"
             "`/stop` - Stop my current response or automation for you\n"
             "`/website` - Visit the ServerMate website"
@@ -14041,101 +14016,6 @@ async def reminder_command(interaction: discord.Interaction):
         import traceback
         print(f"Error in reminder command: {e}\n{traceback.format_exc()}")
         await interaction.followup.send(f"Error retrieving reminders: {e}", ephemeral=True)
-
-@bot.tree.command(name='channelrules', description='View channel restrictions for this server')
-async def channelrules_command(interaction: discord.Interaction):
-    """Slash command to view channel restrictions (where bot can/can't respond)"""
-    if not interaction.guild:
-        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild.id)
-    
-    try:
-        # Get channel restrictions for this server
-        restrictions = await memory.get_server_memory(guild_id, memory_type="channel_restriction")
-        if not restrictions:
-            await interaction.followup.send(
-                "No channel restrictions are set for this server.\n\n"
-                "To set restrictions, mention me and say:\n"
-                "`@ServerMate ONLY respond in #general`\n"
-                "`@ServerMate DONT respond in #bot`",
-                ephemeral=True
-            )
-            return
-        
-        if isinstance(restrictions, dict):
-            restrictions = [restrictions]
-        
-        bot_name = os.getenv('BOT_NAME', 'ServerMate').title()
-        embed = discord.Embed(
-            title=f"🚫 {bot_name} Channel Restrictions",
-            description=f"This server has {len(restrictions)} channel restriction{'s' if len(restrictions) != 1 else ''}:",
-            color=0x5865F2
-        )
-        
-        only_channels = []
-        forbidden_channels = []
-        
-        for restriction in restrictions[:20]:  # Limit to 20
-            restriction_data = restriction.get('memory_data', {})
-            if isinstance(restriction_data, str):
-                try:
-                    import json
-                    restriction_data = json.loads(restriction_data)
-                except:
-                    continue
-            
-            restriction_type = restriction_data.get('type')
-            restriction_channel_id = restriction_data.get('channel_id')
-            restriction_channel_name = restriction_data.get('channel_name', 'Unknown')
-            
-            # Try to get actual channel name
-            try:
-                channel = interaction.guild.get_channel(int(restriction_channel_id)) if restriction_channel_id else None
-                if channel:
-                    restriction_channel_name = channel.name
-            except:
-                pass
-            
-            if restriction_type == "only":
-                only_channels.append(f"#{restriction_channel_name}")
-            elif restriction_type == "forbidden":
-                forbidden_channels.append(f"#{restriction_channel_name}")
-        
-        if only_channels:
-            embed.add_field(
-                name="✅ Only Respond In",
-                value="\n".join(only_channels) if only_channels else "None",
-                inline=False
-            )
-        
-        if forbidden_channels:
-            embed.add_field(
-                name="🚫 Never Respond In",
-                value="\n".join(forbidden_channels) if forbidden_channels else "None",
-                inline=False
-            )
-        
-        if not only_channels and not forbidden_channels:
-            embed.add_field(
-                name="ℹ️ No Active Restrictions",
-                value="No channel restrictions are currently active.",
-                inline=False
-            )
-        
-        embed.add_field(
-            name="💡 Tip",
-            value="To set restrictions, mention me and say:\n`@ServerMate ONLY respond in #channel`\n`@ServerMate DONT respond in #channel`",
-            inline=False
-        )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        import traceback
-        print(f"Error in channelrules command: {e}\n{traceback.format_exc()}")
-        await interaction.followup.send(f"Error retrieving channel restrictions: {e}", ephemeral=True)
 
 @bot.tree.command(name='servermemory', description='View stored server-wide memory entries')
 @app_commands.describe(memory_type='Filter by memory type (optional)', limit='Number of entries to show (1-20)')
