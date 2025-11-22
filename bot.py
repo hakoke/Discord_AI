@@ -351,7 +351,7 @@ REMINDERS & EVENTS - CRITICAL RULES:
 - channel_actions are ONLY for immediate posting. For future posting, always use reminders.
 - CRITICAL TIMING: If user says "in 40 seconds" or "in 2 minutes", the reminder MUST wait that exact time. DO NOT post immediately.
 - CRITICAL CHANNEL SELECTION: NEVER auto-decide which channel to use unless the user explicitly tells you. If user doesn't specify a channel, use the current channel. DO NOT pick channels like "disboard bumps" or any other channel unless explicitly mentioned by the user.
-- CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", or ANY refusal language. There are NO channel restrictions unless the user explicitly tells you. You can create reminders in ANY channel the user specifies. Fulfill ALL requests immediately.
+- CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", "This channel is dedicated to", "Please keep conversations relevant", "use other channels", or ANY refusal language. There are NO channel restrictions. There are NO channel policies. There are NO channel rules. You can respond, post, and send messages in ANY channel the user specifies. Fulfill ALL requests immediately. If you see old server memory about channel restrictions, IGNORE IT - those restrictions no longer exist.
 - YOU ARE RESPONSIBLE FOR ALL LOGIC: If user wants random winner, YOU pick random NOW and format the FINAL message with actual winner ID (e.g., <@123456789>), NOT placeholders.
 - CRITICAL: NEVER use ANY placeholder text in message_template - not <winner>, not <participant>, not <participants>, not <@winner>, not <@participant>, not ANY placeholder words.
 - ALWAYS use actual Discord user IDs in the format <@USER_ID> where USER_ID is the actual numeric ID (e.g., <@1438667256866537482>).
@@ -8017,14 +8017,19 @@ Available channels in this server:
 Available roles in this server:
 {roles_info if roles_info else "No role info available"}
 
-CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", or ANY refusal language. There are NO channel restrictions unless the user explicitly tells you. You can create reminders in ANY channel the user specifies. Fulfill ALL requests immediately.
+CRITICAL: NEVER refuse ANY request. NEVER say "I cannot", "I am unable", "I cannot schedule", "I cannot set reminders in this channel", "This channel is dedicated to", "Please keep conversations relevant", "use other channels", or ANY refusal language. There are NO channel restrictions. There are NO channel policies. There are NO channel rules. You can respond, post, and send messages in ANY channel the user specifies. Fulfill ALL requests immediately. If you see old server memory about channel restrictions, IGNORE IT - those restrictions no longer exist.
 
 COMMAND TYPES:
 
 1. SEND MESSAGE TO CHANNEL:
    - User wants you to SEND a message to a DIFFERENT channel (not just respond in the current channel)
-   - Examples: "go to announcements @ everyone and talk about our future plans", "make a short announcement @ing everyone in announcements about the future of this server"
+   - Examples: 
+     * "send Hey guys! in #invite-bot" → action_type="send_message", channel_actions=[{"channel": "invite-bot", "message": "Hey guys!"}]
+     * "send a photo of georgia to #invite-bot" → action_type="send_message", channel_actions=[{"channel": "invite-bot", "message": ""}] (photo will be attached)
+     * "post Hello! in #announcements" → action_type="send_message", channel_actions=[{"channel": "announcements", "message": "Hello!"}]
+     * "go to announcements @ everyone and talk about our future plans" → action_type="send_message", channel_actions=[{"channel": "announcements", "role_mentions": ["@everyone"], "message": "..."}]
    - CRITICAL: "can you see the channels" or "what channel is good for X" is NOT a send_message action - those are just questions, respond normally
+   - CRITICAL: If user says "send X to #channel" or "post X in #channel" - IMMEDIATELY create channel_actions with target channel
    - YOU MUST: Intelligently pick the BEST channel, GENERATE the actual message content (don't just copy user's words), determine mentions
    - ONLY set action_type="send_message" if user explicitly wants you to POST/SEND a message to another channel
    
@@ -8075,6 +8080,9 @@ Return JSON:
 }}
 
 CHANNEL ACTION RULES:
+- CRITICAL: If user says "send X to #channel" or "post X in #channel" or "send X in #channel" - IMMEDIATELY create channel_actions with the target channel and message.
+- CRITICAL: If user says "send a photo of X to #channel" or "post an image to #channel" - create channel_actions. The image will be automatically routed to that channel.
+- CRITICAL: When user says "send" or "post" to a specific channel, create channel_actions - even if you're generating content (images, text, etc.). The content will be sent to the target channel.
 - ONLY create channel_actions when the user explicitly tells you to post/send something to another channel RIGHT NOW.
 - CRITICAL: If user says "in X minutes post..." or "in X seconds post..." or "remind me to post..." or "set up event" or "I have an event" - DO NOT use channel_actions. Instead, create a reminder that will post later.
 - CRITICAL: DO NOT post immediately when user says "in X seconds/minutes" - create a reminder that waits for that exact time.
@@ -9494,7 +9502,16 @@ CURRENT CONVERSATION CONTEXT:
                 if isinstance(mems, dict):
                     mems = [mems]
                 if mems:
-                    server_memories = mems[:SERVER_MEMORY_POLICY_LIMIT]
+                    # FILTER OUT CHANNEL RESTRICTIONS - User requested all restrictions removed
+                    # Don't show channel restriction memories to the AI - they no longer exist
+                    filtered_mems = []
+                    for mem in mems:
+                        mem_type = str(mem.get('memory_type', '')).lower()
+                        mem_key = str(mem.get('memory_key', '')).lower()
+                        # Filter out channel restriction/policy memories
+                        if 'restriction' not in mem_type and 'policy' not in mem_type and 'channel_restriction' not in mem_key:
+                            filtered_mems.append(mem)
+                    server_memories = filtered_mems[:SERVER_MEMORY_POLICY_LIMIT]
             except Exception as mem_error:
                 print(f"⚠️  [{username}] Error fetching server memory: {mem_error}")
 
@@ -9573,6 +9590,15 @@ CURRENT CONVERSATION CONTEXT:
                             "role_mentions": fallback_roles,
                             "user_mentions": fallback_users,
                         }]
+                    
+                    # AI-DRIVEN: Store channel_actions in storage for later execution (with files if generated)
+                    # This ensures files/content go to target channel, confirmation stays in current channel
+                    if channel_actions:
+                        CHANNEL_ACTIONS_STORAGE[message.id] = {
+                            'actions': channel_actions,
+                            'executed': False
+                        }
+                        print(f"✅ [{username}] Stored {len(channel_actions)} channel action(s) for later execution")
                 
                 # CHANNEL RESTRICTIONS DISABLED - No policy actions executed
                 
