@@ -1968,7 +1968,7 @@ VISUAL ASSETS (images to download):
 METADATA (text information):
 - current_channel: Current channel name and info (always useful)
 - all_channels: List of ALL server channels (only if user asks about channels)
-- user_roles: User's roles (only if user asks about their roles)
+- user_roles: User's roles OR bot's roles (extract if user asks about roles - the code will determine whose roles based on context)
 - all_roles: List of ALL server roles (only if user asks about server roles)
 - mentioned_users: Info about mentioned users (only if users are mentioned)
 - server_info: Server name, icon, description (only if user asks about server)
@@ -1976,10 +1976,10 @@ METADATA (text information):
 - profile_pictures_urls: Profile picture URLs (only if user asks about profile pictures)
 
 Extract ONLY if needed:
-- User asks about THEIR OWN profile picture → extract profile_picture assets AND profile_pictures_urls metadata
+- User asks about THEIR OWN profile picture (e.g., "show me my profile picture", "what's my avatar", "my pfp") → extract profile_picture assets AND profile_pictures_urls metadata
 - User asks about BOT'S profile picture or SERVER ICON → extract mentioned_users_pfps (for bot) AND server_icon assets
 - User asks about channels → extract all_channels metadata (NOT assets)
-- User asks about roles → extract user_roles/all_roles metadata (NOT assets unless role_icon needed)
+- User asks about roles (e.g., "what roles do u have", "your roles", "my roles") → extract user_roles metadata (code will determine if it's bot or user roles)
 - User mentions users → extract mentioned_users metadata AND mentioned_users_pfps assets if editing/analyzing
 - User asks about server → extract server_info metadata AND server_icon asset
 - Message has stickers/GIFs → always extract stickers/gifs assets AND metadata
@@ -7818,32 +7818,42 @@ async def extract_discord_metadata(message: discord.Message, metadata_needed: Di
             if gif_attachments:
                 metadata_parts.extend(gif_attachments)
         
-        # Extract user roles (if in a guild)
-        if message.guild and message.author:
+        # Extract roles (if in a guild)
+        # AI-DRIVEN: Extract BOTH bot and user roles, let AI decide which to mention in response
+        if message.guild and metadata_needed.get('user_roles', False):
             try:
-                # Try to get member from cache first, then fetch if needed
-                member = message.guild.get_member(message.author.id)
-                if not member:
-                    # Member not in cache, try to fetch (but don't block if it fails)
+                # Extract user's roles
+                user_member = message.guild.get_member(message.author.id)
+                if not user_member:
                     try:
-                        member = await message.guild.fetch_member(message.author.id)
+                        user_member = await message.guild.fetch_member(message.author.id)
                     except:
-                        member = None
+                        user_member = None
                 
-                if member and member.roles:
-                    # Filter out @everyone role
-                    roles = [role for role in member.roles if role.name != '@everyone']
-                    if roles:
-                        role_names = [role.name for role in roles]
-                        # Get role colors if available
-                        role_info = []
-                        for role in roles[:10]:  # Limit to 10 roles
+                if user_member and user_member.roles:
+                    user_roles = [role for role in user_member.roles if role.name != '@everyone']
+                    if user_roles:
+                        user_role_info = []
+                        for role in user_roles[:10]:
                             role_str = role.name
-                            if role.color.value != 0:  # Has a color
+                            if role.color.value != 0:
                                 hex_color = f"#{role.color.value:06x}"
                                 role_str += f" (color: {hex_color})"
-                            role_info.append(role_str)
-                        metadata_parts.append(f"User roles: {', '.join(role_info)}")
+                            user_role_info.append(role_str)
+                        metadata_parts.append(f"User's roles ({message.author.display_name}): {', '.join(user_role_info)}")
+                
+                # Extract bot's roles
+                if message.guild.me and message.guild.me.roles:
+                    bot_roles = [role for role in message.guild.me.roles if role.name != '@everyone']
+                    if bot_roles:
+                        bot_role_info = []
+                        for role in bot_roles[:10]:
+                            role_str = role.name
+                            if role.color.value != 0:
+                                hex_color = f"#{role.color.value:06x}"
+                                role_str += f" (color: {hex_color})"
+                            bot_role_info.append(role_str)
+                        metadata_parts.append(f"Bot's roles (ServerMate): {', '.join(bot_role_info)}")
             except Exception as e:
                 # Silently fail if we can't get roles
                 pass
@@ -11653,7 +11663,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     if server_icon_idx:
                         image_context += f"- Image {server_icon_idx} is the server/guild icon\n"
                     
-                    critical_instructions = f"{image_context}\n\nCRITICAL: Based on the user's message, intelligently determine what they're asking about:\n- If they ask about THEIR OWN profile picture/avatar/pfp → describe ONLY the user's profile picture (Image {author_profile_picture_idx if author_profile_picture_idx else 'N/A'})\n- If they ask about BOT'S profile picture/avatar or mention the bot → describe ONLY the bot's profile picture (Image {bot_profile_picture_idx if bot_profile_picture_idx else 'N/A'})\n- If they ask about SERVER ICON/guild icon → describe ONLY the server icon (Image {server_icon_idx if server_icon_idx else 'N/A'})\n- If they ask about CHANNELS → ignore all images and focus on answering the channel question\n- 🚨 If they ask for BROWSER AUTOMATION/VIDEOS (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record') → IGNORE ALL PROFILE PICTURES AND SERVER ICONS - they are NOT relevant to browser automation tasks - DO NOT mention them in your response\n- Only describe images that are relevant to what the user is actually asking about\n- DO NOT describe irrelevant images - be smart and focus on what the user wants to know\n- Use your understanding of natural language to determine the user's intent - don't rely on exact phrase matching"
+                    critical_instructions = f"{image_context}\n\nCRITICAL - USE YOUR INTELLIGENCE:\nBased on the user's message, determine what they're asking about and respond accordingly:\n- Read the image labels above carefully - they tell you exactly whose profile picture each image is\n- If the user asks about 'my profile picture' or 'my avatar', they mean THEIR OWN (the message author's)\n- If the user asks about 'your profile picture' or 'your avatar', they mean the BOT'S profile picture\n- If the user asks about channels, roles, or other non-image topics, don't describe images unless relevant\n- For browser automation requests, ignore profile pictures and server icons entirely\n- Only describe images that are actually relevant to what the user is asking about\n- Use natural language understanding to determine intent - you're smart enough to figure this out"
                     
                     response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\n🚨 CRITICAL FOR BROWSER AUTOMATION: If the user is asking for browser automation/videos (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record'), DO NOT mention or describe profile pictures or server icons in your response - they are completely irrelevant to browser automation tasks. Focus ONLY on the automation task and any screenshots/videos that were captured.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
                 print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
