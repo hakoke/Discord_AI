@@ -12162,8 +12162,28 @@ Now decide: "{message.content}" -> """
                     print(f"✏️  [IMAGE EDIT] Edit prompt: '{edit_prompt[:100]}...'")
                     print(f"✏️  [IMAGE EDIT] Using Gemini 2.5 Flash Image model for editing")
                     
-                    # Get the first image to edit
-                    original_image_bytes = image_parts[0]['data']
+                    # AI-DRIVEN: Prioritize the most relevant image for editing
+                    # 1. First, try to find non-Discord-asset images (actual content images, not profile pictures)
+                    # 2. If only Discord assets exist, use the first one (user explicitly wants to edit their profile)
+                    target_image = None
+                    target_image_idx = None
+                    
+                    # Find the first non-Discord-asset image (prioritize actual content)
+                    for idx, img in enumerate(image_parts):
+                        if img.get('source') != 'discord_asset':
+                            target_image = img
+                            target_image_idx = idx
+                            print(f"✏️  [IMAGE EDIT] Selected image {idx + 1}/{len(image_parts)} for editing (non-Discord-asset)")
+                            break
+                    
+                    # If no non-Discord-asset images, use the first image (likely user's profile picture)
+                    if target_image is None:
+                        target_image = image_parts[0]
+                        target_image_idx = 0
+                        print(f"✏️  [IMAGE EDIT] Selected image 1/{len(image_parts)} for editing (Discord asset - user's profile picture)")
+                    
+                    # Get the image bytes to edit
+                    original_image_bytes = target_image['data']
                     print(f"✏️  [IMAGE EDIT] Original image size: {len(original_image_bytes)} bytes")
                     
                     try:
