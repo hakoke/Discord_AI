@@ -323,6 +323,7 @@ AUTOMATION & MEDIA
 SLASH COMMANDS (only these exist)
 - `/profile [user]` → show detailed memory/personality profile.
 - `/help` → explain how to use you and list capabilities.
+- `/limits` → view your usage limits and remaining quota (video generation limits, etc.).
 - `/reminder` → view active reminders for the current server (user's reminders only).
 - `/servermemory [type] [limit]` → list stored server-wide memories/reminders/policies for the current guild.
 - `/stop` → cancel that user's in-progress task.
@@ -9689,6 +9690,10 @@ SLASH COMMANDS AVAILABLE:
   - What it does: Displays a help embed showing how to interact with me (mention, reply, say name), what I can do (all capabilities), available slash commands, and usage examples
   - When to use: When someone asks "how do I use you?", "what can you do?", "what commands are available?", or needs general help getting started
 
+- `/limits` - View your usage limits and remaining quota (video generation limits, etc.). Shows how many videos you've used, how many remain, and when limits reset. Use this when you want to check your status!
+  - What it does: Displays an embed showing your current usage for all features with limits (currently video generation: 5 per day, resets every 24 hours)
+  - When to use: When you want to check how many videos you have left, when you can generate another video, or see your overall usage status
+
 - `/servermemory [memory_type] [limit]` - View server memory entries (reminders, events, policies) for this guild. Optional filters let you focus on a specific memory type or limit the output. Great for "what do you have stored about this server?" style questions.
 
 - `/stop` - Stop my current response or automation for YOU (it won't affect anyone else's messages)
@@ -9700,20 +9705,22 @@ SLASH COMMANDS AVAILABLE:
   - When to use: When someone asks "where's your website?", "what's your website?", "show me your site", or wants to learn more about ServerMate online
 
 CRITICAL - COMMAND ACCURACY:
-- The slash commands that exist are: `/profile`, `/help`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website`. DO NOT invent or mention any others.
+- The slash commands that exist are: `/profile`, `/help`, `/limits`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website`. DO NOT invent or mention any others.
 - You MUST know what each command does:
   - `/profile` = Shows personality profile/memory data (summary, history, interests, communication style, impressions, patterns)
   - `/help` = Shows help embed with how to use the bot, capabilities list, commands, and examples
+  - `/limits` = Shows user's usage limits and remaining quota (video generation limits, etc.) - use this when users ask about limits, remaining videos, or when they can generate another video
   - `/reminder` = View active reminders for the current server (user's reminders only)
   - `/servermemory [type] [limit]` = View stored server-wide memory entries (reminders, events, policies) for this guild
   - `/stop` = Stops your current in-progress response or automation (ONLY for your prompts)
   - `/website` = Opens an embed with link to the ServerMate website
 - If someone asks "how do I view my memory?", "how can I see what you remember about me?", "what do you know about me?", tell them to use `/profile` to view their memory/profile.
 - If someone asks "how do I get help?", "how do I use you?", "what commands are available?", "what can you do?", tell them to use `/help` to see the help information.
+- If someone asks "how many videos do I have left?", "when can I generate another video?", "what are my limits?", "how long until I can do another video?", or any question about video limits/usage, answer their question AND recommend they use `/limits` to see their current status.
 - If someone asks "what reminders do I have?" or "show my reminders", tell them to use `/reminder` to view their active reminders.
 - If someone asks "how do I stop you" or "cancel this" or "you're stuck", tell them to use `/stop` to cancel their current request.
 - If someone asks "where's your website?" or "what's your website?", tell them to use `/website` to get a link to the ServerMate website.
-- If someone asks "what commands do you have?", mention `/profile`, `/help`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website` and explain what each does.
+- If someone asks "what commands do you have?", mention `/profile`, `/help`, `/limits`, `/reminder`, `/channelrules`, `/servermemory`, `/stop`, and `/website` and explain what each does.
 - DO NOT invent or mention commands like `/memory`, `/remember`, `/forget`, `/stats`, `/imagine`, or any other commands that don't exist.
 
 Examples of correct responses:
@@ -10171,20 +10178,26 @@ CURRENT CONVERSATION CONTEXT:
         
         if needs_ai_video and VEO_AVAILABLE:
             try:
+                # Video limit exception: user ID 242681931332976640 has unlimited videos
+                VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
+                video_limit = 5 if user_id not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
+                
                 active_videos = await db.get_active_video_generations(user_id)
                 video_count = len(active_videos)
                 
-                if video_count >= 5:
+                if video_count >= video_limit:
                     video_generation_status = {
                         'success': False,
                         'error': 'limit_reached',
                         'count': video_count,
                         'total': 5
                     }
-                    print(f"🎬 [{username}] Video generation limit reached: {video_count}/5")
+                    print(f"🎬 [{username}] Video generation limit reached: {video_count}/{video_limit if video_limit != float('inf') else '∞'}")
                 else:
-                    remaining = 5 - video_count
-                    print(f"🎬 [{username}] Video generation requested ({video_count}/5 used, {remaining} remaining)")
+                    remaining = (video_limit - video_count) if video_limit != float('inf') else float('inf')
+                    remaining_str = f"{remaining}" if remaining != float('inf') else "∞"
+                    limit_str = f"{video_limit}" if video_limit != float('inf') else "∞"
+                    print(f"🎬 [{username}] Video generation requested ({video_count}/{limit_str} used, {remaining_str} remaining)")
                     
                     # Extract video prompt from message - remove common request phrases but keep the actual content
                     video_prompt = message.content
@@ -10237,14 +10250,19 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                         if generated_video:
                             await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
                             new_count = video_count + 1
+                            # Use the same limit check for status
+                            VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
+                            user_video_limit = 5 if user_id not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
+                            total_str = f"{user_video_limit}" if user_video_limit != float('inf') else "∞"
+                            
                             # Store video generation status for AI to respond naturally (no hardcoded messages)
                             video_generation_status = {
                                 'success': True,
                                 'count': new_count,
-                                'total': 5,
+                                'total': user_video_limit if user_video_limit != float('inf') else None,  # None means unlimited
                                 'expires_hours': 24
                             }
-                            print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/5)")
+                            print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/{total_str})")
                         else:
                             video_generation_status = {'success': False, 'error': 'generation_failed'}
                             print(f"🎬 [{username}] ⚠️  Video generation returned None")
@@ -12062,7 +12080,11 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             if status.get('success'):
                 video_count = status.get('count', 0)
                 video_total = status.get('total', 5)
-                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- **CRITICAL**: You MUST mention the video usage count in your response: '{video_count}/{video_total} videos per day' or '{video_count}/{video_total} per day' or similar. This is important information the user needs to know.\n- Usage: {video_count}/{video_total} videos per day (each expires 24 hours after creation).\n- Respond naturally about generating the video - mention it briefly and positively, and ALWAYS include the usage count ({video_count}/{video_total}). DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it and mention the usage count."
+                # Handle unlimited users (total is None)
+                if video_total is None:
+                    response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- This user has unlimited video generation (no daily limit).\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
+                else:
+                    response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- **CRITICAL**: You MUST mention the video usage count in your response: '{video_count}/{video_total} videos per day' or '{video_count}/{video_total} per day' or similar. This is important information the user needs to know.\n- Usage: {video_count}/{video_total} videos per day (each expires 24 hours after creation).\n- Respond naturally about generating the video - mention it briefly and positively, and ALWAYS include the usage count ({video_count}/{video_total}). DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it and mention the usage count."
             elif status.get('error') == 'content_policy':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was blocked due to content safety policies.\n- Inform the user politely that the video couldn't be generated due to content restrictions, and suggest trying a different prompt."
             elif status.get('error') == 'duration_invalid':
@@ -14508,6 +14530,7 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/profile [user]` - View detailed personality profile\n"
             "`/help` - Show this help message\n"
+            "`/limits` - View your usage limits and remaining quota\n"
             "`/reminder` - View your active reminders for this server\n"
             "`/servermemory [type] [limit]` - Inspect stored server reminders/rules\n"
             "`/stop` - Stop my current response or automation for you\n"
@@ -14710,6 +14733,107 @@ async def stop_command(interaction: discord.Interaction):
         await interaction.response.send_message(
             "Your responses already finished – there's nothing left to stop.", ephemeral=True
         )
+
+@bot.tree.command(name='limits', description='View your current usage limits and remaining quota')
+async def limits_command(interaction: discord.Interaction):
+    """Slash command to view user limits"""
+    await interaction.response.defer()
+    
+    user_id = str(interaction.user.id)
+    user_id_int = interaction.user.id
+    
+    # Video limit exception
+    VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
+    video_limit = 5 if user_id_int not in VIDEO_LIMIT_EXCEPTIONS else None
+    
+    embed = discord.Embed(
+        title="📊 Your Limits & Usage",
+        description="Here's your current usage status:",
+        color=0x5865F2
+    )
+    
+    # Video generation limits
+    try:
+        active_videos = await db.get_active_video_generations(user_id)
+        video_count = len(active_videos)
+        
+        if video_limit is None:
+            # Unlimited user
+            video_status = f"✅ **Unlimited** (no daily limit)"
+            video_info = "You have unlimited video generation!"
+        else:
+            remaining = video_limit - video_count
+            if remaining <= 0:
+                # Find the earliest expiration
+                if active_videos:
+                    earliest_expiry = min(video.get('expires_at') for video in active_videos if video.get('expires_at'))
+                        if earliest_expiry:
+                            from datetime import datetime, timezone
+                            now = datetime.now(timezone.utc)
+                            if isinstance(earliest_expiry, str):
+                                # Try to parse ISO format string
+                                try:
+                                    earliest_expiry = datetime.fromisoformat(earliest_expiry.replace('Z', '+00:00'))
+                                except:
+                                    try:
+                                        # Try parsing with strptime for common formats
+                                        earliest_expiry = datetime.strptime(earliest_expiry, '%Y-%m-%d %H:%M:%S%z')
+                                    except:
+                                        earliest_expiry = None
+                            elif isinstance(earliest_expiry, datetime):
+                                pass
+                            else:
+                                earliest_expiry = None
+                            
+                            if earliest_expiry:
+                                if earliest_expiry.tzinfo is None:
+                                    earliest_expiry = earliest_expiry.replace(tzinfo=timezone.utc)
+                                time_until = earliest_expiry - now
+                                if time_until.total_seconds() > 0:
+                                    hours = int(time_until.total_seconds() / 3600)
+                                    minutes = int((time_until.total_seconds() % 3600) / 60)
+                                    if hours > 0:
+                                        reset_time = f"{hours}h {minutes}m"
+                                    else:
+                                        reset_time = f"{minutes}m"
+                                else:
+                                    reset_time = "now"
+                            else:
+                                reset_time = "24h"
+                    else:
+                        reset_time = "24h"
+                    video_status = f"❌ **Limit Reached** ({video_count}/{video_limit})"
+                    video_info = f"You've used all {video_limit} videos. Next video available in ~{reset_time}."
+                else:
+                    video_status = f"❌ **Limit Reached** ({video_count}/{video_limit})"
+                    video_info = f"You've used all {video_limit} videos. Resets in 24 hours."
+            else:
+                video_status = f"✅ **{remaining} remaining** ({video_count}/{video_limit})"
+                video_info = f"You can generate {remaining} more video(s) today. Each video expires 24 hours after creation."
+        
+        embed.add_field(
+            name="🎬 AI Video Generation (Veo 3)",
+            value=f"{video_status}\n{video_info}",
+            inline=False
+        )
+    except Exception as e:
+        print(f"❌ Error fetching video limits: {e}")
+        embed.add_field(
+            name="🎬 AI Video Generation (Veo 3)",
+            value="⚠️ Unable to fetch video limit status",
+            inline=False
+        )
+    
+    # Future limits can be added here
+    embed.add_field(
+        name="📝 Note",
+        value="Limits reset on a rolling 24-hour basis (each video expires 24 hours after creation). Use `/limits` anytime to check your status!",
+        inline=False
+    )
+    
+    embed.set_footer(text="More limits will be added in the future!")
+    
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name='website', description='Visit the ServerMate website')
 async def website_command(interaction: discord.Interaction):
