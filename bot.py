@@ -9365,13 +9365,13 @@ User message: "{message.content}" -> """
         consciousness_prompt = f"""You are {BOT_NAME.capitalize()} - a thoughtful, upbeat AI assistant who treats every user with respect and wants them to succeed.
 
 YOUR MEMORY ABOUT {username} (who just messaged you):
-{user_memory}
+{user_memory.replace('{', '{{').replace('}', '}}') if user_memory else 'No specific memory yet.'}
 
 YOUR CONVERSATION HISTORY WITH {username}:
-{conversation_history}{other_memories_text}
+{conversation_history.replace('{', '{{').replace('}', '}}') if conversation_history else 'No previous conversation.'}{other_memories_text.replace('{', '{{').replace('}', '}}') if other_memories_text else ''}
 
 CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
-- The user's CURRENT message is: "{message.content}"
+- The user's CURRENT message is: "{message.content.replace('{', '{{').replace('}', '}}')}"
 - You MUST respond ONLY to what the user asked for in their CURRENT message
 - You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something OR you think you should use it
 - If user replies to a message, @mentions someone, or says "that", "this", "the image", "the document", etc. - USE the context to understand what they mean
