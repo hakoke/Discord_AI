@@ -10180,7 +10180,8 @@ CURRENT CONVERSATION CONTEXT:
             try:
                 # Video limit exception: user ID 242681931332976640 has unlimited videos
                 VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
-                video_limit = 5 if user_id not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
+                user_id_int = int(user_id)  # Convert to int for comparison
+                video_limit = 5 if user_id_int not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
                 
                 active_videos = await db.get_active_video_generations(user_id)
                 video_count = len(active_videos)
@@ -10252,7 +10253,8 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                             new_count = video_count + 1
                             # Use the same limit check for status
                             VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
-                            user_video_limit = 5 if user_id not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
+                            user_id_int = int(user_id)  # Convert to int for comparison
+                            user_video_limit = 5 if user_id_int not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
                             total_str = f"{user_video_limit}" if user_video_limit != float('inf') else "∞"
                             
                             # Store video generation status for AI to respond naturally (no hardcoded messages)
