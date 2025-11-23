@@ -9371,8 +9371,9 @@ User message: "{message.content}" -> """
         safe_other_memories = (other_memories_text or "").replace('{', '{{').replace('}', '}}')
         safe_message_content = (message.content or "").replace('{', '{{').replace('}', '}}')
         safe_username = (username or "").replace('{', '{{').replace('}', '}}')
+        safe_bot_name = (BOT_NAME.capitalize() or "").replace('{', '{{').replace('}', '}}')
         
-        consciousness_prompt = f"""You are {BOT_NAME.capitalize()} - a thoughtful, upbeat AI assistant who treats every user with respect and wants them to succeed.
+        consciousness_prompt = f"""You are {safe_bot_name} - a thoughtful, upbeat AI assistant who treats every user with respect and wants them to succeed.
 
 YOUR MEMORY ABOUT {safe_username} (who just messaged you):
 {safe_user_memory}
