@@ -1719,6 +1719,114 @@ def should_respond_to_name(content: str) -> bool:
 def _clamp_value(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
+def compress_video_for_discord(video_bytes: BytesIO, max_size_mb: float = 25.0, target_bitrate: str = "2M") -> Optional[BytesIO]:
+    """
+    Compress a video file to fit within Discord's 25MB limit using ffmpeg.
+    
+    Args:
+        video_bytes: BytesIO object containing the video data
+        max_size_mb: Maximum file size in MB (default 25MB for Discord)
+        target_bitrate: Target bitrate for compression (default "2M" = 2 Mbps)
+    
+    Returns:
+        BytesIO object containing the compressed video, or None if compression fails
+    """
+    import subprocess
+    import tempfile
+    import os
+    
+    # Check current size
+    video_bytes.seek(0)
+    current_size_mb = len(video_bytes.getvalue()) / (1024 * 1024)
+    
+    if current_size_mb <= max_size_mb:
+        # Already small enough, return as-is
+        video_bytes.seek(0)
+        return video_bytes
+    
+    print(f"📹 [VIDEO COMPRESS] Video is {current_size_mb:.2f}MB, compressing to fit {max_size_mb}MB limit...")
+    
+    # Create temporary files
+    temp_input = None
+    temp_output = None
+    
+    try:
+        # Write input video to temp file
+        temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        video_bytes.seek(0)
+        temp_input.write(video_bytes.read())
+        temp_input.close()
+        
+        # Create output temp file
+        temp_output = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        temp_output.close()
+        
+        # Use ffmpeg to compress
+        # Try progressively lower bitrates until we get under the limit
+        bitrates = [target_bitrate, "1.5M", "1M", "800k", "600k", "400k"]
+        
+        for bitrate in bitrates:
+            try:
+                result = subprocess.run(
+                    [
+                        'ffmpeg', '-y', '-i', temp_input.name,
+                        '-c:v', 'libx264',
+                        '-preset', 'fast',
+                        '-b:v', bitrate,
+                        '-maxrate', bitrate,
+                        '-bufsize', f'{int(bitrate.replace("M", "").replace("k", "")) * 2}k' if 'k' in bitrate else f'{int(bitrate.replace("M", "")) * 2}M',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        temp_output.name
+                    ],
+                    capture_output=True,
+                    timeout=60,
+                    check=False
+                )
+                
+                if result.returncode == 0:
+                    # Check output size
+                    output_size = os.path.getsize(temp_output.name)
+                    output_size_mb = output_size / (1024 * 1024)
+                    
+                    if output_size_mb <= max_size_mb:
+                        print(f"✅ [VIDEO COMPRESS] Compressed to {output_size_mb:.2f}MB using bitrate {bitrate}")
+                        # Read compressed video into BytesIO
+                        with open(temp_output.name, 'rb') as f:
+                            compressed_bytes = BytesIO(f.read())
+                        compressed_bytes.seek(0)
+                        return compressed_bytes
+                    else:
+                        print(f"⚠️  [VIDEO COMPRESS] Still too large ({output_size_mb:.2f}MB) with bitrate {bitrate}, trying lower...")
+                        continue
+                else:
+                    print(f"⚠️  [VIDEO COMPRESS] FFmpeg failed with bitrate {bitrate}: {result.stderr[:200]}")
+                    continue
+            except subprocess.TimeoutExpired:
+                print(f"⚠️  [VIDEO COMPRESS] FFmpeg compression timed out with bitrate {bitrate}")
+                continue
+            except Exception as e:
+                print(f"⚠️  [VIDEO COMPRESS] Error compressing with bitrate {bitrate}: {e}")
+                continue
+        
+        # If all bitrates failed, return None
+        print(f"❌ [VIDEO COMPRESS] Failed to compress video below {max_size_mb}MB")
+        return None
+        
+    except Exception as e:
+        print(f"❌ [VIDEO COMPRESS] Error during compression: {e}")
+        return None
+    finally:
+        # Cleanup temp files
+        try:
+            if temp_input and os.path.exists(temp_input.name):
+                os.unlink(temp_input.name)
+            if temp_output and os.path.exists(temp_output.name):
+                os.unlink(temp_output.name)
+        except:
+            pass
+
 def compress_image_for_discord(img: Image.Image, max_width: int = 1024, max_height: int = 1024, quality: int = 85) -> BytesIO:
     """
     Compress and resize an image for Discord upload.
@@ -11952,7 +12060,9 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         if 'video_generation_status' in locals() and video_generation_status:
             status = video_generation_status
             if status.get('success'):
-                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- Usage: {status.get('count', 0)}/{status.get('total', 5)} videos per day (expires in {status.get('expires_hours', 24)} hours).\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
+                video_count = status.get('count', 0)
+                video_total = status.get('total', 5)
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- **CRITICAL**: You MUST mention the video usage count in your response: '{video_count}/{video_total} videos per day' or '{video_count}/{video_total} per day' or similar. This is important information the user needs to know.\n- Usage: {video_count}/{video_total} videos per day (each expires 24 hours after creation).\n- Respond naturally about generating the video - mention it briefly and positively, and ALWAYS include the usage count ({video_count}/{video_total}). DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it and mention the usage count."
             elif status.get('error') == 'content_policy':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was blocked due to content safety policies.\n- Inform the user politely that the video couldn't be generated due to content restrictions, and suggest trying a different prompt."
             elif status.get('error') == 'duration_invalid':
@@ -12570,8 +12680,12 @@ Now decide: "{message.content}" -> """
         ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
         
         # Remove any JSON output about video generation (AI shouldn't output this - code handles it)
-        ai_response = re.sub(r'\s*\{[^}]*"veo_3"[^}]*\}\s*', '', ai_response, flags=re.IGNORECASE).strip()
-        ai_response = re.sub(r'\s*\{[^}]*"veo"[^}]*\}\s*', '', ai_response, flags=re.IGNORECASE).strip()
+        # Remove nested JSON objects containing veo_3 or veo
+        ai_response = re.sub(r'\s*\{[^{}]*"veo_3"[^{}]*\}\s*', '', ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
+        ai_response = re.sub(r'\s*\{[^{}]*"veo"[^{}]*\}\s*', '', ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
+        # Also remove any JSON-like structures with curly braces that might contain video info
+        ai_response = re.sub(r'\s*\{[^{}]*"duration"[^{}]*\}\s*', '', ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
+        ai_response = re.sub(r'\s*\{[^{}]*"prompt"[^{}]*"duration"[^{}]*\}\s*', '', ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
         
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
@@ -13440,9 +13554,23 @@ Response: """
                             # Check file size (Discord has 25MB limit for videos)
                             video_data = generated_video.read()
                             video_size_mb = len(video_data) / (1024 * 1024)
+                            
                             if video_size_mb > 25:
-                                print(f"⚠️  [{message.author.display_name}] Generated video is too large ({video_size_mb:.2f}MB > 25MB), cannot attach")
-                                response += "\n\n⚠️ *Generated video is too large to attach (25MB limit).*"
+                                print(f"📹 [{message.author.display_name}] Generated video is too large ({video_size_mb:.2f}MB > 25MB), attempting compression...")
+                                # Try to compress the video
+                                video_bytes = BytesIO(video_data)
+                                compressed_video = compress_video_for_discord(video_bytes, max_size_mb=25.0)
+                                
+                                if compressed_video:
+                                    compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
+                                    print(f"✅ [{message.author.display_name}] Video compressed from {video_size_mb:.2f}MB to {compressed_size_mb:.2f}MB")
+                                    compressed_video.seek(0)
+                                    file = discord.File(fp=compressed_video, filename='generated_video.mp4')
+                                    files_to_attach.append(file)
+                                    print(f"📎 [{message.author.display_name}] ✅ Generated video added (compressed: {compressed_size_mb:.2f}MB)")
+                                else:
+                                    print(f"❌ [{message.author.display_name}] Failed to compress video, cannot attach")
+                                    response += "\n\n⚠️ *Generated video is too large to attach (25MB limit) and compression failed.*"
                             else:
                                 video_bytes = BytesIO(video_data)
                                 video_bytes.seek(0)
