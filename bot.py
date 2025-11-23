@@ -1332,7 +1332,7 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         # Try Veo models in order: preview → stable → v2.0, fallback if quota exceeded
         models_to_try = [
             ("veo-3.1-generate-preview", config),  # First: preview version
-            ("veo-3.1-generate-001", config),       # Second: stable version
+            ("veo-3.0-generate-001", config),       # Second: stable version
             ("veo-2.0-generate-001", config)        # Third: v2.0 fallback
         ]
         
