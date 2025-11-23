@@ -10186,14 +10186,15 @@ CURRENT CONVERSATION CONTEXT:
                 active_videos = await db.get_active_video_generations(user_id)
                 video_count = len(active_videos)
                 
-                if video_count >= video_limit:
+                if video_limit != float('inf') and video_count >= video_limit:
+                    # Only set limit_reached for users with actual limits (not unlimited users)
                     video_generation_status = {
                         'success': False,
                         'error': 'limit_reached',
                         'count': video_count,
-                        'total': 5
+                        'total': int(video_limit)  # Use actual limit, not hardcoded 5
                     }
-                    print(f"🎬 [{username}] Video generation limit reached: {video_count}/{video_limit if video_limit != float('inf') else '∞'}")
+                    print(f"🎬 [{username}] Video generation limit reached: {video_count}/{video_limit}")
                 else:
                     remaining = (video_limit - video_count) if video_limit != float('inf') else float('inf')
                     remaining_str = f"{remaining}" if remaining != float('inf') else "∞"
@@ -12084,7 +12085,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 video_total = status.get('total', 5)
                 # Handle unlimited users (total is None)
                 if video_total is None:
-                    response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- This user has unlimited video generation (no daily limit).\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
+                    response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- **CRITICAL**: This user has UNLIMITED video generation (no daily limit whatsoever). DO NOT mention any limits, quotas, or restrictions. DO NOT say they've reached their quota or limit. They can generate as many videos as they want.\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
                 else:
                     response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- **CRITICAL**: You MUST mention the video usage count in your response: '{video_count}/{video_total} videos per day' or '{video_count}/{video_total} per day' or similar. This is important information the user needs to know.\n- Usage: {video_count}/{video_total} videos per day (each expires 24 hours after creation).\n- Respond naturally about generating the video - mention it briefly and positively, and ALWAYS include the usage count ({video_count}/{video_total}). DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it and mention the usage count."
             elif status.get('error') == 'content_policy':
