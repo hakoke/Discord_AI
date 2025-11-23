@@ -231,6 +231,21 @@ class Database:
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_memory_guild ON server_memory(guild_id)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_server_memory_type ON server_memory(memory_type)')
             
+            # Video generation limits table - tracks per-user video generation with 24-hour expiration per request
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS video_generation_limits (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    expires_at TIMESTAMP NOT NULL,
+                    video_duration_seconds INTEGER NOT NULL,
+                    prompt TEXT
+                )
+            ''')
+            # Create indexes (PostgreSQL syntax)
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_video_limits_user_id ON video_generation_limits(user_id)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_video_limits_expires_at ON video_generation_limits(expires_at)')
+            
             print("Database initialized successfully")
     
     async def store_interaction(self, user_id: str, username: str, guild_id: str, 
@@ -999,6 +1014,36 @@ class Database:
                 result['system_state'] = json.loads(result['system_state']) if isinstance(result.get('system_state'), str) else result.get('system_state')
                 results.append(result)
             return results
+    
+    # Video generation limits methods
+    async def record_video_generation(self, user_id: str, video_duration_seconds: int, prompt: str = None, expiration_hours: int = 24):
+        """Record a video generation request - creates entry that expires after specified hours"""
+        from datetime import timedelta
+        async with self.pool.acquire() as conn:
+            expires_at = datetime.now() + timedelta(hours=expiration_hours)
+            await conn.execute('''
+                INSERT INTO video_generation_limits (user_id, expires_at, video_duration_seconds, prompt)
+                VALUES ($1, $2, $3, $4)
+            ''', user_id, expires_at, video_duration_seconds, prompt)
+    
+    async def get_active_video_generations(self, user_id: str):
+        """Get all active (non-expired) video generations for a user"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM video_generation_limits
+                WHERE user_id = $1 AND expires_at > NOW()
+                ORDER BY created_at DESC
+            ''', user_id)
+            return [dict(row) for row in rows]
+    
+    async def cleanup_expired_video_limits(self):
+        """Remove expired video generation entries (can be called periodically)"""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute('''
+                DELETE FROM video_generation_limits
+                WHERE expires_at <= NOW()
+            ''')
+            return result.split()[-1] if result else '0'  # Extract number from "DELETE N"
 
     async def close(self):
         """Close database connection"""

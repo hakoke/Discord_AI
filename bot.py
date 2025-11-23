@@ -62,9 +62,6 @@ except ImportError:
 from database import Database
 from memory import MemorySystem
 
-# ---------------------------------------------------------------------------
-# Logging controls
-# ---------------------------------------------------------------------------
 LOG_LEVELS = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
 
 def _resolve_level_name(env_value: Optional[str], fallback: str) -> str:
@@ -132,12 +129,8 @@ def _smart_print(*args, **kwargs):
     return _original_print(*new_args, **kwargs)
 
 builtins.print = _smart_print
-
-# Configure Gemini (uses API key)
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# Imagen configuration (requires Vertex AI)
-# Will be initialized if credentials are available
 IMAGEN_AVAILABLE = False
 try:
     import vertexai
@@ -1201,6 +1194,132 @@ async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Im
                 "Please try a different edit request that doesn't involve inappropriate, harmful, or prohibited content."
             )
         raise
+
+# ============================================================================
+# Video Generation (Veo 3) - AI-Driven
+# ============================================================================
+
+VEO_AVAILABLE = False
+try:
+    from google import genai as genai_video
+    VEO_AVAILABLE = True
+    print("✅ Veo 3 video generation available")
+except ImportError:
+    print("⚠️  Veo 3 not available - Video generation disabled. Install with: pip install google-genai")
+    VEO_AVAILABLE = False
+
+async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = None) -> Optional[BytesIO]:
+    """Generate video using Veo 3 via Google GenAI (queued for rate limiting, AI-driven duration)"""
+    print(f"🎬 [VIDEO GEN] generate_video() called with prompt: '{prompt[:100]}...', duration: {duration_seconds}s")
+    
+    if not VEO_AVAILABLE:
+        print(f"⚠️  [VIDEO GEN] Veo not available, skipping video generation")
+        return None
+    
+    # Enforce 5 second limit
+    duration_seconds = min(5, max(1, duration_seconds))
+    
+    try:
+        print(f"🎬 [VIDEO GEN] Queuing video generation request through Flash queue...")
+        api_queue = _get_api_queue('gemini-2.0-flash')
+        print(f"🎬 [VIDEO GEN] Got API queue, executing _generate_video_sync...")
+        result = await api_queue.execute(_generate_video_sync, prompt, duration_seconds)
+        print(f"🏁 [VIDEO GEN] ✅ Video generation completed")
+        return result
+    except Exception as e:
+        error_str = str(e).lower()
+        is_content_policy = any(keyword in error_str for keyword in [
+            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+            'content safety filters', 'blocked by content safety'
+        ])
+        
+        if is_content_policy:
+            print(f"🚫 [VIDEO GEN] Content policy violation, propagating to caller: {e}")
+            raise
+        
+        print(f"❌ [VIDEO GEN] ❌ Error in generate_video(): {e}")
+        import traceback
+        print(f"❌ [VIDEO GEN] ❌ Full traceback:\n{traceback.format_exc()}")
+        return None
+
+def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[BytesIO]:
+    """Synchronous video generation using Veo 3"""
+    try:
+        print(f"🎬 [VIDEO GEN] Starting video generation for prompt: '{prompt[:100]}...'")
+        print(f"   - Duration: {duration_seconds} seconds")
+        
+        from google import genai as genai_video
+        from google.genai import types
+        import time
+        
+        print(f"✅ [VIDEO GEN] Google GenAI modules imported successfully")
+        
+        # Initialize client (uses GOOGLE_APPLICATION_CREDENTIALS automatically)
+        client = genai_video.Client()
+        print(f"✅ [VIDEO GEN] GenAI client initialized")
+        
+        print(f"📡 [VIDEO GEN] Calling Veo 3 API...")
+        
+        # Generate video using Veo 3.1
+        operation = client.models.generate_videos(
+            model="veo-3.1-generate-preview",
+            prompt=prompt,
+            config=types.GenerateVideosConfig(
+                negative_prompt="",
+                aspect_ratio="16:9",
+                resolution="1080p",
+                duration_seconds=duration_seconds
+            ),
+        )
+        
+        print(f"⏳ [VIDEO GEN] Video generation started, polling for completion...")
+        
+        # Poll for completion (Veo videos take time to generate)
+        max_wait_time = 300  # 5 minutes max
+        start_time = time.time()
+        poll_interval = 10  # Check every 10 seconds
+        
+        while not operation.done:
+            elapsed = time.time() - start_time
+            if elapsed > max_wait_time:
+                raise Exception("Video generation timed out after 5 minutes")
+            
+            time.sleep(poll_interval)
+            operation = client.operations.get(operation)
+            print(f"   ⏳ Still generating... ({int(elapsed)}s elapsed)")
+        
+        print(f"✅ [VIDEO GEN] Video generation completed!")
+        
+        # Get the generated video
+        generated_video = operation.result.generated_videos[0]
+        
+        # Download video file
+        print(f"📥 [VIDEO GEN] Downloading video...")
+        video_file = client.files.download(file=generated_video.video)
+        
+        # Convert to BytesIO
+        video_bytes = BytesIO(video_file)
+        video_bytes.seek(0)
+        
+        print(f"🎉 [VIDEO GEN] ✅ Successfully generated video! Size: {len(video_bytes.getvalue())} bytes")
+        return video_bytes
+        
+    except Exception as e:
+        error_str = str(e).lower()
+        is_content_policy = any(keyword in error_str for keyword in [
+            'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+            'content safety filters', 'blocked by content safety'
+        ])
+        
+        if is_content_policy:
+            print(f"🚫 [VIDEO GEN] Content policy violation detected, propagating error to user")
+            raise
+        
+        print(f"❌ [VIDEO GEN] ❌ Error occurred in _generate_video_sync: {type(e).__name__}")
+        print(f"❌ [VIDEO GEN] ❌ Error message: {str(e)}")
+        import traceback
+        print(f"❌ [VIDEO GEN] ❌ Full traceback:\n{traceback.format_exc()}")
+        return None
 
 def _edit_image_gemini_sync(original_image_bytes: bytes, prompt: str) -> Image:
     """Synchronous image editing using Gemini 2.5 Flash Image"""
@@ -2816,10 +2935,12 @@ def _default_message_meta() -> Dict[str, Any]:
         "profile_picture_focus": False,
         "media": {
             "needs_screenshots": False,
-            "needs_video": False,
+            "needs_video": False,  # Browser video recording
+            "needs_ai_video": False,  # AI video generation (Veo 3)
             "forbid_screenshots": False,
             "forbid_video": False,
             "video_duration_seconds": None,
+            "ai_video_duration_seconds": None,  # Duration for AI video (max 5s)
             "preferred_screenshot_count": None,
             "notes": ""
         }
@@ -2844,9 +2965,11 @@ Return ONLY JSON with this shape:
   "media": {{
     "needs_screenshots": true/false,
     "needs_video": true/false,
+    "needs_ai_video": true/false,
     "forbid_screenshots": true/false,
     "forbid_video": true/false,
     "video_duration_seconds": number or null,
+    "ai_video_duration_seconds": number or null,
     "preferred_screenshot_count": number or null,
     "notes": "short explanation"
   }}
@@ -2856,10 +2979,15 @@ Definitions:
 - "small_talk": true only when the user is just greeting/checking-in without asking for tasks.
 - "profile_picture_focus": true only when they explicitly want any profile/avatar/server picture described, sent, or edited.
 - "needs_screenshots": true when they explicitly request website screenshots or visual proof.
-- "needs_video": true when they explicitly ask for a video/recording/clip of the process.
+- "needs_video": true when they explicitly ask for a browser video recording (e.g., "record this website", "show me you going to X", "take a video of this page", "record the browser", "record yourself doing X").
+- "needs_ai_video": true when they ask for AI-generated video creation (e.g., "generate a video", "create a video", "make me a video of X", "video of a sunset", "video of an egyptian man" - when X is a concept/scene, NOT a website URL).
+- CRITICAL DISTINCTION: 
+  * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium"
+  * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, or idea (no website/URL mentioned)
 - "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
-- Durations/counts: extract explicit numbers (e.g., "10 second video", "take 3 screenshots"). Use null when unspecified.
-- "notes": summarize the reasoning in under 20 words.
+- Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, max is 5 seconds - if user asks for longer, set ai_video_duration_seconds to 5 and note it in "notes". Use null when unspecified.
+- "preferred_screenshot_count": extract explicit numbers (e.g., "take 3 screenshots"). Use null when unspecified.
+- "notes": summarize the reasoning in under 20 words, including if AI video duration was capped at 5 seconds.
 
 JSON:"""
 
@@ -2877,9 +3005,16 @@ JSON:"""
         meta_media = meta["media"]
         meta_media["needs_screenshots"] = bool(media.get("needs_screenshots", meta_media["needs_screenshots"]))
         meta_media["needs_video"] = bool(media.get("needs_video", meta_media["needs_video"]))
+        meta_media["needs_ai_video"] = bool(media.get("needs_ai_video", meta_media["needs_ai_video"]))
         meta_media["forbid_screenshots"] = bool(media.get("forbid_screenshots", meta_media["forbid_screenshots"]))
         meta_media["forbid_video"] = bool(media.get("forbid_video", meta_media["forbid_video"]))
         meta_media["video_duration_seconds"] = media.get("video_duration_seconds", meta_media["video_duration_seconds"])
+        ai_video_duration = media.get("ai_video_duration_seconds")
+        if ai_video_duration is not None:
+            # Enforce 5 second max
+            meta_media["ai_video_duration_seconds"] = min(5, max(1, int(ai_video_duration)))
+        else:
+            meta_media["ai_video_duration_seconds"] = None
         meta_media["preferred_screenshot_count"] = media.get("preferred_screenshot_count", meta_media["preferred_screenshot_count"])
         meta_media["notes"] = str(media.get("notes", meta_media["notes"] or "")).strip()
     except Exception as e:
@@ -2893,6 +3028,7 @@ def build_response_payload(
     generated_documents=None,
     searched_images: Optional[List[Any]] = None,
     screenshots: Optional[List[Any]] = None,
+    generated_video: Optional[BytesIO] = None,
 ):
     """Normalize response payloads so generate_response always returns the same structure."""
     return (
@@ -2901,6 +3037,7 @@ def build_response_payload(
         generated_documents if generated_documents else None,
         searched_images or [],
         screenshots or [],
+        generated_video,
     )
 
 # ============================================================================
@@ -9254,6 +9391,7 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate, TYPE into text fields), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it", "go to amazon and search for laptop", "go to google and search for python tutorials". You can open ANY link, click ANY button, scroll, wait, TYPE into search boxes and text fields, and take screenshots of ANY page. The AI can dynamically type into any text field, search box, or input element it finds on the page.
 
 - ✅ **Video Recording Capability**: Record screen videos of browser automation! You can record videos of websites, games, videos playing, or any browser interactions. The AI dynamically decides when to record videos vs take screenshots. Examples: "go to youtube, click on a video, record 30 seconds", "record 2 minutes of this game", "show me video of the entire process", "go to connections game and record me completing it", "record 10 seconds of the video". You can specify duration (e.g., "record 30 seconds", "record 2 minutes") or let the AI decide. Videos are automatically converted to MP4 and sent as attachments. The AI will navigate to the page, handle obstacles (cookie popups, etc.), get to the content, and then record for the specified duration. This works for ANY website - games, videos, interactive content, etc.
+- ✅ **AI Video Generation (Veo 3)**: Generate videos from text prompts using Google's Veo 3 AI! Create short videos (1-5 seconds) of any scene, concept, or idea. Examples: "generate a video of a sunset", "create a video of an egyptian man going to georgia", "make me a video of a cat playing". **LIMITS**: Maximum 5 seconds per video, 5 videos per user per day (each expires 24 hours after creation). The AI automatically decides the optimal duration (1-5 seconds) if not specified. You can combine video generation with other requests (e.g., "get me 2 images of georgia and make me a video of an egyptian man going to georgia"). The AI distinguishes between browser video recording (for websites) and AI video generation (for concepts/scenes).
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
@@ -12108,9 +12246,6 @@ Now decide: "{message.content}" -> """
                     searched_image_parts = [img for img in image_parts if img.get('source') == 'image_search']
                     if searched_image_parts:
                         print(f"👁️  [{username}] Regenerating response with {len(searched_image_parts)} searched image(s) visible so AI can see and label them correctly")
-                        
-                        # Update response prompt to include metadata about selected images
-                        # Count total images vs searched images to give accurate instructions
                         total_images = len(image_parts)
                         other_images = total_images - len(searched_image_parts)
                         
@@ -12119,7 +12254,6 @@ Now decide: "{message.content}" -> """
                         else:
                             image_metadata = f"\n\n📸 CRITICAL - FOCUS ON CURRENT REQUEST ONLY:\n- The user's CURRENT message is: '{message.content}'\n- You searched for images based on the user's CURRENT request\n- These {len(searched_image_parts)} image(s) are now attached and visible to you - you can see what they actually show\n- IGNORE any previous messages in the conversation - ONLY respond to the CURRENT user request\n- DO NOT mention or reference previous requests (like Christmas cards, etc.) - ONLY focus on what the user asked for NOW\n- Label them correctly: 'the first image', 'the second image', etc. based on the ORDER they were selected\n- The first image you selected = 'the first image', second = 'the second image', etc.\n- Describe them accurately based on what you actually see in the images\n- Your response should ONLY be about the CURRENT request, not previous ones\n"
                         
-                        # Prepare content with images visible
                         if image_parts:
                             try:
                                 # Use the same model as before, add metadata about images
@@ -12318,9 +12452,81 @@ Now decide: "{message.content}" -> """
                 else:
                     ai_response += "\n\n(Image generation failed - please try again)"
         
+        # AI Video Generation (Veo 3) - Check if user wants AI-generated video
+        generated_video = None
+        if 'message_meta' in locals():
+            media_preferences = message_meta.get("media", {})
+            needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
+            
+            if needs_ai_video and VEO_AVAILABLE:
+                try:
+                    active_videos = await db.get_active_video_generations(user_id)
+                    video_count = len(active_videos)
+                    
+                    if video_count >= 5:
+                        ai_response += f"\n\n⚠️ **Video Generation Limit Reached**\nYou've used {video_count}/5 video generations today. Each video expires 24 hours after creation. Please wait for one to expire before generating another video."
+                        print(f"🎬 [{username}] Video generation limit reached: {video_count}/5")
+                    else:
+                        remaining = 5 - video_count
+                        print(f"🎬 [{username}] Video generation requested ({video_count}/5 used, {remaining} remaining)")
+                        
+                        video_prompt = message.content
+                        for trigger in ['generate', 'create', 'make me', 'video', 'clip', 'of']:
+                            video_prompt = video_prompt.replace(trigger, '').strip()
+                        
+                        ai_video_duration = media_preferences.get("ai_video_duration_seconds")
+                        if ai_video_duration is None:
+                            duration_prompt = f"""User wants to generate a video with prompt: "{video_prompt}"
+
+Decide the optimal duration for this video (1-5 seconds max). Consider:
+- Simple scenes (sunset, single object): 3-5 seconds
+- Complex scenes (action, movement): 4-5 seconds
+- Static scenes: 2-3 seconds
+
+Respond with ONLY a number between 1-5: """
+                            try:
+                                decision_model = get_fast_model()
+                                duration_response = await queued_generate_content(decision_model, duration_prompt)
+                                duration_text = duration_response.text.strip()
+                                duration_match = re.search(r'(\d+)', duration_text)
+                                if duration_match:
+                                    ai_video_duration = min(5, max(1, int(duration_match.group(1))))
+                                else:
+                                    ai_video_duration = 3
+                            except Exception:
+                                ai_video_duration = 3
+                        else:
+                            ai_video_duration = min(5, max(1, int(ai_video_duration)))
+                        
+                        if len(video_prompt) > 10:
+                            print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
+                            generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id)
+                            
+                            if generated_video:
+                                await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
+                                new_count = video_count + 1
+                                ai_response += f"\n\n✅ **Video Generated** ({new_count}/5 per day - expires in 24 hours)"
+                                print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/5)")
+                            else:
+                                ai_response += "\n\n(Video generation failed - please try again)"
+                                print(f"🎬 [{username}] ⚠️  Video generation returned None")
+                        else:
+                            print(f"🎬 [{username}] ⚠️  Video prompt too short ({len(video_prompt)} chars), skipping")
+                except Exception as e:
+                    error_str = str(e).lower()
+                    print(f"❌ [{username}] Video generation error: {e}")
+                    import traceback
+                    print(f"❌ [{username}] Video generation traceback:\n{traceback.format_exc()}")
+                    
+                    if any(keyword in error_str for keyword in [
+                        'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited'
+                    ]):
+                        ai_response += "\n\n(I can't generate that video as it violates content safety policies. Please try a different video request.)"
+                    else:
+                        ai_response += "\n\n(Video generation failed - please try again)"
+        
         # Store interaction in memory
         channel_id = str(message.channel.id) if message.channel else None
-        # FINAL SAFETY CHECK: Ensure username is NEVER None before storing (double-check)
         # This should never trigger since username is set with fallbacks above, but safety first
         safe_username = username if username and username.strip() else (str(message.author.id) if message.author else "Unknown")
         await memory.store_interaction(
@@ -12361,12 +12567,14 @@ Now decide: "{message.content}" -> """
         
         # Include screenshots in return (screenshots is a list of BytesIO)
         print(f"🔍 [{username}] About to return tuple from generate_response")
+        generated_video_local = generated_video if 'generated_video' in locals() else None
         result = build_response_payload(
             ai_response,
             generated_images,
             generated_documents,
             searched_images,
             screenshot_attachments,
+            generated_video_local,
         )
         print(f"🔍 [{username}] Returning result type: {type(result)}, length: {len(result) if isinstance(result, tuple) else 'N/A'}")
         
@@ -12839,26 +13047,34 @@ async def on_message(message: discord.Message):
                     print(f"📥 [{message.author.display_name}] Result is truthy, unpacking...")
                     if isinstance(result, tuple):
                         print(f"📥 [{message.author.display_name}] Result is tuple with {len(result)} items")
-                        if len(result) == 5:
+                        if len(result) == 6:
+                            response, generated_images, generated_documents, searched_images, screenshots, generated_video = result
+                        elif len(result) == 5:
                             response, generated_images, generated_documents, searched_images, screenshots = result
+                            generated_video = None
                         elif len(result) == 4:
                             response, generated_images, generated_documents, searched_images = result
                             screenshots = []
+                            generated_video = None
                         elif len(result) == 3:
                             response, generated_images, generated_documents = result
                             searched_images = []
                             screenshots = []
+                            generated_video = None
                         elif len(result) == 2:
                             response, generated_images = result
                             generated_documents = None
                             searched_images = []
                             screenshots = []
+                            generated_video = None
                         else:
                             response = result[0] if result else None
                             generated_images = result[1] if len(result) > 1 else None
                             generated_documents = result[2] if len(result) > 2 else None
                             searched_images = result[3] if len(result) > 3 else []
                             screenshots = result[4] if len(result) > 4 else []
+                            generated_video = result[5] if len(result) > 5 else None
+                            generated_video = result[5] if len(result) > 5 else None
                     else:
                         response = result
                         generated_images = None
@@ -12933,7 +13149,7 @@ Response: """
                     # Generate AI-driven fallback response (ONLY triggers in error cases - zero latency on normal operations)
                     print(f"🔄 [{message.author.display_name}] 🔄 Triggering AI fallback (this only happens on error - normal requests never hit this)")
                     fallback_text = await generate_ai_fallback_response()
-                    response, generated_images, generated_documents, searched_images, screenshots = build_response_payload(fallback_text)
+                    response, generated_images, generated_documents, searched_images, screenshots, generated_video = build_response_payload(fallback_text)
                     print(f"✅ [{message.author.display_name}] ✅ Fallback response built successfully")
                 
                 # Prepare files to attach (searched images + generated images + screenshots - these go with the text response)
@@ -13024,6 +13240,31 @@ Response: """
                             print(f"📎 [{message.author.display_name}] Traceback: {traceback.format_exc()}")
                 else:
                     print(f"📎 [{message.author.display_name}] ⚠️  No generated_images to attach (value: {generated_images})")
+                
+                # Add generated video (AI video generation - Veo 3)
+                if 'generated_video' in locals() and generated_video:
+                    remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
+                    if remaining_slots > 0:
+                        try:
+                            generated_video.seek(0)
+                            # Check file size (Discord has 25MB limit for videos)
+                            video_data = generated_video.read()
+                            video_size_mb = len(video_data) / (1024 * 1024)
+                            if video_size_mb > 25:
+                                print(f"⚠️  [{message.author.display_name}] Generated video is too large ({video_size_mb:.2f}MB > 25MB), cannot attach")
+                                response += "\n\n⚠️ *Generated video is too large to attach (25MB limit).*"
+                            else:
+                                video_bytes = BytesIO(video_data)
+                                video_bytes.seek(0)
+                                file = discord.File(fp=video_bytes, filename='generated_video.mp4')
+                                files_to_attach.append(file)
+                                print(f"📎 [{message.author.display_name}] ✅ Generated video added ({video_size_mb:.2f}MB)")
+                        except Exception as video_error:
+                            print(f"📎 [{message.author.display_name}] ❌ Failed to prepare generated video: {video_error}")
+                            import traceback
+                            print(f"📎 [{message.author.display_name}] Traceback: {traceback.format_exc()}")
+                    else:
+                        print(f"⚠️  [{message.author.display_name}] Cannot add generated video - attachment limit reached")
                 
                 # Helper function to compress images if needed
                 def compress_files_if_needed(images_list, image_type: str):
@@ -13924,6 +14165,7 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "• **Take Screenshots** - Visit any link and screenshot web pages\n"
             "• **Record Videos** - Record screen videos of browser automation\n"
+            "• **Generate Videos** - Create AI-generated videos from text (Veo 3, 5s max, 5/day)\n"
             "• **Browser Automation** - Click buttons, scroll pages, navigate websites\n"
             "• **Read Web Pages** - Share links and I'll read the content"
         ),
@@ -13967,6 +14209,8 @@ async def help_command(interaction: discord.Interaction):
             "`@{bot_name} take 3 screenshots of https://site.com`\n"
             "`@{bot_name} go to youtube, click on a video, record 30 seconds`\n"
             "`@{bot_name} show me video of the entire process`\n"
+            "`@{bot_name} generate a video of a sunset`\n"
+            "`@{bot_name} create a video of an egyptian man going to georgia`\n"
             "`@{bot_name} debug this python code`\n"
             "`@{bot_name} search reddit for python tips`\n"
             "`@{bot_name} create a PDF with this code`"
