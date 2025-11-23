@@ -283,7 +283,7 @@ try:
 except:
     FAST_MODEL = 'gemini-2.0-flash'  # Same stable version
 
-SMART_MODEL = 'gemini-2.5-pro'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks (HAS VISION - multimodal)
+SMART_MODEL = 'gemini-3-pro'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks, big code debugging (HAS VISION - multimodal)
 VISION_MODEL = 'gemini-2.0-flash'  # For everyday/simple image analysis
 IMAGE_EDIT_MODEL = 'gemini-2.5-flash-image'  # Latest model for image editing
 
@@ -769,7 +769,7 @@ MODEL_RATE_LIMITS: Dict[str, Dict[str, Any]] = {
         'requests_per_minute': 300,
         'base_delay': 0.15,
     },
-    'gemini-2.5-pro': {
+    'gemini-3-pro': {
         'max_concurrent': 3,
         'requests_per_minute': 120,
         'base_delay': 0.35,
@@ -1236,6 +1236,13 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         return result
     except Exception as e:
         error_str = str(e).lower()
+        
+        # Check for quota exhaustion (both models failed)
+        if 'VIDEO_GENERATION_QUOTA_EXHAUSTED' in str(e):
+            print(f"⚠️  [VIDEO GEN] Video generation quota exhausted for both Veo 3.1 and Veo 2.0")
+            # Return None - will be handled by caller to set status
+            return None
+        
         is_content_policy = any(keyword in error_str for keyword in [
             'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
             'content safety filters', 'blocked by content safety'
@@ -1322,14 +1329,67 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
             print(f"   - DEBUG: Config creation traceback:\n{traceback.format_exc()}")
             raise
         
-        print(f"   - DEBUG: Calling generate_videos API with model='veo-3.1-generate-preview'...")
-        operation = client.models.generate_videos(
-            model="veo-3.1-generate-preview",
-            prompt=prompt,
-            config=config
-        )
+        # Try Veo models in order: preview → stable → v2.0, fallback if quota exceeded
+        models_to_try = [
+            ("veo-3.1-generate-preview", config),  # First: preview version
+            ("veo-3.1-generate-001", config),       # Second: stable version
+            ("veo-2.0-generate-001", config)        # Third: v2.0 fallback
+        ]
         
-        print(f"⏳ [VIDEO GEN] Video generation started, polling for completion...")
+        operation = None
+        model_used = None
+        last_error = None
+        
+        for idx, (model_name, model_config) in enumerate(models_to_try):
+            try:
+                print(f"   - DEBUG: Calling generate_videos API with model='{model_name}'...")
+                operation = client.models.generate_videos(
+                    model=model_name,
+                    prompt=prompt,
+                    config=model_config
+                )
+                model_used = model_name
+                print(f"✅ [VIDEO GEN] Successfully started generation with {model_name}")
+                break  # Success, exit loop
+            except Exception as e:
+                error_str = str(e).lower()
+                error_code = None
+                
+                # Check if it's a quota/resource exhausted error
+                if hasattr(e, 'status'):
+                    error_code = getattr(e, 'status', None)
+                elif hasattr(e, 'code'):
+                    error_code = getattr(e, 'code', None)
+                
+                is_quota_error = (
+                    error_code == 429 or 
+                    '429' in error_str or 
+                    'resource_exhausted' in error_str or 
+                    'quota' in error_str or
+                    'exceeded your current quota' in error_str
+                )
+                
+                if is_quota_error:
+                    # Quota exceeded, try next model in chain
+                    if idx < len(models_to_try) - 1:
+                        next_model = models_to_try[idx + 1][0]
+                        print(f"⚠️  [VIDEO GEN] {model_name} quota exceeded (429), falling back to {next_model}...")
+                        last_error = e
+                        continue  # Try next model
+                    else:
+                        # All models exhausted
+                        print(f"❌ [VIDEO GEN] All video models exhausted (preview, stable, and v2.0). Last error: {e}")
+                        raise  # Re-raise to be caught by outer exception handler
+                else:
+                    # Other error (not quota), re-raise immediately
+                    last_error = e
+                    print(f"❌ [VIDEO GEN] {model_name} failed with non-quota error: {e}")
+                    raise  # Re-raise to be caught by outer exception handler
+        
+        if operation is None:
+            raise Exception("Failed to start video generation with any model")
+        
+        print(f"⏳ [VIDEO GEN] Video generation started with {model_used}, polling for completion...")
         
         # Poll for completion (Veo videos take time to generate)
         max_wait_time = 300  # 5 minutes max
@@ -1345,7 +1405,7 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
             operation = client.operations.get(operation)
             print(f"   ⏳ Still generating... ({int(elapsed)}s elapsed)")
         
-        print(f"✅ [VIDEO GEN] Video generation completed!")
+        print(f"✅ [VIDEO GEN] Video generation completed with {model_used}!")
         
         # Debug: Check operation structure
         print(f"   - DEBUG: operation type: {type(operation)}")
@@ -1423,6 +1483,28 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         if is_content_policy:
             print(f"🚫 [VIDEO GEN] Content policy violation detected, propagating error to user")
             raise
+        
+        # Check if it's a quota/resource exhausted error after trying both models
+        error_code = None
+        if hasattr(e, 'status'):
+            error_code = getattr(e, 'status', None)
+        elif hasattr(e, 'code'):
+            error_code = getattr(e, 'code', None)
+        
+        is_quota_error = (
+            error_code == 429 or 
+            '429' in error_str or 
+            'resource_exhausted' in error_str or 
+            'quota' in error_str or
+            'exceeded your current quota' in error_str
+        )
+        
+        if is_quota_error:
+            print(f"❌ [VIDEO GEN] ❌ Both Veo 3.1 and Veo 2.0 quota exhausted. Video generation is temporarily unavailable.")
+            print(f"❌ [VIDEO GEN] ❌ Error: {str(e)}")
+            # Return a special marker that we can check for in the calling function
+            # We'll use a special exception that can be caught
+            raise Exception("VIDEO_GENERATION_QUOTA_EXHAUSTED: Video generation is down right now. Please check back later.")
         
         print(f"❌ [VIDEO GEN] ❌ Error occurred in _generate_video_sync: {type(e).__name__}")
         print(f"❌ [VIDEO GEN] ❌ Error message: {str(e)}")
@@ -10267,6 +10349,8 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                             }
                             print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/{total_str})")
                         else:
+                            # Check if it's a quota error by checking the last error in logs
+                            # We'll check the error message from generate_video
                             video_generation_status = {'success': False, 'error': 'generation_failed'}
                             print(f"🎬 [{username}] ⚠️  Video generation returned None")
                     else:
@@ -10286,6 +10370,8 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                     video_generation_status = {'success': False, 'error': 'content_policy', 'message': str(e)}
                 elif 'duration' in error_str or 'out of bound' in error_str:
                     video_generation_status = {'success': False, 'error': 'duration_invalid', 'message': str(e)}
+                elif 'VIDEO_GENERATION_QUOTA_EXHAUSTED' in str(e) or any(keyword in error_str for keyword in ['quota', '429', 'resource_exhausted', 'exceeded your current quota']):
+                    video_generation_status = {'success': False, 'error': 'quota_exhausted', 'message': 'Video generation is down right now. Please check back later.'}
                 else:
                     video_generation_status = {'success': False, 'error': 'generation_failed', 'message': str(e)}
         elif needs_ai_video and not VEO_AVAILABLE:
@@ -12092,6 +12178,8 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was blocked due to content safety policies.\n- Inform the user politely that the video couldn't be generated due to content restrictions, and suggest trying a different prompt."
             elif status.get('error') == 'duration_invalid':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation failed: Veo 3.1 only accepts 4, 6, or 8 seconds (NOT 5 or 7).\n- Inform the user that video duration must be 4, 6, or 8 seconds (Veo 3.1 requirement), and suggest they try again with one of these values."
+            elif status.get('error') == 'quota_exhausted':
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation is currently unavailable due to quota exhaustion (both Veo 3.1 and Veo 2.0 are at quota limits).\n- Inform the user that video generation is down right now and they should check back later.\n- Be friendly and apologetic, but clear that the service is temporarily unavailable."
             elif status.get('error') == 'unavailable':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation is currently unavailable (Veo 3 package not installed).\n- Inform the user that video generation is temporarily disabled."
             elif status.get('error') == 'limit_reached':
