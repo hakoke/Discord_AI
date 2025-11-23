@@ -13571,6 +13571,7 @@ Response: """
                     print(f"📎 [{message.author.display_name}] ⚠️  No generated_images to attach (value: {generated_images})")
                 
                 # Add generated video (AI video generation - Veo 3)
+                original_video_bytes = None  # Store for retry compression if needed
                 if 'generated_video' in locals() and generated_video:
                     remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
                     if remaining_slots > 0:
@@ -13580,11 +13581,15 @@ Response: """
                             video_data = generated_video.read()
                             video_size_mb = len(video_data) / (1024 * 1024)
                             
-                            if video_size_mb > 25:
-                                print(f"📹 [{message.author.display_name}] Generated video is too large ({video_size_mb:.2f}MB > 25MB), attempting compression...")
-                                # Try to compress the video
+                            # Store original for potential retry compression
+                            original_video_bytes = BytesIO(video_data)
+                            
+                            # Compress videos that are > 20MB to leave room for other payload (Discord has total payload limit, not just per-file)
+                            if video_size_mb > 20:
+                                print(f"📹 [{message.author.display_name}] Generated video is large ({video_size_mb:.2f}MB), compressing to ensure it fits in message payload...")
+                                # Try to compress the video (target 20MB to leave room for other payload)
                                 video_bytes = BytesIO(video_data)
-                                compressed_video = compress_video_for_discord(video_bytes, max_size_mb=25.0)
+                                compressed_video = compress_video_for_discord(video_bytes, max_size_mb=20.0)
                                 
                                 if compressed_video:
                                     compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
@@ -13594,8 +13599,13 @@ Response: """
                                     files_to_attach.append(file)
                                     print(f"📎 [{message.author.display_name}] ✅ Generated video added (compressed: {compressed_size_mb:.2f}MB)")
                                 else:
-                                    print(f"❌ [{message.author.display_name}] Failed to compress video, cannot attach")
-                                    response += "\n\n⚠️ *Generated video is too large to attach (25MB limit) and compression failed.*"
+                                    # Compression failed, try with original but warn
+                                    print(f"⚠️  [{message.author.display_name}] Video compression failed, using original ({video_size_mb:.2f}MB)")
+                                    video_bytes = BytesIO(video_data)
+                                    video_bytes.seek(0)
+                                    file = discord.File(fp=video_bytes, filename='generated_video.mp4')
+                                    files_to_attach.append(file)
+                                    print(f"📎 [{message.author.display_name}] ✅ Generated video added ({video_size_mb:.2f}MB - may cause payload issues)")
                             else:
                                 video_bytes = BytesIO(video_data)
                                 video_bytes.seek(0)
@@ -13804,13 +13814,24 @@ Response: """
                                     except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
                                         status = getattr(e, 'status', getattr(e, 'code', None))
                                         if status == 413:  # Payload Too Large
-                                            print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
-                                            # Compress all images and retry
+                                            print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and videos and retrying...")
+                                            # Compress all images and videos and retry
                                             compressed_files = []
                                             if searched_images:
                                                 compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
                                             if generated_images:
                                                 compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                            
+                                            # Compress video if present
+                                            if original_video_bytes:
+                                                print(f"📹 [{message.author.display_name}] Compressing video for retry...")
+                                                original_video_bytes.seek(0)
+                                                compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
+                                                if compressed_video:
+                                                    compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
+                                                    print(f"✅ [{message.author.display_name}] Video compressed to {compressed_size_mb:.2f}MB for retry")
+                                                    compressed_video.seek(0)
+                                                    compressed_files.append(discord.File(fp=compressed_video, filename='generated_video.mp4'))
                                             
                                             try:
                                                 files_for_chunk = compressed_files if not files_sent_to_channels else None
@@ -13871,13 +13892,24 @@ Response: """
                                 except (discord.errors.HTTPException, discord.errors.DiscordServerError) as e:
                                     status = getattr(e, 'status', getattr(e, 'code', None))
                                     if status == 413:  # Payload Too Large
-                                        print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and retrying...")
-                                        # Compress all images and retry
+                                        print(f"⚠️  [{message.author.display_name}] Payload too large, compressing images and videos and retrying...")
+                                        # Compress all images and videos and retry
                                         compressed_files = []
                                         if searched_images:
                                             compressed_files.extend(compress_files_if_needed(searched_images, 'search'))
                                         if generated_images:
                                             compressed_files.extend(compress_files_if_needed(generated_images, 'generated'))
+                                        
+                                        # Compress video if present
+                                        if 'original_video_bytes' in locals() and original_video_bytes:
+                                            print(f"📹 [{message.author.display_name}] Compressing video for retry...")
+                                            original_video_bytes.seek(0)
+                                            compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
+                                            if compressed_video:
+                                                compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
+                                                print(f"✅ [{message.author.display_name}] Video compressed to {compressed_size_mb:.2f}MB for retry")
+                                                compressed_video.seek(0)
+                                                compressed_files.append(discord.File(fp=compressed_video, filename='generated_video.mp4'))
                                         
                                         try:
                                             await message.channel.send(response, files=compressed_files, reference=message)
@@ -13887,11 +13919,17 @@ Response: """
                                                 print(f"⚠️  [{message.author.display_name}] Still too large after compression, splitting across messages...")
                                                 # Send text first
                                                 await message.channel.send(response, reference=message)
-                                                # Send images in smaller batches (max 2 per message)
+                                                # Send images/videos in smaller batches (max 2 per message)
                                                 if compressed_files:
                                                     for batch_start in range(0, len(compressed_files), 2):
                                                         batch = compressed_files[batch_start:batch_start + 2]
-                                                        await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                                        await message.channel.send(f"📎 Files {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                                    # If video wasn't in compressed_files, try to send it separately
+                                                    if original_video_bytes and not any(f.filename == 'generated_video.mp4' for f in compressed_files):
+                                                        compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)
+                                                        if compressed_video:
+                                                            compressed_video.seek(0)
+                                                            await message.channel.send("🎬 Generated video:", files=[discord.File(fp=compressed_video, filename='generated_video.mp4')])
                                             else:
                                                 raise
                                     elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
