@@ -12464,10 +12464,10 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             if document_assets:
                 response_prompt += f"\n\nREFERENCE DOCUMENTS AVAILABLE: {json.dumps([doc['filename'] for doc in document_assets])}\nUse the extracts provided earlier as your source material."
         
-        # Add images to prompt if present
-        print(f"🔍 [{username}] DEBUG: Checking image_parts, count={len(image_parts) if 'image_parts' in locals() and image_parts else 0}")
-        if image_parts:
-            print(f"🔍 [{username}] DEBUG: Entering image_parts branch, count={len(image_parts)}")
+        # Add images and videos to prompt if present
+        print(f"🔍 [{username}] DEBUG: Checking media: image_parts count={len(image_parts) if 'image_parts' in locals() and image_parts else 0}, video_parts count={len(video_parts) if 'video_parts' in locals() and video_parts else 0}")
+        if image_parts or video_parts:
+            print(f"🔍 [{username}] DEBUG: Entering media processing branch (images={len(image_parts) if image_parts else 0}, videos={len(video_parts) if video_parts else 0})")
             try:
                 # Count NEW screenshots vs OLD images from previous messages
                 print(f"🔍 [{username}] DEBUG: Counting new screenshots vs old images")
@@ -12539,8 +12539,44 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                     
                     critical_instructions = f"{image_context}\n\nCRITICAL - PROFILE PICTURE IDENTIFICATION:\n- Read the image labels above - they EXPLICITLY tell you whose profile picture each image is\n- 'THE USER'S PROFILE PICTURE' = the message author's profile picture (when user says 'my profile picture')\n- 'THE BOT'S PROFILE PICTURE' = YOUR profile picture (when user says 'your profile picture')\n- '[USERNAME]'S PROFILE PICTURE' = that specific user's profile picture (when user asks about @username)\n\nCRITICAL - RESPONSE RULES:\n- If user asks 'what's my profile picture?' → ONLY describe THE USER'S PROFILE PICTURE (ignore all other images)\n- If user asks 'what's YOUR profile picture?' → ONLY describe THE BOT'S PROFILE PICTURE (ignore all other images)\n- If user asks 'what is @Dyno profile picture?' → ONLY describe DYNO'S PROFILE PICTURE (ignore all other images)\n- DO NOT describe multiple profile pictures unless the user explicitly asks for multiple\n- DO NOT describe images that are not relevant to the user's question\n- Use the exact labels provided - they tell you EXACTLY whose profile picture each image is"
                     
-                    response_prompt += f"\n\nThe user shared {len(image_parts)} image(s). Analyze and comment on them.\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\n🚨 CRITICAL FOR BROWSER AUTOMATION: If the user is asking for browser automation/videos (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record'), DO NOT mention or describe profile pictures or server icons in your response - they are completely irrelevant to browser automation tasks. Focus ONLY on the automation task and any screenshots/videos that were captured.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set."
-                print(f"🔍 [{username}] DEBUG: Finished building response_prompt with image instructions")
+                    # Build media description text
+                    media_description = []
+                    if image_parts:
+                        media_description.append(f"{len(image_parts)} image(s)")
+                    if video_parts:
+                        media_description.append(f"{len(video_parts)} video(s)")
+                    media_text = " and ".join(media_description) if media_description else "media"
+                    
+                    # Add video context if videos are present
+                    video_context = ""
+                    if video_parts:
+                        video_labels = []
+                        for idx, vid in enumerate(video_parts, start=1):
+                            filename = vid.get('filename', f'video_{idx}')
+                            source = vid.get('source', 'user_attachment')
+                            is_current = vid.get('is_current', True)
+                            if source == 'user_attachment':
+                                video_labels.append(f"- Video {idx}: User-shared video file ({filename})")
+                            elif source == 'replied_attachment':
+                                video_labels.append(f"- Video {idx}: Video from replied message ({filename})")
+                            else:
+                                video_labels.append(f"- Video {idx}: {filename}")
+                        video_label_text = "\n".join(video_labels) if video_labels else ""
+                        video_context = f"\n\nVIDEOS AVAILABLE:\n{video_label_text}\n\n"
+                    
+                    response_prompt += f"\n\nThe user shared {media_text}.\n"
+                    
+                    if image_parts:
+                        response_prompt += f"Analyze and comment on the {len(image_parts)} image(s).\n\n{image_label_text}{critical_instructions}\n\nCRITICAL: When referencing these images in your response, refer to them by their POSITION in the attached set:\n- The FIRST image = 'the first image', 'the first attached image', 'image 1' (position-based)\n- The SECOND image = 'the second image', 'the second attached image', 'image 2' (position-based)\n- The THIRD image = 'the third image', 'the third attached image', 'image 3' (position-based)\n- And so on...\n\nIMPORTANT: Only describe images that are relevant to the user's question. If they ask about their profile picture, ONLY describe their profile picture, NOT server icons or bot profile pictures. If they ask about channels, ignore all images and focus on the channel question.\n\n🚨 CRITICAL FOR BROWSER AUTOMATION: If the user is asking for browser automation/videos (e.g., 'go to youtube', 'take a video', 'search for', 'click on', 'watch', 'browse', 'navigate', 'show me you going to', 'record'), DO NOT mention or describe profile pictures or server icons in your response - they are completely irrelevant to browser automation tasks. Focus ONLY on the automation task and any screenshots/videos that were captured.\n\nDO NOT reference them by their original search result numbers or any other numbering system. Always count from the order they appear in the attached set (first, second, third, etc.).\n\nYou can analyze any attached image and answer questions about them like 'what's in the first image?', 'who is this?', 'what place is this?', 'describe the second image', etc. Be dynamic and reference images by their position in the attached set.\n"
+                    
+                    if video_parts:
+                        response_prompt += f"{video_context}🎬 VIDEO ANALYSIS:\n- You can see and analyze the {len(video_parts)} video(s) that the user shared\n- Watch the video(s) and describe what's happening, analyze the content, answer questions about it, or fact-check information\n- When referencing videos, use: 'the video', 'this video', 'the first video', 'the second video', etc.\n- Describe what you see happening in the video(s), identify people/objects/actions, explain the content, or answer any questions the user has about it\n- Be thorough and detailed when analyzing video content\n- If the user asks 'what is this video about?' or 'analyze this video', describe the main content, actions, people, scenes, and any notable details\n\n"
+                    
+                    if not image_parts and video_parts:
+                        # Only videos, no images - add general analysis instructions
+                        response_prompt += "The user wants you to analyze the video(s) they shared. Watch and describe what's happening in detail.\n"
+                
+                print(f"🔍 [{username}] DEBUG: Finished building response_prompt with media instructions (images={len(image_parts) if image_parts else 0}, videos={len(video_parts) if video_parts else 0})")
             except Exception as prompt_error:
                 print(f"🔍 [{username}] DEBUG: Exception while building image prompt: {prompt_error}")
                 import traceback
@@ -12550,7 +12586,8 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             try:
                 print(f"🔍 [{username}] DEBUG: About to call build_gemini_content_with_images")
                 print(f"🔍 [{username}] DEBUG: response_prompt length: {len(response_prompt) if response_prompt else 0}")
-                print(f"🔍 [{username}] DEBUG: image_parts count: {len(image_parts)}")
+                print(f"🔍 [{username}] DEBUG: image_parts count: {len(image_parts) if image_parts else 0}")
+                print(f"🔍 [{username}] DEBUG: video_parts count: {len(video_parts) if video_parts else 0}")
                 content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts, video_parts)
                 print(f"🔍 [{username}] DEBUG: build_gemini_content_with_images returned successfully")
                 print(f"🔍 [{username}] DEBUG: content_parts type: {type(content_parts)}, uploaded_files count: {len(uploaded_files)}")
@@ -12657,10 +12694,12 @@ Now decide: "{message.content}" -> """
                         print(f"🔍 [{username}] DEBUG: Entering is_simple_vision=False branch, about to define decide_image_model")
                         # Decide if images need deep analysis or simple analysis
                         async def decide_image_model():
-                            """Decide if images need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
-                            decision_prompt = f"""User message with images: "{message.content}"
+                            """Decide if images/videos need deep analysis (2.5 Pro - has vision) or simple (Flash)"""
+                            has_videos = bool(video_parts and len(video_parts) > 0)
+                            media_type = "videos" if (not image_parts and has_videos) else "images" if image_parts else "images and videos"
+                            decision_prompt = f"""User message with {media_type}: "{message.content}"
 
-Does analyzing these images require DEEP REASONING or just SIMPLE ANALYSIS?
+Does analyzing these {media_type} require DEEP REASONING or just SIMPLE ANALYSIS?
 
 DEEP REASONING (use 2.5 Pro - has vision, multimodal):
 - Code screenshots needing debugging
@@ -12669,16 +12708,20 @@ DEEP REASONING (use 2.5 Pro - has vision, multimodal):
 - Document analysis (PDFs, text in images)
 - Technical drawings
 - Data visualizations needing interpretation
-- Multiple images needing comparison/synthesis
+- Multiple images/videos needing comparison/synthesis
 - Complex technical analysis
+- Video content requiring detailed understanding (actions, dialogue, context)
+- "Analyze this video", "explain what's happening in this video"
+- Complex questions about video content
 
 SIMPLE ANALYSIS (use Flash):
 - "What is this?"
-- "Describe this image"
-- Casual photos
+- "Describe this image/video"
+- Casual photos/videos
 - Simple object recognition
-- Memes or funny images
+- Memes or funny images/videos
 - Basic descriptions
+- "What's in this video?" (simple question)
 
 Respond with ONLY: "DEEP" or "SIMPLE"
 
@@ -12687,6 +12730,9 @@ Examples:
 "what's in this image?" -> SIMPLE
 "analyze this system architecture diagram" -> DEEP
 "look at this funny meme" -> SIMPLE
+"analyze this video and tell me what it's about" -> DEEP
+"what's happening in this video?" -> DEEP
+"describe this video" -> SIMPLE
 
 Now decide: "{message.content}" -> """
                             
@@ -12725,7 +12771,7 @@ Now decide: "{message.content}" -> """
                     print(f"👁️  [{username}] Using default vision model for non-screenshot images: {vision_model_name}")
                 
                 print(f"🔍 [{username}] DEBUG: About to print vision model selection")
-                print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts)}")
+                print(f"👁️  [{username}] Using vision model: {vision_model_name} | Images: {len(image_parts) if image_parts else 0}, Videos: {len(video_parts) if video_parts else 0}")
                 print(f"🔍 [{username}] DEBUG: After vision model selection, about to enter try block for queued_generate_content")
             
             try:
