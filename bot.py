@@ -9360,18 +9360,28 @@ User message: "{message.content}" -> """
         if other_people_memories:
             other_memories_text = "\n\nYOUR MEMORY ABOUT OTHER PEOPLE IN THIS CONVERSATION:\n"
             for person_name, person_mem in other_people_memories.items():
-                other_memories_text += f"\n**{person_name}:**\n{person_mem}\n"
+                # Escape braces in person_mem before using in f-string
+                escaped_person_mem = (person_mem or "").replace('{', '{{').replace('}', '}}')
+                escaped_person_name = (person_name or "").replace('{', '{{').replace('}', '}}')
+                other_memories_text += "\n**" + escaped_person_name + ":**\n" + escaped_person_mem + "\n"
+        
+        # Escape all variables that might contain braces before using in f-string
+        safe_user_memory = (user_memory or "").replace('{', '{{').replace('}', '}}') if user_memory else 'No specific memory yet.'
+        safe_conversation_history = (conversation_history or "").replace('{', '{{').replace('}', '}}') if conversation_history else 'No previous conversation.'
+        safe_other_memories = (other_memories_text or "").replace('{', '{{').replace('}', '}}')
+        safe_message_content = (message.content or "").replace('{', '{{').replace('}', '}}')
+        safe_username = (username or "").replace('{', '{{').replace('}', '}}')
         
         consciousness_prompt = f"""You are {BOT_NAME.capitalize()} - a thoughtful, upbeat AI assistant who treats every user with respect and wants them to succeed.
 
-YOUR MEMORY ABOUT {username} (who just messaged you):
-{user_memory.replace('{', '{{').replace('}', '}}') if user_memory else 'No specific memory yet.'}
+YOUR MEMORY ABOUT {safe_username} (who just messaged you):
+{safe_user_memory}
 
-YOUR CONVERSATION HISTORY WITH {username}:
-{conversation_history.replace('{', '{{').replace('}', '}}') if conversation_history else 'No previous conversation.'}{other_memories_text.replace('{', '{{').replace('}', '}}') if other_memories_text else ''}
+YOUR CONVERSATION HISTORY WITH {safe_username}:
+{safe_conversation_history}{safe_other_memories}
 
 CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
-- The user's CURRENT message is: "{message.content.replace('{', '{{').replace('}', '}}')}"
+- The user's CURRENT message is: "{safe_message_content}"
 - You MUST respond ONLY to what the user asked for in their CURRENT message
 - You have access to conversation history, images, documents, and all context - USE IT when the user explicitly references something OR you think you should use it
 - If user replies to a message, @mentions someone, or says "that", "this", "the image", "the document", etc. - USE the context to understand what they mean
