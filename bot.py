@@ -9404,7 +9404,7 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate, TYPE into text fields), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it", "go to amazon and search for laptop", "go to google and search for python tutorials". You can open ANY link, click ANY button, scroll, wait, TYPE into search boxes and text fields, and take screenshots of ANY page. The AI can dynamically type into any text field, search box, or input element it finds on the page.
 
 - ✅ **Video Recording Capability**: Record screen videos of browser automation! You can record videos of websites, games, videos playing, or any browser interactions. The AI dynamically decides when to record videos vs take screenshots. Examples: "go to youtube, click on a video, record 30 seconds", "record 2 minutes of this game", "show me video of the entire process", "go to connections game and record me completing it", "record 10 seconds of the video". You can specify duration (e.g., "record 30 seconds", "record 2 minutes") or let the AI decide. Videos are automatically converted to MP4 and sent as attachments. The AI will navigate to the page, handle obstacles (cookie popups, etc.), get to the content, and then record for the specified duration. This works for ANY website - games, videos, interactive content, etc.
-- ✅ **AI Video Generation (Veo 3)**: Generate videos from text prompts using Google's Veo 3 AI! Create short videos (1-5 seconds) of any scene, concept, or idea. Examples: "generate a video of a sunset", "create a video of an egyptian man going to georgia", "make me a video of a cat playing". **LIMITS**: Maximum 5 seconds per video, 5 videos per user per day (each expires 24 hours after creation). The AI automatically decides the optimal duration (1-5 seconds) if not specified. You can combine video generation with other requests (e.g., "get me 2 images of georgia and make me a video of an egyptian man going to georgia"). The AI distinguishes between browser video recording (for websites) and AI video generation (for concepts/scenes).
+- ✅ **AI Video Generation (Veo 3)**: Generate videos from text prompts using Google's Veo 3 AI! Create short videos (1-5 seconds) of any scene, concept, or idea. Examples: "generate a video of a sunset", "create a video of an egyptian man going to georgia", "make me a video of a cat playing". **LIMITS**: Maximum 5 seconds per video, 5 videos per user per day (each expires 24 hours after creation). The AI automatically decides the optimal duration (1-5 seconds) if not specified. You can combine video generation with other requests (e.g., "get me 2 images of georgia and make me a video of an egyptian man going to georgia"). The AI distinguishes between browser video recording (for websites) and AI video generation (for concepts/scenes). **CRITICAL**: When users request video generation, the system automatically handles it - you should NOT output JSON like {"veo_3": {...}} in your response. Just respond naturally and the video will be generated and attached automatically.
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
@@ -9935,6 +9935,103 @@ CURRENT CONVERSATION CONTEXT:
         message_meta = await ai_analyze_message_meta(message)
         profile_request_detected = bool(message_meta.get("profile_picture_focus"))
         media_preferences = message_meta.get("media") or {}
+        
+        # AI Video Generation (Veo 3) - Check if user wants AI-generated video (do this EARLY so AI can respond about it)
+        generated_video = None
+        video_generation_status = None
+        needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
+        
+        if needs_ai_video and VEO_AVAILABLE:
+            try:
+                active_videos = await db.get_active_video_generations(user_id)
+                video_count = len(active_videos)
+                
+                if video_count >= 5:
+                    video_generation_status = {
+                        'success': False,
+                        'error': 'limit_reached',
+                        'count': video_count,
+                        'total': 5
+                    }
+                    print(f"🎬 [{username}] Video generation limit reached: {video_count}/5")
+                else:
+                    remaining = 5 - video_count
+                    print(f"🎬 [{username}] Video generation requested ({video_count}/5 used, {remaining} remaining)")
+                    
+                    # Extract video prompt from message - remove common request phrases but keep the actual content
+                    video_prompt = message.content
+                    # Remove bot mentions and common request phrases, but preserve the actual description
+                    video_prompt = re.sub(r'<@\d+>', '', video_prompt)  # Remove mentions
+                    video_prompt = re.sub(r'\b(make me|generate|create|a|an|the)\s+(a|an|the)?\s*(video|clip|of)\s+', '', video_prompt, flags=re.IGNORECASE)
+                    video_prompt = re.sub(r'\b\d+\s*(second|sec|s)\s*(video|clip)?\s*(of)?\s*', '', video_prompt, flags=re.IGNORECASE)
+                    video_prompt = video_prompt.strip()
+                    # If prompt is too short after cleaning, use original message content
+                    if len(video_prompt) < 10:
+                        video_prompt = message.content
+                        # Just remove mentions
+                        video_prompt = re.sub(r'<@\d+>', '', video_prompt).strip()
+                    
+                    ai_video_duration = media_preferences.get("ai_video_duration_seconds")
+                    if ai_video_duration is None:
+                        duration_prompt = f"""User wants to generate a video with prompt: "{video_prompt}"
+
+Decide the optimal duration for this video (1-5 seconds max). Consider:
+- Simple scenes (sunset, single object): 3-5 seconds
+- Complex scenes (action, movement): 4-5 seconds
+- Static scenes: 2-3 seconds
+
+Respond with ONLY a number between 1-5: """
+                        try:
+                            decision_model = get_fast_model()
+                            duration_response = await queued_generate_content(decision_model, duration_prompt)
+                            duration_text = duration_response.text.strip()
+                            duration_match = re.search(r'(\d+)', duration_text)
+                            if duration_match:
+                                ai_video_duration = min(5, max(1, int(duration_match.group(1))))
+                            else:
+                                ai_video_duration = 3
+                        except Exception:
+                            ai_video_duration = 3
+                    else:
+                        ai_video_duration = min(5, max(1, int(ai_video_duration)))
+                    
+                    if len(video_prompt) > 10:
+                        print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
+                        generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id)
+                        
+                        if generated_video:
+                            await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
+                            new_count = video_count + 1
+                            # Store video generation status for AI to respond naturally (no hardcoded messages)
+                            video_generation_status = {
+                                'success': True,
+                                'count': new_count,
+                                'total': 5,
+                                'expires_hours': 24
+                            }
+                            print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/5)")
+                        else:
+                            video_generation_status = {'success': False, 'error': 'generation_failed'}
+                            print(f"🎬 [{username}] ⚠️  Video generation returned None")
+                    else:
+                        print(f"🎬 [{username}] ⚠️  Video prompt too short ({len(video_prompt)} chars), skipping")
+                        video_generation_status = {'success': False, 'error': 'prompt_too_short'}
+            except Exception as e:
+                error_str = str(e).lower()
+                print(f"❌ [{username}] Video generation error: {e}")
+                import traceback
+                print(f"❌ [{username}] Video generation traceback:\n{traceback.format_exc()}")
+                
+                # Store error status for AI to respond naturally
+                if any(keyword in error_str for keyword in [
+                    'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited'
+                ]):
+                    video_generation_status = {'success': False, 'error': 'content_policy'}
+                else:
+                    video_generation_status = {'success': False, 'error': 'generation_failed'}
+        elif needs_ai_video and not VEO_AVAILABLE:
+            video_generation_status = {'success': False, 'error': 'unavailable'}
+            print(f"🎬 [{username}] Video generation requested but Veo 3 not available")
 
         if (
             message_meta.get("small_talk")
@@ -11721,6 +11818,18 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
         if has_automation_video:
             response_prompt += f"\n\n🎥 VIDEO CAPTURE STATUS:\n- You successfully recorded {automation_video_count} video file(s) for this request and they are attached to your reply.\n- Describe what the recording shows so the user knows what to expect when they watch it.\n- DO NOT claim that video capture failed or that you cannot provide video—the recording worked and is included."
         
+        # Add AI video generation status if available (will be set during video generation)
+        if 'video_generation_status' in locals() and video_generation_status:
+            status = video_generation_status
+            if status.get('success'):
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- Usage: {status.get('count', 0)}/{status.get('total', 5)} videos per day (expires in {status.get('expires_hours', 24)} hours).\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
+            elif status.get('error') == 'content_policy':
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was blocked due to content safety policies.\n- Inform the user politely that the video couldn't be generated due to content restrictions, and suggest trying a different prompt."
+            elif status.get('error') == 'unavailable':
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation is currently unavailable (Veo 3 package not installed).\n- Inform the user that video generation is temporarily disabled."
+            else:
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was attempted but failed.\n- Inform the user that there was an issue generating the video and suggest trying again."
+        
         if wants_image and not image_search_results:
             # Add instructions for image generation
             # Check if posting to another channel (channel_actions will be set)
@@ -12325,6 +12434,10 @@ Now decide: "{message.content}" -> """
         # Final cleanup: Remove [IMAGE_NUMBERS: ...] marker from response if still present (user shouldn't see this)
         ai_response = re.sub(r'\[IMAGE_NUMBERS?:\s*[\d,\s]+\]', '', ai_response, flags=re.IGNORECASE).strip()
         
+        # Remove any JSON output about video generation (AI shouldn't output this - code handles it)
+        ai_response = re.sub(r'\s*\{[^}]*"veo_3"[^}]*\}\s*', '', ai_response, flags=re.IGNORECASE).strip()
+        ai_response = re.sub(r'\s*\{[^}]*"veo"[^}]*\}\s*', '', ai_response, flags=re.IGNORECASE).strip()
+        
         # Log response generated
         print(f"✅ [{username}] Response generated ({len(ai_response)} chars) | Total time: {generation_time:.2f}s")
         
@@ -12465,91 +12578,7 @@ Now decide: "{message.content}" -> """
                 else:
                     ai_response += "\n\n(Image generation failed - please try again)"
         
-        # AI Video Generation (Veo 3) - Check if user wants AI-generated video
-        generated_video = None
-        if 'message_meta' in locals():
-            media_preferences = message_meta.get("media", {})
-            needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
-            print(f"🎬 [{username}] Video generation check: needs_ai_video={needs_ai_video}, VEO_AVAILABLE={VEO_AVAILABLE}")
-            
-            if needs_ai_video and VEO_AVAILABLE:
-                try:
-                    active_videos = await db.get_active_video_generations(user_id)
-                    video_count = len(active_videos)
-                    
-                    if video_count >= 5:
-                        ai_response += f"\n\n⚠️ **Video Generation Limit Reached**\nYou've used {video_count}/5 video generations today. Each video expires 24 hours after creation. Please wait for one to expire before generating another video."
-                        print(f"🎬 [{username}] Video generation limit reached: {video_count}/5")
-                    else:
-                        remaining = 5 - video_count
-                        print(f"🎬 [{username}] Video generation requested ({video_count}/5 used, {remaining} remaining)")
-                        
-                        # Extract video prompt from message - remove common request phrases but keep the actual content
-                        video_prompt = message.content
-                        # Remove bot mentions and common request phrases, but preserve the actual description
-                        video_prompt = re.sub(r'<@\d+>', '', video_prompt)  # Remove mentions
-                        video_prompt = re.sub(r'\b(make me|generate|create|a|an|the)\s+(a|an|the)?\s*(video|clip|of)\s+', '', video_prompt, flags=re.IGNORECASE)
-                        video_prompt = re.sub(r'\b\d+\s*(second|sec|s)\s*(video|clip)?\s*(of)?\s*', '', video_prompt, flags=re.IGNORECASE)
-                        video_prompt = video_prompt.strip()
-                        # If prompt is too short after cleaning, use original message content
-                        if len(video_prompt) < 10:
-                            video_prompt = message.content
-                            # Just remove mentions
-                            video_prompt = re.sub(r'<@\d+>', '', video_prompt).strip()
-                        
-                        ai_video_duration = media_preferences.get("ai_video_duration_seconds")
-                        if ai_video_duration is None:
-                            duration_prompt = f"""User wants to generate a video with prompt: "{video_prompt}"
-
-Decide the optimal duration for this video (1-5 seconds max). Consider:
-- Simple scenes (sunset, single object): 3-5 seconds
-- Complex scenes (action, movement): 4-5 seconds
-- Static scenes: 2-3 seconds
-
-Respond with ONLY a number between 1-5: """
-                            try:
-                                decision_model = get_fast_model()
-                                duration_response = await queued_generate_content(decision_model, duration_prompt)
-                                duration_text = duration_response.text.strip()
-                                duration_match = re.search(r'(\d+)', duration_text)
-                                if duration_match:
-                                    ai_video_duration = min(5, max(1, int(duration_match.group(1))))
-                                else:
-                                    ai_video_duration = 3
-                            except Exception:
-                                ai_video_duration = 3
-                        else:
-                            ai_video_duration = min(5, max(1, int(ai_video_duration)))
-                        
-                        if len(video_prompt) > 10:
-                            print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
-                            generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id)
-                            
-                            if generated_video:
-                                await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
-                                new_count = video_count + 1
-                                ai_response += f"\n\n✅ **Video Generated** ({new_count}/5 per day - expires in 24 hours)"
-                                print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/5)")
-                            else:
-                                ai_response += "\n\n(Video generation failed - please try again)"
-                                print(f"🎬 [{username}] ⚠️  Video generation returned None")
-                        else:
-                            print(f"🎬 [{username}] ⚠️  Video prompt too short ({len(video_prompt)} chars), skipping")
-                except Exception as e:
-                    error_str = str(e).lower()
-                    print(f"❌ [{username}] Video generation error: {e}")
-                    import traceback
-                    print(f"❌ [{username}] Video generation traceback:\n{traceback.format_exc()}")
-                    
-                    if any(keyword in error_str for keyword in [
-                        'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited'
-                    ]):
-                        ai_response += "\n\n(I can't generate that video as it violates content safety policies. Please try a different video request.)"
-                    else:
-                        ai_response += "\n\n(Video generation failed - please try again)"
-            elif needs_ai_video and not VEO_AVAILABLE:
-                ai_response += "\n\n⚠️ **Video Generation Unavailable**\nVideo generation is currently disabled. The Veo 3 package (google-genai) needs to be installed."
-                print(f"🎬 [{username}] Video generation requested but Veo 3 not available")
+        # Video generation already handled above (moved earlier so AI can respond about it)
         
         # Store interaction in memory
         channel_id = str(message.channel.id) if message.channel else None
