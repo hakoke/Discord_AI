@@ -1295,25 +1295,30 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         if duration_seconds not in [4, 6, 8]:
             raise ValueError(f"Invalid duration: {duration_seconds} (Veo 3.1 only accepts 4, 6, or 8 seconds)")
         
+        # veo-2.0-generate-001 requires duration between 5-8 seconds (inclusive)
+        # Adjust duration for veo-2.0: if it's 4, use 5 instead
+        duration_for_veo2 = duration_seconds if duration_seconds >= 5 else 5
+        print(f"   - Duration for veo-3.1/3.0: {duration_seconds}s, Duration for veo-2.0: {duration_for_veo2}s")
+        
         # Generate video using Veo 3.1
         print(f"   - API call: duration_seconds={duration_seconds} (type: {type(duration_seconds).__name__})")
         print(f"   - DEBUG: Creating GenerateVideosConfig with duration_seconds={duration_seconds}")
         
         # Try creating configs for each model
-        # veo-2.0-generate-001 doesn't support resolution parameter
+        # veo-2.0-generate-001 doesn't support resolution parameter and requires 5-8 seconds
         try:
-            # Config for veo-3.1 and veo-3.0 (with resolution)
+            # Config for veo-3.1 and veo-3.0 (with resolution, duration 4/6/8)
             config_with_resolution = types.GenerateVideosConfig(
                 negative_prompt="",
                 aspect_ratio="16:9",
                 resolution=resolution,
                 duration_seconds=duration_seconds
             )
-            # Config for veo-2.0 (without resolution)
+            # Config for veo-2.0 (without resolution, duration 5-8)
             config_without_resolution = types.GenerateVideosConfig(
                 negative_prompt="",
                 aspect_ratio="16:9",
-                duration_seconds=duration_seconds
+                duration_seconds=duration_for_veo2
             )
             print(f"   - DEBUG: Configs created successfully")
             print(f"   - DEBUG: Config with resolution type: {type(config_with_resolution)}")
