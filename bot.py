@@ -1275,15 +1275,43 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
         
         # Generate video using Veo 3.1
         print(f"   - API call: duration_seconds={duration_seconds} (type: {type(duration_seconds).__name__})")
-        operation = client.models.generate_videos(
-            model="veo-3.1-generate-preview",
-            prompt=prompt,
-            config=types.GenerateVideosConfig(
+        print(f"   - DEBUG: Creating GenerateVideosConfig with duration_seconds={duration_seconds}")
+        
+        # Try creating config first to see if there's an issue
+        try:
+            config = types.GenerateVideosConfig(
                 negative_prompt="",
                 aspect_ratio="16:9",
                 resolution=resolution,
-                duration_seconds=duration_seconds  # Already validated as int 4-8
-            ),
+                duration_seconds=duration_seconds
+            )
+            print(f"   - DEBUG: Config created successfully: {config}")
+            print(f"   - DEBUG: Config type: {type(config)}")
+            # Try to inspect the config object
+            if hasattr(config, '__dict__'):
+                print(f"   - DEBUG: Config __dict__: {config.__dict__}")
+            # Check if duration_seconds attribute exists
+            if hasattr(config, 'duration_seconds'):
+                actual_duration = getattr(config, 'duration_seconds')
+                print(f"   - DEBUG: config.duration_seconds = {actual_duration} (type: {type(actual_duration).__name__})")
+            else:
+                print(f"   - DEBUG: ⚠️ config.duration_seconds attribute NOT FOUND")
+                print(f"   - DEBUG: Available attributes: {[attr for attr in dir(config) if not attr.startswith('_')]}")
+                # Try camelCase
+                if hasattr(config, 'durationSeconds'):
+                    actual_duration = getattr(config, 'durationSeconds')
+                    print(f"   - DEBUG: config.durationSeconds = {actual_duration} (type: {type(actual_duration).__name__})")
+        except Exception as config_error:
+            print(f"   - DEBUG: ERROR creating config: {config_error}")
+            import traceback
+            print(f"   - DEBUG: Config creation traceback:\n{traceback.format_exc()}")
+            raise
+        
+        print(f"   - DEBUG: Calling generate_videos API with model='veo-3.1-generate-preview'...")
+        operation = client.models.generate_videos(
+            model="veo-3.1-generate-preview",
+            prompt=prompt,
+            config=config
         )
         
         print(f"⏳ [VIDEO GEN] Video generation started, polling for completion...")
