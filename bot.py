@@ -1216,8 +1216,15 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         print(f"⚠️  [VIDEO GEN] Veo not available, skipping video generation")
         return None
     
-    # Veo 3 requires 4-8 seconds duration (must be integer)
-    duration_seconds = int(min(8, max(4, duration_seconds)))
+    # Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7!)
+    # Round to nearest valid value: 4, 6, or 8
+    if duration_seconds <= 5:
+        duration_seconds = 4
+    elif duration_seconds <= 7:
+        duration_seconds = 6
+    else:
+        duration_seconds = 8
+    duration_seconds = int(duration_seconds)
     
     try:
         print(f"🎬 [VIDEO GEN] Queuing video generation request through Flash queue...")
@@ -1242,11 +1249,18 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         print(f"❌ [VIDEO GEN] ❌ Full traceback:\n{traceback.format_exc()}")
         return None
 
-def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[BytesIO]:
+def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[BytesIO]:
     """Synchronous video generation using Veo 3"""
     try:
-        # Ensure duration is an integer between 4 and 8 (Veo 3 requirement)
-        duration_seconds = int(min(8, max(4, duration_seconds)))
+        # Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7!)
+        # Round to nearest valid value: 4, 6, or 8
+        if duration_seconds <= 5:
+            duration_seconds = 4
+        elif duration_seconds <= 7:
+            duration_seconds = 6
+        else:
+            duration_seconds = 8
+        duration_seconds = int(duration_seconds)
         print(f"🎬 [VIDEO GEN] Starting video generation for prompt: '{prompt[:100]}...'")
         print(f"   - Duration: {duration_seconds} seconds (type: {type(duration_seconds).__name__}, value: {duration_seconds})")
         
@@ -1264,14 +1278,14 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
         
         # Veo 3 resolution requirements:
         # - 1080p: requires minimum 8 seconds
-        # - 720p: supports 4-8 seconds
-        # Since videos are 4-8 seconds, use 720p for all videos
+        # - 720p: supports 4, 6, or 8 seconds
+        # Since videos are 4, 6, or 8 seconds, use 720p for all videos
         resolution = "720p" if duration_seconds < 8 else "1080p"
         print(f"   - Resolution: {resolution} (duration: {duration_seconds}s)")
         
-        # Double-check duration is valid integer between 4-8
-        if not isinstance(duration_seconds, int) or duration_seconds < 4 or duration_seconds > 8:
-            raise ValueError(f"Invalid duration: {duration_seconds} (must be integer between 4-8)")
+        # Double-check duration is valid: must be 4, 6, or 8 (Veo 3.1 requirement)
+        if duration_seconds not in [4, 6, 8]:
+            raise ValueError(f"Invalid duration: {duration_seconds} (Veo 3.1 only accepts 4, 6, or 8 seconds)")
         
         # Generate video using Veo 3.1
         print(f"   - API call: duration_seconds={duration_seconds} (type: {type(duration_seconds).__name__})")
@@ -2982,7 +2996,7 @@ def _default_message_meta() -> Dict[str, Any]:
             "forbid_screenshots": False,
             "forbid_video": False,
             "video_duration_seconds": None,
-            "ai_video_duration_seconds": None,  # Duration for AI video (max 5s)
+            "ai_video_duration_seconds": None,  # Duration for AI video (4, 6, or 8s only)
             "preferred_screenshot_count": None,
             "notes": ""
         }
@@ -3028,12 +3042,12 @@ Definitions:
   * "create a video of X"
   * "video of X" (when X is a concept, not a website)
   * "4 second video of an egyptian man flying into norway" → needs_ai_video=true, ai_video_duration_seconds=4
-  * "make me a 5 second video of a sunset" → needs_ai_video=true, ai_video_duration_seconds=5
+  * "make me a 6 second video of a sunset" → needs_ai_video=true, ai_video_duration_seconds=6
 - CRITICAL DISTINCTION: 
   * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium", "record this page", "record the website"
   * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, person, object, or idea. NO website/URL mentioned. Phrases like "make me a video of", "generate a video of", "create a video of", "video of [concept]" where [concept] is NOT a URL
 - "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
-- Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, max is 5 seconds - if user asks for longer, set ai_video_duration_seconds to 5 and note it in "notes". Use null when unspecified.
+- Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7). Round to nearest valid value: ≤5→4, ≤7→6, >7→8. Note any adjustments in "notes". Use null when unspecified.
 - "preferred_screenshot_count": extract explicit numbers (e.g., "take 3 screenshots"). Use null when unspecified.
 - "notes": summarize the reasoning in under 20 words, including if AI video duration was capped at 5 seconds.
 
@@ -3060,7 +3074,14 @@ JSON:"""
         ai_video_duration = media.get("ai_video_duration_seconds")
         if ai_video_duration is not None:
             # Enforce Veo 3's 4-8 second requirement
-            meta_media["ai_video_duration_seconds"] = min(8, max(4, int(ai_video_duration)))
+            # Veo 3.1 ONLY accepts 4, 6, or 8 seconds - round to nearest valid value
+            duration_val = int(ai_video_duration)
+            if duration_val <= 5:
+                meta_media["ai_video_duration_seconds"] = 4
+            elif duration_val <= 7:
+                meta_media["ai_video_duration_seconds"] = 6
+            else:
+                meta_media["ai_video_duration_seconds"] = 8
         else:
             meta_media["ai_video_duration_seconds"] = None
         meta_media["preferred_screenshot_count"] = media.get("preferred_screenshot_count", meta_media["preferred_screenshot_count"])
@@ -9451,7 +9472,7 @@ YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ **Screenshot Capability**: Take screenshots of ANY website/URL. You can visit any link, take screenshots (1-10 screenshots at different scroll positions), perform browser actions (click buttons, scroll, navigate, TYPE into text fields), and send the screenshots to users. AI decides when screenshots are needed, how many to take, and what browser actions to perform. Examples: "go to https://site.com and take a screenshot", "show me what https://example.com looks like", "take 3 screenshots of different parts", "click 'Sign In' then screenshot", "visit this link and screenshot it", "go to amazon and search for laptop", "go to google and search for python tutorials". You can open ANY link, click ANY button, scroll, wait, TYPE into search boxes and text fields, and take screenshots of ANY page. The AI can dynamically type into any text field, search box, or input element it finds on the page.
 
 - ✅ **Video Recording Capability**: Record screen videos of browser automation! You can record videos of websites, games, videos playing, or any browser interactions. The AI dynamically decides when to record videos vs take screenshots. Examples: "go to youtube, click on a video, record 30 seconds", "record 2 minutes of this game", "show me video of the entire process", "go to connections game and record me completing it", "record 10 seconds of the video". You can specify duration (e.g., "record 30 seconds", "record 2 minutes") or let the AI decide. Videos are automatically converted to MP4 and sent as attachments. The AI will navigate to the page, handle obstacles (cookie popups, etc.), get to the content, and then record for the specified duration. This works for ANY website - games, videos, interactive content, etc.
-- ✅ **AI Video Generation (Veo 3)**: Generate videos from text prompts using Google's Veo 3 AI! Create videos (4-8 seconds) of any scene, concept, or idea. Examples: "generate a video of a sunset", "create a video of an egyptian man going to georgia", "make me a video of a cat playing". **LIMITS**: Videos must be 4-8 seconds (Veo 3 requirement), 5 videos per user per day (each expires 24 hours after creation). The AI automatically decides the optimal duration (4-8 seconds) if not specified. You can combine video generation with other requests (e.g., "get me 2 images of georgia and make me a video of an egyptian man going to georgia"). The AI distinguishes between browser video recording (for websites) and AI video generation (for concepts/scenes). **CRITICAL**: When users request video generation, the system automatically handles it - you should NOT output JSON like {"veo_3": {...}} in your response. Just respond naturally and the video will be generated and attached automatically.
+- ✅ **AI Video Generation (Veo 3)**: Generate videos from text prompts using Google's Veo 3.1 AI! Create videos (4, 6, or 8 seconds) of any scene, concept, or idea. Examples: "generate a video of a sunset", "create a video of an egyptian man going to georgia", "make me a video of a cat playing". **LIMITS**: Videos must be 4, 6, or 8 seconds (Veo 3.1 only accepts these values, NOT 5 or 7), 5 videos per user per day (each expires 24 hours after creation). The AI automatically decides the optimal duration (4, 6, or 8 seconds) if not specified. You can combine video generation with other requests (e.g., "get me 2 images of georgia and make me a video of an egyptian man going to georgia"). The AI distinguishes between browser video recording (for websites) and AI video generation (for concepts/scenes). **CRITICAL**: When users request video generation, the system automatically handles it - you should NOT output JSON like {"veo_3": {...}} in your response. Just respond naturally and the video will be generated and attached automatically.
 - ✅ **Code Generation**: Write, debug, and explain code in any programming language
 - ✅ **Document Creation**: Create PDF and Word documents from code, text, or content
 - ✅ **Multi-modal Understanding**: Process text, images, and documents together in one conversation
@@ -10022,26 +10043,32 @@ CURRENT CONVERSATION CONTEXT:
                     if ai_video_duration is None:
                         duration_prompt = f"""User wants to generate a video with prompt: "{video_prompt}"
 
-Decide the optimal duration for this video (4-8 seconds, Veo 3 requirement). Consider:
-- Simple scenes (sunset, single object): 4-5 seconds
-- Complex scenes (action, movement): 5-8 seconds
-- Static scenes: 4-5 seconds
+Decide the optimal duration for this video. Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7). Consider:
+- Simple scenes (sunset, single object): 4 seconds
+- Medium scenes (action, movement): 6 seconds
+- Complex scenes (detailed action): 8 seconds
 
-Respond with ONLY a number between 4-8: """
+Respond with ONLY one of these numbers: 4, 6, or 8"""
                         try:
                             decision_model = get_fast_model()
                             duration_response = await queued_generate_content(decision_model, duration_prompt)
                             duration_text = duration_response.text.strip()
-                            duration_match = re.search(r'(\d+)', duration_text)
+                            duration_match = re.search(r'([468])', duration_text)
                             if duration_match:
-                                ai_video_duration = min(8, max(4, int(duration_match.group(1))))
+                                ai_video_duration = int(duration_match.group(1))
                             else:
-                                ai_video_duration = 5  # Default to 5 seconds
+                                ai_video_duration = 6  # Default to 6 seconds
                         except Exception:
-                            ai_video_duration = 5  # Default to 5 seconds
+                            ai_video_duration = 6  # Default to 6 seconds
                     else:
-                        # Clamp to Veo 3's 4-8 second requirement (must be integer)
-                        ai_video_duration = int(min(8, max(4, int(ai_video_duration))))
+                        # Veo 3.1 ONLY accepts 4, 6, or 8 seconds - round to nearest valid value
+                        duration_val = int(ai_video_duration)
+                        if duration_val <= 5:
+                            ai_video_duration = 4
+                        elif duration_val <= 7:
+                            ai_video_duration = 6
+                        else:
+                            ai_video_duration = 8
                     
                     if len(video_prompt) > 10:
                         print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
@@ -11876,7 +11903,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             elif status.get('error') == 'content_policy':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was blocked due to content safety policies.\n- Inform the user politely that the video couldn't be generated due to content restrictions, and suggest trying a different prompt."
             elif status.get('error') == 'duration_invalid':
-                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation failed: Veo 3 requires videos to be 4-8 seconds long.\n- Inform the user that video duration must be between 4-8 seconds (Veo 3 requirement), and suggest they try again with a duration in that range."
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation failed: Veo 3.1 only accepts 4, 6, or 8 seconds (NOT 5 or 7).\n- Inform the user that video duration must be 4, 6, or 8 seconds (Veo 3.1 requirement), and suggest they try again with one of these values."
             elif status.get('error') == 'unavailable':
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation is currently unavailable (Veo 3 package not installed).\n- Inform the user that video generation is temporarily disabled."
             elif status.get('error') == 'limit_reached':
