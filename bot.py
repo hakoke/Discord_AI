@@ -1260,6 +1260,13 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
         
         print(f"📡 [VIDEO GEN] Calling Veo 3 API...")
         
+        # Veo 3 resolution requirements:
+        # - 1080p: requires minimum 8 seconds
+        # - 720p: supports 1-5 seconds (and longer)
+        # Since we limit videos to 5 seconds max, use 720p for all videos
+        resolution = "720p" if duration_seconds < 8 else "1080p"
+        print(f"   - Resolution: {resolution} (duration: {duration_seconds}s)")
+        
         # Generate video using Veo 3.1
         operation = client.models.generate_videos(
             model="veo-3.1-generate-preview",
@@ -1267,7 +1274,7 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
             config=types.GenerateVideosConfig(
                 negative_prompt="",
                 aspect_ratio="16:9",
-                resolution="1080p",
+                resolution=resolution,
                 duration_seconds=duration_seconds
             ),
         )
