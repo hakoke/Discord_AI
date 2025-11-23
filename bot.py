@@ -12480,7 +12480,6 @@ Now decide: "{message.content}" -> """
                         # Extract video prompt from message - remove common request phrases but keep the actual content
                         video_prompt = message.content
                         # Remove bot mentions and common request phrases, but preserve the actual description
-                        import re
                         video_prompt = re.sub(r'<@\d+>', '', video_prompt)  # Remove mentions
                         video_prompt = re.sub(r'\b(make me|generate|create|a|an|the)\s+(a|an|the)?\s*(video|clip|of)\s+', '', video_prompt, flags=re.IGNORECASE)
                         video_prompt = re.sub(r'\b\d+\s*(second|sec|s)\s*(video|clip)?\s*(of)?\s*', '', video_prompt, flags=re.IGNORECASE)
