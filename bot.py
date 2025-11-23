@@ -14767,39 +14767,39 @@ async def limits_command(interaction: discord.Interaction):
                 # Find the earliest expiration
                 if active_videos:
                     earliest_expiry = min(video.get('expires_at') for video in active_videos if video.get('expires_at'))
-                        if earliest_expiry:
-                            from datetime import datetime, timezone
-                            now = datetime.now(timezone.utc)
-                            if isinstance(earliest_expiry, str):
-                                # Try to parse ISO format string
+                    if earliest_expiry:
+                        from datetime import datetime, timezone
+                        now = datetime.now(timezone.utc)
+                        if isinstance(earliest_expiry, str):
+                            # Try to parse ISO format string
+                            try:
+                                earliest_expiry = datetime.fromisoformat(earliest_expiry.replace('Z', '+00:00'))
+                            except:
                                 try:
-                                    earliest_expiry = datetime.fromisoformat(earliest_expiry.replace('Z', '+00:00'))
+                                    # Try parsing with strptime for common formats
+                                    earliest_expiry = datetime.strptime(earliest_expiry, '%Y-%m-%d %H:%M:%S%z')
                                 except:
-                                    try:
-                                        # Try parsing with strptime for common formats
-                                        earliest_expiry = datetime.strptime(earliest_expiry, '%Y-%m-%d %H:%M:%S%z')
-                                    except:
-                                        earliest_expiry = None
-                            elif isinstance(earliest_expiry, datetime):
-                                pass
-                            else:
-                                earliest_expiry = None
-                            
-                            if earliest_expiry:
-                                if earliest_expiry.tzinfo is None:
-                                    earliest_expiry = earliest_expiry.replace(tzinfo=timezone.utc)
-                                time_until = earliest_expiry - now
-                                if time_until.total_seconds() > 0:
-                                    hours = int(time_until.total_seconds() / 3600)
-                                    minutes = int((time_until.total_seconds() % 3600) / 60)
-                                    if hours > 0:
-                                        reset_time = f"{hours}h {minutes}m"
-                                    else:
-                                        reset_time = f"{minutes}m"
+                                    earliest_expiry = None
+                        elif isinstance(earliest_expiry, datetime):
+                            pass
+                        else:
+                            earliest_expiry = None
+                        
+                        if earliest_expiry:
+                            if earliest_expiry.tzinfo is None:
+                                earliest_expiry = earliest_expiry.replace(tzinfo=timezone.utc)
+                            time_until = earliest_expiry - now
+                            if time_until.total_seconds() > 0:
+                                hours = int(time_until.total_seconds() / 3600)
+                                minutes = int((time_until.total_seconds() % 3600) / 60)
+                                if hours > 0:
+                                    reset_time = f"{hours}h {minutes}m"
                                 else:
-                                    reset_time = "now"
+                                    reset_time = f"{minutes}m"
                             else:
-                                reset_time = "24h"
+                                reset_time = "now"
+                        else:
+                            reset_time = "24h"
                     else:
                         reset_time = "24h"
                     video_status = f"❌ **Limit Reached** ({video_count}/{video_limit})"
