@@ -2357,12 +2357,51 @@ def _upload_video_to_gemini(video_bytes: bytes, mime_type: str, display_name: st
     
     try:
         uploaded_file = genai.upload_file(path=temp_path, mime_type=mime_type, display_name=display_name)
+        # Wait for file to be in ACTIVE state before returning
+        _wait_for_file_active(uploaded_file)
         return uploaded_file
     finally:
         try:
             os.unlink(temp_path)
         except OSError:
             pass
+
+def _wait_for_file_active(uploaded_file, max_wait_seconds: int = 30, check_interval: float = 0.5):
+    """Wait for uploaded file to be in ACTIVE state before using it"""
+    import time
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait_seconds:
+        try:
+            # Get fresh file info from API to check state
+            file_info = genai.get_file(uploaded_file.name)
+            file_state = file_info.state.name if hasattr(file_info.state, 'name') else str(file_info.state)
+            
+            if file_state == 'ACTIVE':
+                elapsed = time.time() - start_time
+                if elapsed > 0.1:  # Only log if we actually waited
+                    print(f"✅ [GEMINI] File {uploaded_file.name} is now ACTIVE (waited {elapsed:.2f}s)")
+                return uploaded_file
+            
+            # Check if file failed
+            if file_state in ['FAILED', 'STATE_UNSPECIFIED']:
+                raise Exception(f"File upload failed with state: {file_state}")
+            
+            # Wait before next check
+            time.sleep(check_interval)
+        except Exception as e:
+            # If we can't check state, wait a bit and try again
+            if time.time() - start_time > max_wait_seconds - 1:
+                # Last attempt - wait a bit longer and proceed
+                time.sleep(1.0)
+                print(f"⚠️  [GEMINI] Could not verify file state after {max_wait_seconds}s, proceeding: {e}")
+                return uploaded_file
+            time.sleep(check_interval)
+    
+    # If we've waited max time, try to use it anyway (might be ready)
+    elapsed = time.time() - start_time
+    print(f"⚠️  [GEMINI] File {uploaded_file.name} waited {elapsed:.2f}s for ACTIVE state, proceeding anyway")
+    return uploaded_file
 
 def build_gemini_content_with_images(prompt: str, image_parts: list, video_parts: list = None) -> tuple:
     """Prepare Gemini content list and uploaded file handles for images and videos."""
@@ -10548,71 +10587,151 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                 "Summarize or reference this data when answering their question."
             )
 
-        # Process images and videos if present (from current message OR replied message)
+        # AI-DRIVEN: First check if images/videos are present, then AI decides if we need them
+        # This prevents unnecessary extraction/upload for unrelated requests (zero latency!)
         image_parts = []
         video_parts = []
         
-        # Get images and videos from current message
-        print(f"📸 [{username}] Checking for media: attachments={len(message.attachments) if message.attachments else 0}, reference={bool(message.reference)}")
+        # First, check if media is present (without extracting yet)
+        has_images = False
+        has_videos = False
+        has_replied_media = False
+        
+        # Check current message attachments
         if message.attachments:
             for attachment in message.attachments:
                 filename_lower = attachment.filename.lower() if attachment.filename else ''
-                
-                # Check for images
                 if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
-                    try:
-                        image_data = await download_image(attachment.url)
-                        if image_data:
-                            mime_type = attachment.content_type
-                            if not mime_type:
-                                ext = attachment.filename.split('.')[-1].lower()
-                                mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
-                            image_parts.append({
-                                'mime_type': mime_type,
-                                'data': image_data,
-                                'is_current': True,  # Mark as current (from current message)
-                                'source': 'user_attachment'
-                            })
-                            print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
-                    except Exception as e:
-                        print(f"⚠️  [{username}] Error downloading image: {e}")
-                
-                # Check for videos
+                    has_images = True
                 elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
-                    try:
-                        video_data = await download_bytes(attachment.url)
-                        if video_data:
-                            mime_type = attachment.content_type
-                            if not mime_type:
-                                ext = attachment.filename.split('.')[-1].lower()
-                                mime_type_map = {
-                                    'mp4': 'video/mp4',
-                                    'mov': 'video/quicktime',
-                                    'webm': 'video/webm',
-                                    'avi': 'video/x-msvideo',
-                                    'mkv': 'video/x-matroska',
-                                    'flv': 'video/x-flv',
-                                    'wmv': 'video/x-ms-wmv'
-                                }
-                                mime_type = mime_type_map.get(ext, 'video/mp4')
-                            
-                            video_size_mb = len(video_data) / (1024 * 1024)
-                            print(f"🎬 [{username}] Found video attachment: {attachment.filename} ({len(video_data)} bytes, {video_size_mb:.2f}MB)")
-                            
-                            # Check size limit (Gemini may have limits, but we'll try up to 25MB)
-                            if video_size_mb > 25.0:
-                                print(f"⚠️  [{username}] Video too large ({video_size_mb:.2f}MB), skipping (Discord limit is 25MB)")
-                            else:
-                                video_parts.append({
+                    has_videos = True
+        
+        # Check replied message for media
+        if message.reference:
+            try:
+                replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                if replied_msg.attachments:
+                    for attachment in replied_msg.attachments:
+                        filename_lower = attachment.filename.lower() if attachment.filename else ''
+                        if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
+                            has_replied_media = True
+                            break
+            except Exception:
+                pass  # If we can't fetch replied message, skip it
+        
+        # AI decides if media is needed (only if media is present)
+        needs_media_extraction = False
+        if has_images or has_videos or has_replied_media:
+            async def ai_decide_media_needed():
+                """AI decides if images/videos are needed for this request"""
+                media_types = []
+                if has_images:
+                    media_types.append("image(s)")
+                if has_videos:
+                    media_types.append("video(s)")
+                if has_replied_media:
+                    media_types.append("image(s) or video(s) from the replied message")
+                
+                media_desc = " and ".join(media_types)
+                decision_prompt = f"""User message: "{message.content}"
+
+Media detected: The message contains {media_desc} (attached or in replied message).
+
+Does this request require analyzing or using the media?
+- YES: User wants to analyze/edit/describe the media (e.g., "analyze this video", "what's in this image", "describe this video", "edit this image", "what is this")
+- NO: User's request is unrelated to the media (e.g., "get me 2 images of cats", "yo bro", "generate an image", "search for X")
+
+Respond with ONLY: "YES" or "NO"
+
+Examples:
+"analyze this video" -> YES
+"what's in this image?" -> YES
+"describe this video and tell me what it's about" -> YES
+"edit this image to be a cat" -> YES
+"get me 2 images of cats" -> NO (user wants new images, not analyzing attached media)
+"yo bro" -> NO (unrelated request)
+"generate an image of a sunset" -> NO (user wants generation, not analysis)
+"search for python tips" -> NO (unrelated request)
+
+Now decide: "{message.content}" -> """
+                
+                try:
+                    decision_model = get_fast_model()
+                    decision_response = await queued_generate_content(decision_model, decision_prompt)
+                    decision = decision_response.text.strip().upper()
+                    return 'YES' in decision
+                except Exception as e:
+                    handle_rate_limit_error(e)
+                    # If AI decision fails, default to extracting (safe fallback)
+                    print(f"⚠️  [{username}] AI media decision failed, defaulting to extract: {e}")
+                    return True
+            
+            needs_media_extraction = await ai_decide_media_needed()
+            print(f"🤖 [{username}] AI decided: {'EXTRACT' if needs_media_extraction else 'SKIP'} media extraction (has_images={has_images}, has_videos={has_videos}, has_replied_media={has_replied_media})")
+        
+        # Only extract/upload media if AI says we need it (zero latency for unrelated requests!)
+        if needs_media_extraction:
+            # Get images and videos from current message
+            print(f"📸 [{username}] Extracting media (AI decision: needed)")
+            if message.attachments:
+                for attachment in message.attachments:
+                    filename_lower = attachment.filename.lower() if attachment.filename else ''
+                    
+                    # Check for images
+                    if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                        try:
+                            image_data = await download_image(attachment.url)
+                            if image_data:
+                                mime_type = attachment.content_type
+                                if not mime_type:
+                                    ext = attachment.filename.split('.')[-1].lower()
+                                    mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
+                                image_parts.append({
                                     'mime_type': mime_type,
-                                    'data': video_data,
-                                    'is_current': True,
-                                    'source': 'user_attachment',
-                                    'filename': attachment.filename
+                                    'data': image_data,
+                                    'is_current': True,  # Mark as current (from current message)
+                                    'source': 'user_attachment'
                                 })
-                                print(f"🎬 [{username}] Added video from attachment: {attachment.filename} ({len(video_data)} bytes)")
-                    except Exception as e:
-                        print(f"⚠️  [{username}] Error downloading video: {e}")
+                                print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
+                        except Exception as e:
+                            print(f"⚠️  [{username}] Error downloading image: {e}")
+                    
+                    # Check for videos
+                    elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
+                        try:
+                            video_data = await download_bytes(attachment.url)
+                            if video_data:
+                                mime_type = attachment.content_type
+                                if not mime_type:
+                                    ext = attachment.filename.split('.')[-1].lower()
+                                    mime_type_map = {
+                                        'mp4': 'video/mp4',
+                                        'mov': 'video/quicktime',
+                                        'webm': 'video/webm',
+                                        'avi': 'video/x-msvideo',
+                                        'mkv': 'video/x-matroska',
+                                        'flv': 'video/x-flv',
+                                        'wmv': 'video/x-ms-wmv'
+                                    }
+                                    mime_type = mime_type_map.get(ext, 'video/mp4')
+                                
+                                video_size_mb = len(video_data) / (1024 * 1024)
+                                print(f"🎬 [{username}] Found video attachment: {attachment.filename} ({len(video_data)} bytes, {video_size_mb:.2f}MB)")
+                                
+                                # Check size limit (Gemini may have limits, but we'll try up to 25MB)
+                                if video_size_mb > 25.0:
+                                    print(f"⚠️  [{username}] Video too large ({video_size_mb:.2f}MB), skipping (Discord limit is 25MB)")
+                                else:
+                                    video_parts.append({
+                                        'mime_type': mime_type,
+                                        'data': video_data,
+                                        'is_current': True,
+                                        'source': 'user_attachment',
+                                        'filename': attachment.filename
+                                    })
+                                    print(f"🎬 [{username}] Added video from attachment: {attachment.filename} ({len(video_data)} bytes)")
+                        except Exception as e:
+                            print(f"⚠️  [{username}] Error downloading video: {e}")
         
         # Extract Discord visual assets (stickers, GIFs, profile pictures, etc.) from current message
         # AI decides what to extract based on the message content (ONE call for both assets and metadata - efficient!)
@@ -10658,109 +10777,112 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
         if discord_metadata:
             consciousness_prompt += f"\n\nDISCORD CONTEXT - FULL SERVER ACCESS (you have access to ALL of this information and can use it when needed):\n{discord_metadata}\n\nYou can:\n- Reference any channels, roles, stickers, GIFs, profile pictures, etc. when relevant\n- Edit profile pictures of mentioned users (e.g., 'edit @william's profile picture to be a black guy')\n- Use any server information to answer questions or perform actions\n- Access all visual assets (stickers, GIFs, profile pictures) that are available\n- Make decisions about what to do with this information based on the user's request"
         
-        # If replying to a message, also get images and videos from that message
-        # CRITICAL: Check if image_parts only contains Discord assets (profile pics, stickers, etc.) - not real images to edit
-        # Discord assets have 'source' == 'discord_asset', so we should still extract replied message images
-        has_real_images = any(img.get('source') not in ['discord_asset'] for img in image_parts)
-        if message.reference and not has_real_images:  # Only if user didn't send their own real images (Discord assets don't count)
-            try:
-                replied_msg = await message.channel.fetch_message(message.reference.message_id)
-                if replied_msg.attachments:
-                    print(f"  📸 [{username}] Analyzing media from replied message")
-                    for attachment in replied_msg.attachments:
-                        filename_lower = attachment.filename.lower() if attachment.filename else ''
-                        
-                        # Check for images
-                        if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
-                            try:
-                                image_data = await download_image(attachment.url)
-                                if image_data:
-                                    mime_type = attachment.content_type
-                                    if not mime_type:
-                                        ext = attachment.filename.split('.')[-1].lower()
-                                        mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
-                                    image_parts.append({
-                                        'mime_type': mime_type,
-                                        'data': image_data,
-                                        'is_current': False,  # Mark as OLD image from previous message
-                                        'source': 'replied_attachment'
-                                    })
-                                    print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
-                                    
-                                    # If this is a screenshot from a previous message, also add it to screenshot_attachments
-                                    # so it gets attached to the response when user asks about it
-                                    if 'screenshot' in attachment.filename.lower():
-                                        try:
-                                            from io import BytesIO
-                                            screenshot_bytes = BytesIO(image_data)
-                                            screenshot_bytes.seek(0)
-                                            screenshot_attachments.append(screenshot_bytes)
-                                            print(f"📎 [{username}] Added screenshot from replied message to attachments: {attachment.filename}")
-                                        except Exception as screenshot_error:
-                                            print(f"⚠️  [{username}] Failed to add screenshot from replied message: {screenshot_error}")
-                            except Exception as e:
-                                print(f"⚠️  [{username}] Error downloading image from replied message: {e}")
-                        
-                        # Check for videos in replied message
-                        elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
-                            try:
-                                video_data = await download_bytes(attachment.url)
-                                if video_data:
-                                    mime_type = attachment.content_type
-                                    if not mime_type:
-                                        ext = attachment.filename.split('.')[-1].lower()
-                                        mime_type_map = {
-                                            'mp4': 'video/mp4',
-                                            'mov': 'video/quicktime',
-                                            'webm': 'video/webm',
-                                            'avi': 'video/x-msvideo',
-                                            'mkv': 'video/x-matroska',
-                                            'flv': 'video/x-flv',
-                                            'wmv': 'video/x-ms-wmv'
-                                        }
-                                        mime_type = mime_type_map.get(ext, 'video/mp4')
-                                    
-                                    video_size_mb = len(video_data) / (1024 * 1024)
-                                    if video_size_mb <= 25.0:
-                                        video_parts.append({
-                                            'mime_type': mime_type,
-                                            'data': video_data,
-                                            'is_current': False,
-                                            'source': 'replied_attachment',
-                                            'filename': attachment.filename
-                                        })
-                                        print(f"🎬 [{username}] Added video from replied message: {attachment.filename} ({len(video_data)} bytes)")
-                                    else:
-                                        print(f"⚠️  [{username}] Video from replied message too large ({video_size_mb:.2f}MB), skipping")
-                            except Exception as e:
-                                print(f"⚠️  [{username}] Error downloading video from replied message: {e}")
-                
-                # Also extract Discord visual assets from replied message (AI decides what's needed)
+        # If replying to a message, also get images and videos from that message (only if AI said we need media)
+        if needs_media_extraction:
+            # CRITICAL: Check if image_parts only contains Discord assets (profile pics, stickers, etc.) - not real images to edit
+            # Discord assets have 'source' == 'discord_asset', so we should still extract replied message images
+            has_real_images = any(img.get('source') not in ['discord_asset'] for img in image_parts)
+            if message.reference and not has_real_images:  # Only if user didn't send their own real images (Discord assets don't count)
                 try:
-                    # For replied messages, extract everything since user is likely asking about it
-                    replied_assets_needed = {
-                        'profile_picture': True,
-                        'sticker': True,
-                        'gif': True,
-                        'server_icon': False,  # Usually not needed from replied message
-                        'role_icon': False
-                    }
-                    replied_discord_assets = await extract_discord_visual_assets(replied_msg, replied_assets_needed)
-                    for asset in replied_discord_assets:
-                        image_parts.append({
-                            'mime_type': asset['mime_type'],
-                            'data': asset['data'],
-                            'is_current': False,
-                            'source': 'discord_asset',
-                            'discord_type': asset.get('type'),
-                            'discord_name': asset.get('name'),
-                            'discord_description': asset.get('description')
-                        })
-                        print(f"📸 [{username}] Added Discord visual asset from replied message: {asset.get('type', 'unknown')} ({len(asset['data'])} bytes)")
+                    replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                    if replied_msg.attachments:
+                        print(f"  📸 [{username}] Analyzing media from replied message")
+                        for attachment in replied_msg.attachments:
+                            filename_lower = attachment.filename.lower() if attachment.filename else ''
+                            
+                            # Check for images
+                            if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                                try:
+                                    image_data = await download_image(attachment.url)
+                                    if image_data:
+                                        mime_type = attachment.content_type
+                                        if not mime_type:
+                                            ext = attachment.filename.split('.')[-1].lower()
+                                            mime_type = f"image/{ext}" if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/png'
+                                        image_parts.append({
+                                            'mime_type': mime_type,
+                                            'data': image_data,
+                                            'is_current': False,  # Mark as OLD image from previous message
+                                            'source': 'replied_attachment'
+                                        })
+                                        print(f"📸 [{username}] Added image from replied message: {attachment.filename} ({len(image_data)} bytes)")
+                                        
+                                        # If this is a screenshot from a previous message, also add it to screenshot_attachments
+                                        # so it gets attached to the response when user asks about it
+                                        if 'screenshot' in attachment.filename.lower():
+                                            try:
+                                                from io import BytesIO
+                                                screenshot_bytes = BytesIO(image_data)
+                                                screenshot_bytes.seek(0)
+                                                screenshot_attachments.append(screenshot_bytes)
+                                                print(f"📎 [{username}] Added screenshot from replied message to attachments: {attachment.filename}")
+                                            except Exception as screenshot_error:
+                                                print(f"⚠️  [{username}] Failed to add screenshot from replied message: {screenshot_error}")
+                                except Exception as e:
+                                    print(f"⚠️  [{username}] Error downloading image from replied message: {e}")
+                            
+                            # Check for videos in replied message
+                            elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
+                                try:
+                                    video_data = await download_bytes(attachment.url)
+                                    if video_data:
+                                        mime_type = attachment.content_type
+                                        if not mime_type:
+                                            ext = attachment.filename.split('.')[-1].lower()
+                                            mime_type_map = {
+                                                'mp4': 'video/mp4',
+                                                'mov': 'video/quicktime',
+                                                'webm': 'video/webm',
+                                                'avi': 'video/x-msvideo',
+                                                'mkv': 'video/x-matroska',
+                                                'flv': 'video/x-flv',
+                                                'wmv': 'video/x-ms-wmv'
+                                            }
+                                            mime_type = mime_type_map.get(ext, 'video/mp4')
+                                        
+                                        video_size_mb = len(video_data) / (1024 * 1024)
+                                        if video_size_mb <= 25.0:
+                                            video_parts.append({
+                                                'mime_type': mime_type,
+                                                'data': video_data,
+                                                'is_current': False,
+                                                'source': 'replied_attachment',
+                                                'filename': attachment.filename
+                                            })
+                                            print(f"🎬 [{username}] Added video from replied message: {attachment.filename} ({len(video_data)} bytes)")
+                                        else:
+                                            print(f"⚠️  [{username}] Video from replied message too large ({video_size_mb:.2f}MB), skipping")
+                                except Exception as e:
+                                    print(f"⚠️  [{username}] Error downloading video from replied message: {e}")
+                    
+                    # Also extract Discord visual assets from replied message (AI decides what's needed)
+                    try:
+                        # For replied messages, extract everything since user is likely asking about it
+                        replied_assets_needed = {
+                            'profile_picture': True,
+                            'sticker': True,
+                            'gif': True,
+                            'server_icon': False,  # Usually not needed from replied message
+                            'role_icon': False
+                        }
+                        replied_discord_assets = await extract_discord_visual_assets(replied_msg, replied_assets_needed)
+                        for asset in replied_discord_assets:
+                            image_parts.append({
+                                'mime_type': asset['mime_type'],
+                                'data': asset['data'],
+                                'is_current': False,
+                                'source': 'discord_asset',
+                                'discord_type': asset.get('type'),
+                                'discord_name': asset.get('name'),
+                                'discord_description': asset.get('description')
+                            })
+                            print(f"📸 [{username}] Added Discord visual asset from replied message: {asset.get('type', 'unknown')} ({len(asset['data'])} bytes)")
+                    except Exception as e:
+                        print(f"⚠️  [{username}] Error extracting Discord visual assets from replied message: {e}")
                 except Exception as e:
-                    print(f"⚠️  [{username}] Error extracting Discord visual assets from replied message: {e}")
-            except Exception as e:
-                print(f"Error fetching replied message images: {e}")
+                    print(f"Error fetching replied message images: {e}")
+        else:
+            print(f"📸 [{username}] Skipping media extraction (AI decision: not needed)")
         
         print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
         
