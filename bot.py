@@ -1216,8 +1216,8 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         print(f"⚠️  [VIDEO GEN] Veo not available, skipping video generation")
         return None
     
-    # Veo 3 requires 4-8 seconds duration
-    duration_seconds = min(8, max(4, duration_seconds))
+    # Veo 3 requires 4-8 seconds duration (must be integer)
+    duration_seconds = int(min(8, max(4, duration_seconds)))
     
     try:
         print(f"🎬 [VIDEO GEN] Queuing video generation request through Flash queue...")
@@ -1245,8 +1245,10 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
 def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[BytesIO]:
     """Synchronous video generation using Veo 3"""
     try:
+        # Ensure duration is an integer between 4 and 8 (Veo 3 requirement)
+        duration_seconds = int(min(8, max(4, duration_seconds)))
         print(f"🎬 [VIDEO GEN] Starting video generation for prompt: '{prompt[:100]}...'")
-        print(f"   - Duration: {duration_seconds} seconds")
+        print(f"   - Duration: {duration_seconds} seconds (type: {type(duration_seconds).__name__}, value: {duration_seconds})")
         
         from google import genai as genai_video
         from google.genai import types
@@ -1267,7 +1269,12 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
         resolution = "720p" if duration_seconds < 8 else "1080p"
         print(f"   - Resolution: {resolution} (duration: {duration_seconds}s)")
         
+        # Double-check duration is valid integer between 4-8
+        if not isinstance(duration_seconds, int) or duration_seconds < 4 or duration_seconds > 8:
+            raise ValueError(f"Invalid duration: {duration_seconds} (must be integer between 4-8)")
+        
         # Generate video using Veo 3.1
+        print(f"   - API call: duration_seconds={duration_seconds} (type: {type(duration_seconds).__name__})")
         operation = client.models.generate_videos(
             model="veo-3.1-generate-preview",
             prompt=prompt,
@@ -1275,7 +1282,7 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 5) -> Optional[Byt
                 negative_prompt="",
                 aspect_ratio="16:9",
                 resolution=resolution,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds  # Already validated as int 4-8
             ),
         )
         
@@ -10005,8 +10012,8 @@ Respond with ONLY a number between 4-8: """
                         except Exception:
                             ai_video_duration = 5  # Default to 5 seconds
                     else:
-                        # Clamp to Veo 3's 4-8 second requirement
-                        ai_video_duration = min(8, max(4, int(ai_video_duration)))
+                        # Clamp to Veo 3's 4-8 second requirement (must be integer)
+                        ai_video_duration = int(min(8, max(4, int(ai_video_duration))))
                     
                     if len(video_prompt) > 10:
                         print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
