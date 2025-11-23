@@ -15,4 +15,5 @@ fpdf2==2.7.9
 playwright==1.40.0
 beautifulsoup4==4.12.2
 markdown==3.5.2
+google-genai>=0.2.0
 

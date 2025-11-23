@@ -2979,11 +2979,17 @@ Definitions:
 - "small_talk": true only when the user is just greeting/checking-in without asking for tasks.
 - "profile_picture_focus": true only when they explicitly want any profile/avatar/server picture described, sent, or edited.
 - "needs_screenshots": true when they explicitly request website screenshots or visual proof.
-- "needs_video": true when they explicitly ask for a browser video recording (e.g., "record this website", "show me you going to X", "take a video of this page", "record the browser", "record yourself doing X").
-- "needs_ai_video": true when they ask for AI-generated video creation (e.g., "generate a video", "create a video", "make me a video of X", "video of a sunset", "video of an egyptian man" - when X is a concept/scene, NOT a website URL).
+- "needs_video": true when they explicitly ask for a browser video recording (e.g., "record this website", "show me you going to X", "take a video of this page", "record the browser", "record yourself doing X", "go to youtube and record", "record me playing this game").
+- "needs_ai_video": true when they ask for AI-generated video creation from text prompts. Examples:
+  * "make me a video of X" (where X is a concept/scene like "sunset", "egyptian man", "cat playing")
+  * "generate a video of X"
+  * "create a video of X"
+  * "video of X" (when X is a concept, not a website)
+  * "4 second video of an egyptian man flying into norway" → needs_ai_video=true, ai_video_duration_seconds=4
+  * "make me a 3 second video of a sunset" → needs_ai_video=true, ai_video_duration_seconds=3
 - CRITICAL DISTINCTION: 
-  * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium"
-  * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, or idea (no website/URL mentioned)
+  * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium", "record this page", "record the website"
+  * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, person, object, or idea. NO website/URL mentioned. Phrases like "make me a video of", "generate a video of", "create a video of", "video of [concept]" where [concept] is NOT a URL
 - "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
 - Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, max is 5 seconds - if user asks for longer, set ai_video_duration_seconds to 5 and note it in "notes". Use null when unspecified.
 - "preferred_screenshot_count": extract explicit numbers (e.g., "take 3 screenshots"). Use null when unspecified.
@@ -12457,6 +12463,7 @@ Now decide: "{message.content}" -> """
         if 'message_meta' in locals():
             media_preferences = message_meta.get("media", {})
             needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
+            print(f"🎬 [{username}] Video generation check: needs_ai_video={needs_ai_video}, VEO_AVAILABLE={VEO_AVAILABLE}")
             
             if needs_ai_video and VEO_AVAILABLE:
                 try:
@@ -12470,9 +12477,19 @@ Now decide: "{message.content}" -> """
                         remaining = 5 - video_count
                         print(f"🎬 [{username}] Video generation requested ({video_count}/5 used, {remaining} remaining)")
                         
+                        # Extract video prompt from message - remove common request phrases but keep the actual content
                         video_prompt = message.content
-                        for trigger in ['generate', 'create', 'make me', 'video', 'clip', 'of']:
-                            video_prompt = video_prompt.replace(trigger, '').strip()
+                        # Remove bot mentions and common request phrases, but preserve the actual description
+                        import re
+                        video_prompt = re.sub(r'<@\d+>', '', video_prompt)  # Remove mentions
+                        video_prompt = re.sub(r'\b(make me|generate|create|a|an|the)\s+(a|an|the)?\s*(video|clip|of)\s+', '', video_prompt, flags=re.IGNORECASE)
+                        video_prompt = re.sub(r'\b\d+\s*(second|sec|s)\s*(video|clip)?\s*(of)?\s*', '', video_prompt, flags=re.IGNORECASE)
+                        video_prompt = video_prompt.strip()
+                        # If prompt is too short after cleaning, use original message content
+                        if len(video_prompt) < 10:
+                            video_prompt = message.content
+                            # Just remove mentions
+                            video_prompt = re.sub(r'<@\d+>', '', video_prompt).strip()
                         
                         ai_video_duration = media_preferences.get("ai_video_duration_seconds")
                         if ai_video_duration is None:
@@ -12524,6 +12541,9 @@ Respond with ONLY a number between 1-5: """
                         ai_response += "\n\n(I can't generate that video as it violates content safety policies. Please try a different video request.)"
                     else:
                         ai_response += "\n\n(Video generation failed - please try again)"
+            elif needs_ai_video and not VEO_AVAILABLE:
+                ai_response += "\n\n⚠️ **Video Generation Unavailable**\nVideo generation is currently disabled. The Veo 3 package (google-genai) needs to be installed."
+                print(f"🎬 [{username}] Video generation requested but Veo 3 not available")
         
         # Store interaction in memory
         channel_id = str(message.channel.id) if message.channel else None
