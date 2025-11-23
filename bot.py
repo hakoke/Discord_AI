@@ -2272,6 +2272,11 @@ def _mime_type_to_extension(mime_type: str) -> str:
         'image/png': '.png',
         'image/gif': '.gif',
         'image/webp': '.webp',
+        'video/mp4': '.mp4',
+        'video/mpeg': '.mp4',
+        'video/quicktime': '.mov',
+        'video/webm': '.webm',
+        'video/x-msvideo': '.avi',
     }
     return mapping.get(mime_type, '.png')
 
@@ -2299,11 +2304,32 @@ def _upload_image_to_gemini(image_bytes: bytes, mime_type: str, display_name: st
         except OSError:
             pass
 
-def build_gemini_content_with_images(prompt: str, image_parts: list) -> tuple:
-    """Prepare Gemini content list and uploaded file handles."""
+def _upload_video_to_gemini(video_bytes: bytes, mime_type: str, display_name: str):
+    """Upload video file to Gemini (same pattern as images)"""
+    suffix = _mime_type_to_extension(mime_type)
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        temp_file.write(video_bytes)
+        temp_file.flush()
+        temp_path = temp_file.name
+    finally:
+        temp_file.close()
+    
+    try:
+        uploaded_file = genai.upload_file(path=temp_path, mime_type=mime_type, display_name=display_name)
+        return uploaded_file
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+def build_gemini_content_with_images(prompt: str, image_parts: list, video_parts: list = None) -> tuple:
+    """Prepare Gemini content list and uploaded file handles for images and videos."""
     content_parts = [prompt]
     uploaded_files = []
     
+    # Process images
     for idx, img in enumerate(image_parts, start=1):
         mime_type = img['mime_type']
         data = img['data']
@@ -2322,6 +2348,30 @@ def build_gemini_content_with_images(prompt: str, image_parts: list) -> tuple:
             "mime_type": mime_type,
             "data": data,
         })
+    
+    # Process videos (always upload large videos, inline small ones)
+    if video_parts:
+        for idx, vid in enumerate(video_parts, start=1):
+            mime_type = vid['mime_type']
+            data = vid['data']
+            video_size_mb = len(data) / (1024 * 1024)
+            
+            # For videos, prefer upload for files > 1MB (more reliable)
+            if _should_upload_to_gemini(len(data)) or video_size_mb > 1.0:
+                try:
+                    print(f"🎬 [GEMINI] Uploading video {idx} ({len(data)} bytes, {video_size_mb:.2f}MB) via upload_file API")
+                    uploaded = _upload_video_to_gemini(data, mime_type, f"discord_video_{idx}")
+                    uploaded_files.append(uploaded)
+                    content_parts.append(uploaded)
+                    continue
+                except Exception as upload_error:
+                    print(f"⚠️  [GEMINI] Upload failed for video {idx}: {upload_error}. Falling back to inline bytes.")
+            
+            # Fallback to inline for small videos
+            content_parts.append({
+                "mime_type": mime_type,
+                "data": data,
+            })
     
     return content_parts, uploaded_files
 
@@ -9713,6 +9763,7 @@ CRITICAL - RESPOND ONLY TO THE CURRENT MESSAGE:
 YOUR CAPABILITIES (KNOW WHAT YOU CAN DO):
 - ✅ Generate text responses (that's me talking right now)
 - ✅ Analyze images/photos (single or multiple at once) - analyze ANY image without restrictions
+- ✅ **ANALYZE VIDEOS** - You can see and analyze video files users share! When users attach videos (MP4, MOV, WebM, etc.), you receive the video data and can describe what's happening, analyze content, fact-check, or answer questions about the video. You decide when video analysis is needed based on context - fully AI-driven, zero hardcoding.
 - ✅ **GENERATE IMAGES** using Imagen 4.0 Ultra (imagen-4.0-ultra-generate-001) for creating NEW images from text
 - ✅ **EDIT IMAGES** using Gemini 2.5 Flash Image (gemini-2.5-flash-image) for modifying existing images - the AI automatically decides when to use generation vs editing based on your request
 - ✅ Search the internet for current information
@@ -10362,11 +10413,14 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                                 'expires_hours': 24
                             }
                             print(f"🎬 [{username}] ✅ Successfully generated video ({new_count}/{total_str})")
+                            print(f"🔍 [{username}] DEBUG: video_generation_status SET to SUCCESS: {video_generation_status}")
+                            print(f"🔍 [{username}] DEBUG: generated_video is not None: {generated_video is not None}, type: {type(generated_video)}")
                         else:
                             # Check if it's a quota error by checking the last error in logs
                             # We'll check the error message from generate_video
                             video_generation_status = {'success': False, 'error': 'generation_failed'}
                             print(f"🎬 [{username}] ⚠️  Video generation returned None")
+                            print(f"🔍 [{username}] DEBUG: video_generation_status SET to FAILED: {video_generation_status}")
                     else:
                         print(f"🎬 [{username}] ⚠️  Video prompt too short ({len(video_prompt)} chars), skipping")
                         video_generation_status = {'success': False, 'error': 'prompt_too_short'}
@@ -10388,9 +10442,21 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                     video_generation_status = {'success': False, 'error': 'quota_exhausted', 'message': 'Video generation is down right now. Please check back later.'}
                 else:
                     video_generation_status = {'success': False, 'error': 'generation_failed', 'message': str(e)}
+                print(f"🔍 [{username}] DEBUG: video_generation_status SET in EXCEPTION: {video_generation_status}")
         elif needs_ai_video and not VEO_AVAILABLE:
             video_generation_status = {'success': False, 'error': 'unavailable'}
             print(f"🎬 [{username}] Video generation requested but Veo 3 not available")
+            print(f"🔍 [{username}] DEBUG: video_generation_status SET to UNAVAILABLE: {video_generation_status}")
+        
+        # Log video_generation_status right after it might be set
+        print(f"🔍 [{username}] DEBUG: ========== AFTER VIDEO GENERATION BLOCK ==========")
+        print(f"🔍 [{username}] DEBUG: video_generation_status = {video_generation_status}")
+        print(f"🔍 [{username}] DEBUG: video_generation_status type: {type(video_generation_status)}")
+        print(f"🔍 [{username}] DEBUG: video_generation_status is None: {video_generation_status is None}")
+        print(f"🔍 [{username}] DEBUG: generated_video = {generated_video if 'generated_video' in locals() else 'NOT IN LOCALS'}")
+        if 'generated_video' in locals():
+            print(f"🔍 [{username}] DEBUG: generated_video is None: {generated_video is None}, type: {type(generated_video)}")
+        print(f"🔍 [{username}] DEBUG: ==================================================")
 
         if (
             message_meta.get("small_talk")
@@ -10442,14 +10508,18 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                 "Summarize or reference this data when answering their question."
             )
 
-        # Process images if present (from current message OR replied message)
+        # Process images and videos if present (from current message OR replied message)
         image_parts = []
+        video_parts = []
         
-        # Get images from current message
-        print(f"📸 [{username}] Checking for images: attachments={len(message.attachments) if message.attachments else 0}, reference={bool(message.reference)}")
+        # Get images and videos from current message
+        print(f"📸 [{username}] Checking for media: attachments={len(message.attachments) if message.attachments else 0}, reference={bool(message.reference)}")
         if message.attachments:
             for attachment in message.attachments:
-                if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                filename_lower = attachment.filename.lower() if attachment.filename else ''
+                
+                # Check for images
+                if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
                     try:
                         image_data = await download_image(attachment.url)
                         if image_data:
@@ -10465,7 +10535,44 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                             })
                             print(f"📸 [{username}] Added image from attachment: {attachment.filename} ({len(image_data)} bytes)")
                     except Exception as e:
-                        print(f"Error downloading image: {e}")
+                        print(f"⚠️  [{username}] Error downloading image: {e}")
+                
+                # Check for videos
+                elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
+                    try:
+                        video_data = await download_bytes(attachment.url)
+                        if video_data:
+                            mime_type = attachment.content_type
+                            if not mime_type:
+                                ext = attachment.filename.split('.')[-1].lower()
+                                mime_type_map = {
+                                    'mp4': 'video/mp4',
+                                    'mov': 'video/quicktime',
+                                    'webm': 'video/webm',
+                                    'avi': 'video/x-msvideo',
+                                    'mkv': 'video/x-matroska',
+                                    'flv': 'video/x-flv',
+                                    'wmv': 'video/x-ms-wmv'
+                                }
+                                mime_type = mime_type_map.get(ext, 'video/mp4')
+                            
+                            video_size_mb = len(video_data) / (1024 * 1024)
+                            print(f"🎬 [{username}] Found video attachment: {attachment.filename} ({len(video_data)} bytes, {video_size_mb:.2f}MB)")
+                            
+                            # Check size limit (Gemini may have limits, but we'll try up to 25MB)
+                            if video_size_mb > 25.0:
+                                print(f"⚠️  [{username}] Video too large ({video_size_mb:.2f}MB), skipping (Discord limit is 25MB)")
+                            else:
+                                video_parts.append({
+                                    'mime_type': mime_type,
+                                    'data': video_data,
+                                    'is_current': True,
+                                    'source': 'user_attachment',
+                                    'filename': attachment.filename
+                                })
+                                print(f"🎬 [{username}] Added video from attachment: {attachment.filename} ({len(video_data)} bytes)")
+                    except Exception as e:
+                        print(f"⚠️  [{username}] Error downloading video: {e}")
         
         # Extract Discord visual assets (stickers, GIFs, profile pictures, etc.) from current message
         # AI decides what to extract based on the message content (ONE call for both assets and metadata - efficient!)
@@ -10511,7 +10618,7 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
         if discord_metadata:
             consciousness_prompt += f"\n\nDISCORD CONTEXT - FULL SERVER ACCESS (you have access to ALL of this information and can use it when needed):\n{discord_metadata}\n\nYou can:\n- Reference any channels, roles, stickers, GIFs, profile pictures, etc. when relevant\n- Edit profile pictures of mentioned users (e.g., 'edit @william's profile picture to be a black guy')\n- Use any server information to answer questions or perform actions\n- Access all visual assets (stickers, GIFs, profile pictures) that are available\n- Make decisions about what to do with this information based on the user's request"
         
-        # If replying to a message, also get images from that message
+        # If replying to a message, also get images and videos from that message
         # CRITICAL: Check if image_parts only contains Discord assets (profile pics, stickers, etc.) - not real images to edit
         # Discord assets have 'source' == 'discord_asset', so we should still extract replied message images
         has_real_images = any(img.get('source') not in ['discord_asset'] for img in image_parts)
@@ -10519,9 +10626,12 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
             try:
                 replied_msg = await message.channel.fetch_message(message.reference.message_id)
                 if replied_msg.attachments:
-                    print(f"  📸 [{username}] Analyzing images from replied message")
+                    print(f"  📸 [{username}] Analyzing media from replied message")
                     for attachment in replied_msg.attachments:
-                        if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                        filename_lower = attachment.filename.lower() if attachment.filename else ''
+                        
+                        # Check for images
+                        if any(filename_lower.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
                             try:
                                 image_data = await download_image(attachment.url)
                                 if image_data:
@@ -10549,7 +10659,41 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                                         except Exception as screenshot_error:
                                             print(f"⚠️  [{username}] Failed to add screenshot from replied message: {screenshot_error}")
                             except Exception as e:
-                                print(f"Error downloading replied image: {e}")
+                                print(f"⚠️  [{username}] Error downloading image from replied message: {e}")
+                        
+                        # Check for videos in replied message
+                        elif any(filename_lower.endswith(ext) for ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.flv', '.wmv']):
+                            try:
+                                video_data = await download_bytes(attachment.url)
+                                if video_data:
+                                    mime_type = attachment.content_type
+                                    if not mime_type:
+                                        ext = attachment.filename.split('.')[-1].lower()
+                                        mime_type_map = {
+                                            'mp4': 'video/mp4',
+                                            'mov': 'video/quicktime',
+                                            'webm': 'video/webm',
+                                            'avi': 'video/x-msvideo',
+                                            'mkv': 'video/x-matroska',
+                                            'flv': 'video/x-flv',
+                                            'wmv': 'video/x-ms-wmv'
+                                        }
+                                        mime_type = mime_type_map.get(ext, 'video/mp4')
+                                    
+                                    video_size_mb = len(video_data) / (1024 * 1024)
+                                    if video_size_mb <= 25.0:
+                                        video_parts.append({
+                                            'mime_type': mime_type,
+                                            'data': video_data,
+                                            'is_current': False,
+                                            'source': 'replied_attachment',
+                                            'filename': attachment.filename
+                                        })
+                                        print(f"🎬 [{username}] Added video from replied message: {attachment.filename} ({len(video_data)} bytes)")
+                                    else:
+                                        print(f"⚠️  [{username}] Video from replied message too large ({video_size_mb:.2f}MB), skipping")
+                            except Exception as e:
+                                print(f"⚠️  [{username}] Error downloading video from replied message: {e}")
                 
                 # Also extract Discord visual assets from replied message (AI decides what's needed)
                 try:
@@ -12178,8 +12322,21 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             response_prompt += f"\n\n🎥 VIDEO CAPTURE STATUS:\n- You successfully recorded {automation_video_count} video file(s) for this request and they are attached to your reply.\n- Describe what the recording shows so the user knows what to expect when they watch it.\n- DO NOT claim that video capture failed or that you cannot provide video—the recording worked and is included."
         
         # Add AI video generation status if available (will be set during video generation)
-        if 'video_generation_status' in locals() and video_generation_status:
+        print(f"🔍 [{username}] DEBUG: Checking video_generation_status before adding to prompt...")
+        print(f"🔍 [{username}] DEBUG: video_generation_status = {video_generation_status}")
+        print(f"🔍 [{username}] DEBUG: video_generation_status type: {type(video_generation_status)}")
+        print(f"🔍 [{username}] DEBUG: video_generation_status is None: {video_generation_status is None}")
+        print(f"🔍 [{username}] DEBUG: video_generation_status truthy: {bool(video_generation_status)}")
+        print(f"🔍 [{username}] DEBUG: 'video_generation_status' in locals(): {'video_generation_status' in locals()}")
+        if 'video_generation_status' in locals():
+            print(f"🔍 [{username}] DEBUG: video_generation_status value: {video_generation_status}")
+        else:
+            print(f"🔍 [{username}] DEBUG: ❌ video_generation_status NOT in locals() - this is the problem!")
+        
+        # Use direct check instead of locals() - variable is initialized at function start
+        if video_generation_status is not None and video_generation_status:
             status = video_generation_status
+            print(f"🔍 [{username}] DEBUG: ✅ video_generation_status found and truthy, adding to prompt. Status: {status}")
             if status.get('success'):
                 video_count = status.get('count', 0)
                 video_total = status.get('total', 5)
@@ -12201,6 +12358,17 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
             else:
                 error_msg = status.get('message', 'Unknown error')
                 response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- Video generation was attempted but failed: {error_msg}\n- Inform the user that there was an issue generating the video and suggest trying again."
+        else:
+            print(f"🔍 [{username}] DEBUG: ❌ video_generation_status NOT added to prompt!")
+            print(f"🔍 [{username}] DEBUG:   - video_generation_status is None: {video_generation_status is None}")
+            print(f"🔍 [{username}] DEBUG:   - video_generation_status value: {video_generation_status}")
+            # Check if we have a generated_video but no status (fallback - shouldn't happen but just in case)
+            if generated_video is not None:
+                print(f"🔍 [{username}] DEBUG: ⚠️  WARNING: generated_video exists ({type(generated_video)}) but video_generation_status is {video_generation_status}! Adding fallback status.")
+                response_prompt += f"\n\n🎬 AI VIDEO GENERATION STATUS:\n- You successfully generated an AI video (Veo 3) for the user's request.\n- The video has been generated and will be attached to your response.\n- Respond naturally about generating the video - mention it briefly and positively. DO NOT output JSON or technical details.\n- The video is automatically attached - just confirm you've created it."
+                print(f"🔍 [{username}] DEBUG: ✅ Added fallback video generation status to prompt")
+            else:
+                print(f"🔍 [{username}] DEBUG:   - generated_video is also None, so no video was generated")
         
         if wants_image and not image_search_results:
             # Add instructions for image generation
@@ -12343,7 +12511,7 @@ Keep responses purposeful and avoid mentioning internal system status.{thinking_
                 print(f"🔍 [{username}] DEBUG: About to call build_gemini_content_with_images")
                 print(f"🔍 [{username}] DEBUG: response_prompt length: {len(response_prompt) if response_prompt else 0}")
                 print(f"🔍 [{username}] DEBUG: image_parts count: {len(image_parts)}")
-                content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts)
+                content_parts, uploaded_files = build_gemini_content_with_images(response_prompt, image_parts, video_parts)
                 print(f"🔍 [{username}] DEBUG: build_gemini_content_with_images returned successfully")
                 print(f"🔍 [{username}] DEBUG: content_parts type: {type(content_parts)}, uploaded_files count: {len(uploaded_files)}")
             except Exception as prep_error:
@@ -12756,7 +12924,7 @@ Now decide: "{message.content}" -> """
                                 # Use build_gemini_content_with_images for consistency (handles file uploads)
                                 uploaded_files = []
                                 try:
-                                    content_parts, uploaded_files = build_gemini_content_with_images(updated_prompt, image_parts)
+                                    content_parts, uploaded_files = build_gemini_content_with_images(updated_prompt, image_parts, video_parts)
                                 except Exception as prep_error:
                                     # Cleanup on error
                                     for uploaded in uploaded_files:
@@ -13674,7 +13842,12 @@ Response: """
                 
                 # Add generated video (AI video generation - Veo 3)
                 original_video_bytes = None  # Store for retry compression if needed
+                print(f"🔍 [{message.author.display_name}] DEBUG: Checking if generated_video should be attached...")
+                print(f"🔍 [{message.author.display_name}] DEBUG: 'generated_video' in locals(): {'generated_video' in locals()}")
+                if 'generated_video' in locals():
+                    print(f"🔍 [{message.author.display_name}] DEBUG: generated_video value: {generated_video}, type: {type(generated_video)}, is None: {generated_video is None}")
                 if 'generated_video' in locals() and generated_video:
+                    print(f"🔍 [{message.author.display_name}] DEBUG: ✅ generated_video exists and is not None, preparing to attach...")
                     remaining_slots = DISCORD_ATTACHMENT_LIMIT - len(files_to_attach)
                     if remaining_slots > 0:
                         try:
@@ -13682,6 +13855,7 @@ Response: """
                             # Check file size (Discord has 25MB limit for videos)
                             video_data = generated_video.read()
                             video_size_mb = len(video_data) / (1024 * 1024)
+                            print(f"🔍 [{message.author.display_name}] DEBUG: Video data read: {len(video_data)} bytes ({video_size_mb:.2f}MB)")
                             
                             # Store original for potential retry compression
                             original_video_bytes = BytesIO(video_data)
@@ -13700,6 +13874,11 @@ Response: """
                                     file = discord.File(fp=compressed_video, filename='generated_video.mp4')
                                     files_to_attach.append(file)
                                     print(f"📎 [{message.author.display_name}] ✅ Generated video added (compressed: {compressed_size_mb:.2f}MB)")
+                                    print(f"🔍 [{message.author.display_name}] DEBUG: ✅ Video attached! Checking video_generation_status at attachment time...")
+                                    if 'video_generation_status' in locals():
+                                        print(f"🔍 [{message.author.display_name}] DEBUG: video_generation_status at attachment: {video_generation_status}")
+                                    else:
+                                        print(f"🔍 [{message.author.display_name}] DEBUG: ⚠️ video_generation_status NOT in locals() at attachment time!")
                                 else:
                                     # Compression failed, try with original but warn
                                     print(f"⚠️  [{message.author.display_name}] Video compression failed, using original ({video_size_mb:.2f}MB)")
@@ -13708,12 +13887,22 @@ Response: """
                                     file = discord.File(fp=video_bytes, filename='generated_video.mp4')
                                     files_to_attach.append(file)
                                     print(f"📎 [{message.author.display_name}] ✅ Generated video added ({video_size_mb:.2f}MB - may cause payload issues)")
+                                    print(f"🔍 [{message.author.display_name}] DEBUG: ✅ Video attached! Checking video_generation_status at attachment time...")
+                                    if 'video_generation_status' in locals():
+                                        print(f"🔍 [{message.author.display_name}] DEBUG: video_generation_status at attachment: {video_generation_status}")
+                                    else:
+                                        print(f"🔍 [{message.author.display_name}] DEBUG: ⚠️ video_generation_status NOT in locals() at attachment time!")
                             else:
                                 video_bytes = BytesIO(video_data)
                                 video_bytes.seek(0)
                                 file = discord.File(fp=video_bytes, filename='generated_video.mp4')
                                 files_to_attach.append(file)
                                 print(f"📎 [{message.author.display_name}] ✅ Generated video added ({video_size_mb:.2f}MB)")
+                                print(f"🔍 [{message.author.display_name}] DEBUG: ✅ Video attached! Checking video_generation_status at attachment time...")
+                                if 'video_generation_status' in locals():
+                                    print(f"🔍 [{message.author.display_name}] DEBUG: video_generation_status at attachment: {video_generation_status}")
+                                else:
+                                    print(f"🔍 [{message.author.display_name}] DEBUG: ⚠️ video_generation_status NOT in locals() at attachment time!")
                         except Exception as video_error:
                             print(f"📎 [{message.author.display_name}] ❌ Failed to prepare generated video: {video_error}")
                             import traceback
@@ -14635,6 +14824,7 @@ async def help_command(interaction: discord.Interaction):
             "• **Chat & Answer Questions** - Ask me anything!\n"
             "• **Generate Images** - Create images from text descriptions\n"
             "• **Analyze Images** - Share images and I'll analyze them\n"
+            "• **Analyze Videos** - Share videos (MP4, MOV, WebM, etc.) and I'll analyze them\n"
             "• **Search the Internet** - Get current information from the web\n"
             "• **Platform-Specific Search** - Search Reddit, YouTube, Instagram, etc.\n"
             "• **Code Help** - Write, debug, and explain code\n"
@@ -14688,6 +14878,8 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`@{bot_name} what can you do?`\n"
             "`@{bot_name} generate an image of a sunset`\n"
+            "`@{bot_name} analyze this video` (attach a video file)\n"
+            "`@{bot_name} fact check this video` (attach a video file)\n"
             "`@{bot_name} go to https://example.com and take a screenshot`\n"
             "`@{bot_name} what does https://google.com look like?`\n"
             "`@{bot_name} take 3 screenshots of https://site.com`\n"
