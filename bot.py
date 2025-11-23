@@ -1346,8 +1346,49 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         
         print(f"✅ [VIDEO GEN] Video generation completed!")
         
-        # Get the generated video
-        generated_video = operation.result.generated_videos[0]
+        # Debug: Check operation structure
+        print(f"   - DEBUG: operation type: {type(operation)}")
+        print(f"   - DEBUG: operation.done: {operation.done}")
+        print(f"   - DEBUG: hasattr operation.result: {hasattr(operation, 'result')}")
+        if hasattr(operation, 'result'):
+            print(f"   - DEBUG: operation.result: {operation.result}")
+            print(f"   - DEBUG: operation.result type: {type(operation.result) if operation.result else 'None'}")
+        print(f"   - DEBUG: operation attributes: {[attr for attr in dir(operation) if not attr.startswith('_')]}")
+        
+        # Get the generated video - check different possible result structures
+        result = None
+        if hasattr(operation, 'result') and operation.result is not None:
+            result = operation.result
+            print(f"   - DEBUG: Using operation.result")
+        elif hasattr(operation, 'response') and operation.response is not None:
+            result = operation.response
+            print(f"   - DEBUG: Using operation.response")
+        elif hasattr(operation, 'generated_videos'):
+            # Video might be directly on operation
+            print(f"   - DEBUG: Found generated_videos directly on operation")
+            if operation.generated_videos and len(operation.generated_videos) > 0:
+                generated_video = operation.generated_videos[0]
+            else:
+                raise Exception("operation.generated_videos is empty")
+        else:
+            raise Exception("Cannot find result/response/generated_videos in operation")
+        
+        # If we have a result object, try to get generated_videos from it
+        if result is not None:
+            print(f"   - DEBUG: result type: {type(result)}")
+            print(f"   - DEBUG: result attributes: {[attr for attr in dir(result) if not attr.startswith('_')]}")
+            if hasattr(result, 'generated_videos'):
+                if not result.generated_videos:
+                    raise Exception("result.generated_videos is empty")
+                generated_video = result.generated_videos[0]
+                print(f"   - DEBUG: Found generated_video in result.generated_videos[0]")
+            elif hasattr(result, 'videos'):
+                if not result.videos:
+                    raise Exception("result.videos is empty")
+                generated_video = result.videos[0]
+                print(f"   - DEBUG: Found generated_video in result.videos[0]")
+            else:
+                raise Exception(f"result has no 'generated_videos' or 'videos' attribute. Available: {[attr for attr in dir(result) if not attr.startswith('_')]}")
         
         # Download video file
         print(f"📥 [VIDEO GEN] Downloading video...")
