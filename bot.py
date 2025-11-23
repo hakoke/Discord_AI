@@ -283,7 +283,8 @@ try:
 except:
     FAST_MODEL = 'gemini-2.0-flash'  # Same stable version
 
-SMART_MODEL = 'gemini-3-pro'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks, big code debugging (HAS VISION - multimodal)
+SMART_MODEL = 'gemini-3-pro-preview'  # SMARTEST MODEL - Deep reasoning, coding, complex tasks, big code debugging (HAS VISION - multimodal)
+SMART_MODEL_FALLBACK = 'gemini-2.5-pro'  # Fallback if preview not available
 VISION_MODEL = 'gemini-2.0-flash'  # For everyday/simple image analysis
 IMAGE_EDIT_MODEL = 'gemini-2.5-flash-image'  # Latest model for image editing
 
@@ -425,25 +426,59 @@ def get_fast_model():
     return model
 
 def get_smart_model():
-    """Get smart model instance (thread-safe)"""
-    model = genai.GenerativeModel(
-        SMART_MODEL,
-        system_instruction=BASE_SYSTEM_PROMPT,
-        generation_config={
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 64,
-            "max_output_tokens": 8192,
-        },
-        safety_settings={
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-    )
-    setattr(model, '_rate_limit_key', SMART_MODEL)
-    return model
+    """Get smart model instance (thread-safe with fallback)"""
+    current_model = SMART_MODEL
+    try:
+        # Try primary model first
+        model = genai.GenerativeModel(
+            SMART_MODEL,
+            system_instruction=BASE_SYSTEM_PROMPT,
+            generation_config={
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 64,
+                "max_output_tokens": 8192,
+            },
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+        setattr(model, '_rate_limit_key', SMART_MODEL)
+        return model
+    except Exception as e:
+        # Fallback to gemini-2.5-pro if primary fails
+        error_str = str(e).lower()
+        if '404' in error_str or 'not found' in error_str or 'not supported' in error_str:
+            print(f"⚠️  {SMART_MODEL} not available (404), falling back to {SMART_MODEL_FALLBACK}")
+            try:
+                model = genai.GenerativeModel(
+                    SMART_MODEL_FALLBACK,
+                    system_instruction=BASE_SYSTEM_PROMPT,
+                    generation_config={
+                        "temperature": 1.0,
+                        "top_p": 0.95,
+                        "top_k": 64,
+                        "max_output_tokens": 8192,
+                    },
+                    safety_settings={
+                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                    }
+                )
+                setattr(model, '_rate_limit_key', SMART_MODEL_FALLBACK)
+                print(f"✅ Using fallback smart model: {SMART_MODEL_FALLBACK}")
+                return model
+            except Exception as fallback_error:
+                print(f"❌ Fallback smart model {SMART_MODEL_FALLBACK} also failed: {fallback_error}")
+                raise
+        else:
+            # Re-raise if it's not a 404 (could be rate limit, auth, etc.)
+            raise
 
 def get_vision_model():
     """Get vision model instance (thread-safe with rate limit handling)"""
@@ -769,7 +804,12 @@ MODEL_RATE_LIMITS: Dict[str, Dict[str, Any]] = {
         'requests_per_minute': 300,
         'base_delay': 0.15,
     },
-    'gemini-3-pro': {
+    'gemini-3-pro-preview': {
+        'max_concurrent': 3,
+        'requests_per_minute': 120,
+        'base_delay': 0.35,
+    },
+    'gemini-2.5-pro': {
         'max_concurrent': 3,
         'requests_per_minute': 120,
         'base_delay': 0.35,
