@@ -1299,29 +1299,38 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         print(f"   - API call: duration_seconds={duration_seconds} (type: {type(duration_seconds).__name__})")
         print(f"   - DEBUG: Creating GenerateVideosConfig with duration_seconds={duration_seconds}")
         
-        # Try creating config first to see if there's an issue
+        # Try creating configs for each model
+        # veo-2.0-generate-001 doesn't support resolution parameter
         try:
-            config = types.GenerateVideosConfig(
+            # Config for veo-3.1 and veo-3.0 (with resolution)
+            config_with_resolution = types.GenerateVideosConfig(
                 negative_prompt="",
                 aspect_ratio="16:9",
                 resolution=resolution,
                 duration_seconds=duration_seconds
             )
-            print(f"   - DEBUG: Config created successfully: {config}")
-            print(f"   - DEBUG: Config type: {type(config)}")
+            # Config for veo-2.0 (without resolution)
+            config_without_resolution = types.GenerateVideosConfig(
+                negative_prompt="",
+                aspect_ratio="16:9",
+                duration_seconds=duration_seconds
+            )
+            print(f"   - DEBUG: Configs created successfully")
+            print(f"   - DEBUG: Config with resolution type: {type(config_with_resolution)}")
+            print(f"   - DEBUG: Config without resolution type: {type(config_without_resolution)}")
             # Try to inspect the config object
-            if hasattr(config, '__dict__'):
-                print(f"   - DEBUG: Config __dict__: {config.__dict__}")
+            if hasattr(config_with_resolution, '__dict__'):
+                print(f"   - DEBUG: Config with resolution __dict__: {config_with_resolution.__dict__}")
             # Check if duration_seconds attribute exists
-            if hasattr(config, 'duration_seconds'):
-                actual_duration = getattr(config, 'duration_seconds')
+            if hasattr(config_with_resolution, 'duration_seconds'):
+                actual_duration = getattr(config_with_resolution, 'duration_seconds')
                 print(f"   - DEBUG: config.duration_seconds = {actual_duration} (type: {type(actual_duration).__name__})")
             else:
                 print(f"   - DEBUG: ⚠️ config.duration_seconds attribute NOT FOUND")
-                print(f"   - DEBUG: Available attributes: {[attr for attr in dir(config) if not attr.startswith('_')]}")
+                print(f"   - DEBUG: Available attributes: {[attr for attr in dir(config_with_resolution) if not attr.startswith('_')]}")
                 # Try camelCase
-                if hasattr(config, 'durationSeconds'):
-                    actual_duration = getattr(config, 'durationSeconds')
+                if hasattr(config_with_resolution, 'durationSeconds'):
+                    actual_duration = getattr(config_with_resolution, 'durationSeconds')
                     print(f"   - DEBUG: config.durationSeconds = {actual_duration} (type: {type(actual_duration).__name__})")
         except Exception as config_error:
             print(f"   - DEBUG: ERROR creating config: {config_error}")
@@ -1331,9 +1340,9 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         
         # Try Veo models in order: preview → stable → v2.0, fallback if quota exceeded
         models_to_try = [
-            ("veo-3.1-generate-preview", config),  # First: preview version
-            ("veo-3.0-generate-001", config),       # Second: stable version
-            ("veo-2.0-generate-001", config)        # Third: v2.0 fallback
+            ("veo-3.1-generate-preview", config_with_resolution),  # First: preview version
+            ("veo-3.0-generate-001", config_with_resolution),       # Second: stable version
+            ("veo-2.0-generate-001", config_without_resolution)        # Third: v2.0 fallback (no resolution)
         ]
         
         operation = None
