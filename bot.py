@@ -1377,9 +1377,20 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         if result is not None:
             print(f"   - DEBUG: result type: {type(result)}")
             print(f"   - DEBUG: result attributes: {[attr for attr in dir(result) if not attr.startswith('_')]}")
+            
+            # Check for content safety filtering (RAI - Responsible AI)
+            if hasattr(result, 'rai_media_filtered_reasons') and result.rai_media_filtered_reasons:
+                filtered_reasons = result.rai_media_filtered_reasons
+                print(f"   - DEBUG: ⚠️ Content safety filter triggered: {filtered_reasons}")
+                raise Exception(f"Content safety filter: {filtered_reasons[0] if filtered_reasons else 'Video generation blocked by content policy'}")
+            
             if hasattr(result, 'generated_videos'):
-                if not result.generated_videos:
-                    raise Exception("result.generated_videos is empty")
+                if not result.generated_videos or result.generated_videos is None:
+                    # Check if it was filtered
+                    if hasattr(result, 'rai_media_filtered_count') and result.rai_media_filtered_count > 0:
+                        reasons = getattr(result, 'rai_media_filtered_reasons', ['Content policy violation'])
+                        raise Exception(f"Video blocked by content safety: {reasons[0] if reasons else 'Content policy violation'}")
+                    raise Exception("result.generated_videos is empty or None")
                 generated_video = result.generated_videos[0]
                 print(f"   - DEBUG: Found generated_video in result.generated_videos[0]")
             elif hasattr(result, 'videos'):
@@ -10140,9 +10151,10 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                 
                 # Store error status for AI to respond naturally
                 if any(keyword in error_str for keyword in [
-                    'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited'
+                    'safety', 'blocked', 'inappropriate', 'content policy', 'harmful', 'violates', 'prohibited',
+                    'rai_media_filtered', 'real people', 'celebrity reference', 'likenesses'
                 ]):
-                    video_generation_status = {'success': False, 'error': 'content_policy'}
+                    video_generation_status = {'success': False, 'error': 'content_policy', 'message': str(e)}
                 elif 'duration' in error_str or 'out of bound' in error_str:
                     video_generation_status = {'success': False, 'error': 'duration_invalid', 'message': str(e)}
                 else:
