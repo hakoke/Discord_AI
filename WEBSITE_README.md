@@ -59,13 +59,5 @@ Admin credentials must be set via environment variables:
 - `ADMIN_USERNAME`: Set your admin username
 - `ADMIN_PASSWORD`: Set your admin password
 
-⚠️ **Important**: Never commit credentials to the repository. Always use environment variables.
-
-## Integration with Existing Dashboard
-
-This website runs separately from `dashboard.py`. You can:
-- Run both on different ports
-- Or replace `dashboard.py` with this website
-- Or run one or the other as needed
 
 The website uses the same database and Discord API access as the bot.

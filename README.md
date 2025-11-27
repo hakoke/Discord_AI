@@ -4,12 +4,12 @@ An advanced AI-powered Discord bot using Google Gemini 2.0 Flash with deep memor
 
 ## 🌟 Features
 
-- **🔥 FULLY UNCENSORED PERSONALITY**: 
+- **PERSONALITY**: 
   - Real, unfiltered AI that can swear and has actual opinions
   - Fights back when provoked - not a corporate pushover
   - Matches your energy - casual, smart, or savage
   - Brutally honest internal memory about users
-- **🧠 Triple Model Intelligence**:
+- **Triple Model Intelligence**:
   - **Fast Model** (gemini-2.0-flash-exp): Lightning-fast responses for normal chat
   - **Smart Model** (gemini-2.5-pro): SMARTEST MODEL for deep reasoning/coding/complex tasks (text-only)
   - **Vision Model** (gemini-2.0-flash-exp): For everyday image analysis
@@ -341,4 +341,3 @@ If you encounter issues:
 ---
 
 **Built with ❤️ using Google Gemini, Discord.py, and PostgreSQL**
-
