@@ -20,7 +20,12 @@ class MemorySystem:
     
     async def get_user_memory(self, user_id: str, username: str) -> str:
         """Get formatted memory about a user"""
-        memory_record = await self.db.get_or_create_user_memory(user_id, username)
+        try:
+            memory_record = await self.db.get_or_create_user_memory(user_id, username)
+        except RuntimeError as e:
+            # Database not available - return default message
+            print(f"⚠️  [MEMORY] Database unavailable: {e}")
+            return "No previous memory of this user. (Database unavailable)"
         
         if not memory_record['memory_summary'] and memory_record['interaction_count'] == 0:
             return "No previous memory of this user."

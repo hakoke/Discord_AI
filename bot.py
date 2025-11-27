@@ -13448,8 +13448,15 @@ async def on_ready():
     print(f'Using models: Fast={FAST_MODEL}, Smart={SMART_MODEL} (multimodal), Vision={VISION_MODEL}')
     
     # Initialize database
-    await db.initialize()
-    print('Memory systems online')
+    try:
+        await db.initialize()
+        print('✅ Memory systems online')
+    except Exception as db_error:
+        print(f'⚠️  Database initialization failed: {db_error}')
+        print('⚠️  Bot will continue without database features (memory, reminders, etc. will be unavailable)')
+        print('⚠️  Check your DATABASE_URL environment variable - it should start with "postgresql://"')
+        if 'postgrejsql' in str(db_error).lower():
+            print('⚠️  TYPO DETECTED: "postgrejsql" → should be "postgresql"')
     
     # Initialize Playwright if available
     if PLAYWRIGHT_AVAILABLE:

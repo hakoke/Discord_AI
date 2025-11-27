@@ -8,9 +8,51 @@ class Database:
         self.database_url = database_url
         self.pool = None
     
+    def _check_pool(self):
+        """Check if database pool is available, raise helpful error if not"""
+        if self.pool is None:
+            raise RuntimeError(
+                "Database not initialized. Check your DATABASE_URL environment variable. "
+                "It should start with 'postgresql://' or 'postgres://' (not 'postgrejsql')."
+            )
+    
     async def initialize(self):
         """Initialize database connection and create tables"""
-        self.pool = await asyncpg.create_pool(self.database_url)
+        try:
+            # Check for common typos in database URL
+            if self.database_url and 'postgrejsql' in self.database_url.lower():
+                corrected_url = self.database_url.replace('postgrejsql', 'postgresql').replace('POSTGREJSQL', 'postgresql')
+                print(f"⚠️  [DATABASE] Detected typo in DATABASE_URL: 'postgrejsql' → 'postgresql'")
+                print(f"⚠️  [DATABASE] Please update your DATABASE_URL environment variable")
+                print(f"⚠️  [DATABASE] Current: {self.database_url[:50]}...")
+                print(f"⚠️  [DATABASE] Should be: {corrected_url[:50]}...")
+                raise ValueError(f"Invalid DATABASE_URL: 'postgrejsql' is not a valid scheme. Use 'postgresql' or 'postgres'.")
+            
+            if not self.database_url:
+                raise ValueError("DATABASE_URL environment variable is not set")
+            
+            if not (self.database_url.startswith('postgresql://') or self.database_url.startswith('postgres://')):
+                raise ValueError(f"Invalid DATABASE_URL scheme. Expected 'postgresql://' or 'postgres://', got: {self.database_url[:20]}...")
+            
+            self.pool = await asyncpg.create_pool(self.database_url)
+            print(f"✅ [DATABASE] Connection pool created successfully")
+            
+        except asyncpg.exceptions._base.ClientConfigurationError as e:
+            error_msg = str(e)
+            if 'scheme is expected' in error_msg.lower() or 'postgrejsql' in error_msg.lower():
+                print(f"❌ [DATABASE] Invalid database URL scheme!")
+                print(f"❌ [DATABASE] Error: {error_msg}")
+                print(f"❌ [DATABASE] Please check your DATABASE_URL environment variable")
+                print(f"❌ [DATABASE] It should start with 'postgresql://' or 'postgres://'")
+                if 'postgrejsql' in error_msg.lower():
+                    print(f"❌ [DATABASE] Common typo detected: 'postgrejsql' → use 'postgresql' instead")
+            else:
+                print(f"❌ [DATABASE] Configuration error: {error_msg}")
+            raise
+        except Exception as e:
+            print(f"❌ [DATABASE] Failed to initialize database: {e}")
+            print(f"❌ [DATABASE] Database features will be unavailable")
+            raise
         
         async with self.pool.acquire() as conn:
             # Interactions table - stores every conversation
@@ -253,6 +295,8 @@ class Database:
                                 has_images: bool = False, has_documents: bool = False,
                                 search_query: str = None, channel_id: str = None):
         """Store a conversation interaction"""
+        if self.pool is None:
+            return None  # Silently fail if database unavailable
         async with self.pool.acquire() as conn:
             interaction_id = await conn.fetchval('''
                 INSERT INTO interactions 
@@ -265,6 +309,8 @@ class Database:
     
     async def get_user_interactions(self, user_id: str, limit: int = 20):
         """Get recent interactions for a user"""
+        if self.pool is None:
+            return []  # Return empty list if database unavailable
         async with self.pool.acquire() as conn:
             rows = await conn.fetch('''
                 SELECT user_message, bot_response, timestamp, has_images, has_documents, search_query
@@ -278,6 +324,7 @@ class Database:
     
     async def get_or_create_user_memory(self, user_id: str, username: str):
         """Get or create user memory record"""
+        self._check_pool()
         async with self.pool.acquire() as conn:
             # Try to get existing memory
             row = await conn.fetchrow('''
