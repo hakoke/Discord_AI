@@ -67,7 +67,7 @@ An advanced AI-powered Discord bot using Google Gemini 2.0 Flash with deep memor
 **You already have the service account JSON!** Just need to:
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Make sure your project `airy-boulevard-478121-f1` has:
+2. Make sure your Google Cloud project has:
    - **Vertex AI API** enabled
    - **Billing** enabled (your $300 credit applies here)
 3. That's it! Your JSON file already has the credentials
@@ -97,8 +97,8 @@ Your $300 credit covers BOTH Gemini and Imagen!
 2. Connect your GitHub account and select this repository
 3. Railway will auto-detect the Python app
 4. **Upload your service account JSON**:
-   - In your repo, make sure `airy-boulevard-478121-f1-44b0fdce331a.json` is in the root
-   - **OR** set it as a Railway secret (better security)
+   - Set the path to your service account JSON file as a Railway secret (recommended)
+   - **OR** place it in your repo root (less secure, not recommended for public repos)
 5. Go to "Variables" tab and add these:
 
 ```
@@ -107,9 +107,9 @@ DISCORD_APP_ID=your_discord_application_id
 GEMINI_API_KEY=your_gemini_api_key
 DATABASE_URL=your_postgresql_connection_url
 BOT_NAME=servermate
-GOOGLE_CLOUD_PROJECT=airy-boulevard-478121-f1
+GOOGLE_CLOUD_PROJECT=your-google-cloud-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
-GOOGLE_APPLICATION_CREDENTIALS=airy-boulevard-478121-f1-44b0fdce331a.json
+GOOGLE_APPLICATION_CREDENTIALS=path/to/your-service-account.json
 SERPER_API_KEY=your_serper_api_key (optional)
 ```
 

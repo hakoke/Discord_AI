@@ -136,7 +136,9 @@ try:
     import vertexai
     from vertexai.preview.vision_models import ImageGenerationModel
     
-    project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+    project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+    if not project_id:
+        raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
     
     # Allow runtime override of Imagen model choices via env vars
@@ -164,10 +166,11 @@ try:
     )
 
     
-    # PRIORITY 1: Check for local credentials file (committed to private repo)
+    # PRIORITY 1: Check for local credentials file (if specified in env var)
     credentials_path = None
-    if os.path.exists('airy-boulevard-478121-f1-44b0fdce331a.json'):
-        credentials_path = 'airy-boulevard-478121-f1-44b0fdce331a.json'
+    local_creds_file = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    if local_creds_file and os.path.exists(local_creds_file):
+        credentials_path = local_creds_file
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
         print(f"✅ Using local credentials file from repo: {credentials_path}")
         
@@ -1083,7 +1086,9 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         print(f"✅ [IMAGE GEN] Vertex AI modules imported successfully")
         
         # Re-initialize vertexai in this thread context
-        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+        if not project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
         location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
         credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
         
@@ -1814,7 +1819,9 @@ def _edit_image_imagen_fallback(original_image_bytes: bytes, prompt: str) -> Ima
         import vertexai
         from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
         
-        project_id = os.getenv('GOOGLE_CLOUD_PROJECT', 'airy-boulevard-478121-f1')
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+        if not project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
         location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
         
         vertexai.init(project=project_id, location=location)
