@@ -97,7 +97,7 @@ Your $300 credit covers BOTH Gemini and Imagen!
 2. Connect your GitHub account and select this repository
 3. Railway will auto-detect the Python app
 4. **Upload your service account JSON**:
-   - In your repo, make sure `airy-boulevard-478121-f1-4cfd4ed69e00.json` is in the root
+   - In your repo, make sure `airy-boulevard-478121-f1-44b0fdce331a.json` is in the root
    - **OR** set it as a Railway secret (better security)
 5. Go to "Variables" tab and add these:
 
@@ -109,7 +109,7 @@ DATABASE_URL=your_postgresql_connection_url
 BOT_NAME=servermate
 GOOGLE_CLOUD_PROJECT=airy-boulevard-478121-f1
 GOOGLE_CLOUD_LOCATION=us-central1
-GOOGLE_APPLICATION_CREDENTIALS=airy-boulevard-478121-f1-4cfd4ed69e00.json
+GOOGLE_APPLICATION_CREDENTIALS=airy-boulevard-478121-f1-44b0fdce331a.json
 SERPER_API_KEY=your_serper_api_key (optional)
 ```
 
