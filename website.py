@@ -15,11 +15,15 @@ import markdown
 import re
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'servermate-official-website-secret-key-change-in-production')
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+if not app.secret_key:
+    raise ValueError("FLASK_SECRET_KEY environment variable is required")
 
-# Admin credentials
-ADMIN_USERNAME = 'Hakoke'
-ADMIN_PASSWORD = 'Ironman'
+# Admin credentials - must be set via environment variables
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+    raise ValueError("ADMIN_USERNAME and ADMIN_PASSWORD environment variables are required")
 
 # Discord API cache
 discord_guild_cache = {}

@@ -12,7 +12,6 @@ The official public-facing website for ServerMate with an admin dashboard.
 - Responsive design
 
 ### Admin Dashboard
-- **Login**: Username: `Hakoke`, Password: `Ironman`
 - **Features**:
   - View all servers with detailed stats
   - View all users and their interaction counts
@@ -30,9 +29,11 @@ The official public-facing website for ServerMate with an admin dashboard.
    - If not present, the logo will not display (gracefully handled)
 
 2. **Environment Variables**:
-   - `DATABASE_URL`: PostgreSQL connection string (already set)
-   - `DISCORD_TOKEN`: Discord bot token (already set)
-   - `FLASK_SECRET_KEY`: Secret key for sessions (optional, defaults to a development key)
+   - `DATABASE_URL`: PostgreSQL connection string (required)
+   - `DISCORD_TOKEN`: Discord bot token (required)
+   - `FLASK_SECRET_KEY`: Secret key for sessions (required)
+   - `ADMIN_USERNAME`: Admin dashboard username (required)
+   - `ADMIN_PASSWORD`: Admin dashboard password (required)
 
 3. **Run the Website**:
    ```bash
@@ -54,10 +55,11 @@ The official public-facing website for ServerMate with an admin dashboard.
 
 ## Admin Credentials
 
-- **Username**: Hakoke
-- **Password**: Ironman
+Admin credentials must be set via environment variables:
+- `ADMIN_USERNAME`: Set your admin username
+- `ADMIN_PASSWORD`: Set your admin password
 
-⚠️ **Important**: Change the admin credentials in production by modifying `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `website.py`
+⚠️ **Important**: Never commit credentials to the repository. Always use environment variables.
 
 ## Integration with Existing Dashboard
 

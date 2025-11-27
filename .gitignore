@@ -45,7 +45,7 @@ Thumbs.db
 *.json
 !railway.json
 !railway-dashboard.json
-!airy-boulevard-478121-f1-44b0fdce331a.json
+!railway-website.json
 
 # Logs
 *.log
