@@ -138,7 +138,16 @@ try:
     
     # Project configuration - hardcoded since repo is private
     PROJECT_NAME = 'airy-boulevard-478121-f1'
-    JSON_KEY_PATH = r'C:\Users\ynkk4\OneDrive\Desktop\Discord_AI\airy-boulevard-478121-f1-44b0fdce331a.json'
+    # Try multiple paths: repo root, Windows path, or env var
+    JSON_KEY_PATH = None
+    possible_paths = [
+        'airy-boulevard-478121-f1-44b0fdce331a.json',  # Repo root (Railway)
+        r'C:\Users\ynkk4\OneDrive\Desktop\Discord_AI\airy-boulevard-478121-f1-44b0fdce331a.json',  # Windows local
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            JSON_KEY_PATH = path
+            break
     
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT') or PROJECT_NAME
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
@@ -287,7 +296,12 @@ SERPER_API_KEY = os.getenv('SERPER_API_KEY')
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-intents.members = True
+# Members intent requires privileged intents - make it optional
+# Enable in Discord Developer Portal: https://discord.com/developers/applications
+try:
+    intents.members = True
+except:
+    print("⚠️  Members intent not available - enable privileged intents in Discord Developer Portal if needed")
 
 # Create bot
 bot = commands.Bot(command_prefix='!', intents=intents)

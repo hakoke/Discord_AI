@@ -15,15 +15,16 @@ import markdown
 import re
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY')
+app.secret_key = os.getenv('FLASK_SECRET_KEY') or os.urandom(24).hex()
 if not app.secret_key:
-    raise ValueError("FLASK_SECRET_KEY environment variable is required")
+    print("⚠️  FLASK_SECRET_KEY not set, using random key (sessions won't persist across restarts)")
+    app.secret_key = os.urandom(24).hex()
 
 # Admin credentials - must be set via environment variables
-ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
-ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
-if not ADMIN_USERNAME or not ADMIN_PASSWORD:
-    raise ValueError("ADMIN_USERNAME and ADMIN_PASSWORD environment variables are required")
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'changeme')
+if ADMIN_USERNAME == 'admin' and ADMIN_PASSWORD == 'changeme':
+    print("⚠️  WARNING: Using default admin credentials! Set ADMIN_USERNAME and ADMIN_PASSWORD environment variables for security.")
 
 # Discord API cache
 discord_guild_cache = {}
