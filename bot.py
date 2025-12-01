@@ -1710,7 +1710,7 @@ def _edit_image_gemini_sync(image_bytes_list: list, prompt: str) -> Image:
 
 You are a powerful image editing AI. Understand the user's request and apply it accurately. The user wants: {prompt}
 
-Generate the edited image that fulfills this request exactly."""
+IMPORTANT: Generate a high-quality, high-resolution edited image that fulfills this request exactly. Maintain or improve the original image quality and resolution."""
         else:
             # Multiple images - AI decides how to combine/edit them
             edit_prompt = f"""You have {len(images)} image(s). Process them according to this request: {prompt}
@@ -1723,7 +1723,7 @@ You are a powerful image editing and combining AI. Understand what the user want
 
 The user's request: {prompt}
 
-Generate the final image that accurately fulfills this request. Be smart and understand the context."""
+IMPORTANT: Generate a high-quality, high-resolution final image that accurately fulfills this request. Maintain or improve the original image quality and resolution. Be smart and understand the context."""
         
         print(f"📡 [IMAGE EDIT] Calling Nano Banana Pro API with {len(images)} image(s)...")
         
@@ -2208,9 +2208,11 @@ async def ai_decide_image_count(message: discord.Message) -> int:
 
 Rules:
 - Pick an integer between 1 and {MAX_GENERATED_IMAGES}.
-- Use more than one image when the user explicitly asks for multiple variations, angles, options, or uses words like "two", "couple", "few", "some", "multiple".
-- Use at least 2 if they request comparisons, alternatives, or a gallery.
-- Stick to 1 if they don't hint at needing multiple results.
+- CRITICAL: If user says "a photo", "an image", "a picture", "one photo", "one image", "one picture", "make a photo", "create a photo", "generate a photo" (SINGULAR), generate exactly 1 image.
+- CRITICAL: If user mentions a number of PEOPLE/OBJECTS in the image (e.g., "2 women", "3 cats", "a couple"), that refers to what's IN the image, NOT how many images to generate. Still generate 1 image unless they explicitly ask for multiple images/photos.
+- Use more than one image ONLY when the user explicitly asks for multiple images/photos/pictures/variations (e.g., "make 3 photos", "generate 2 images", "create multiple pictures", "show me a few variations").
+- Use at least 2 if they request comparisons, alternatives, or a gallery of different images.
+- Stick to 1 if they don't explicitly ask for multiple images/photos/pictures.
 - Consider the heuristic suggestion but override it when your judgment differs.
 
 Return ONLY a JSON object like:
@@ -3598,6 +3600,7 @@ Definitions:
 - CRITICAL DISTINCTION: 
   * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium", "record this page", "record the website"
   * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, person, object, or idea. NO website/URL mentioned. Phrases like "make me a video of", "generate a video of", "create a video of", "video of [concept]" where [concept] is NOT a URL
+- CRITICAL: If user says "photo", "image", "picture", "a photo", "an image", "a picture", "realistic photo", etc., they want an IMAGE, NOT a video. Set needs_ai_video=false in these cases.
 - "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
 - Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7). Round to nearest valid value: ≤5→4, ≤7→6, >7→8. Note any adjustments in "notes". Use null when unspecified.
 - "preferred_screenshot_count": extract explicit numbers (e.g., "take 3 screenshots"). Use null when unspecified.
@@ -13461,18 +13464,42 @@ Now decide: "{message.content}" -> """
                         )
                         
                         # Check if image is suspiciously small (likely profile picture)
+                        should_filter = False
+                        img_size_str = "unknown"
                         try:
                             img_data = img.get('data')
                             if isinstance(img_data, bytes):
                                 from PIL import Image
                                 test_img = Image.open(BytesIO(img_data))
-                                is_small_square = test_img.size[0] <= 400 and test_img.size[1] <= 400 and abs(test_img.size[0] - test_img.size[1]) <= 50
-                                if is_profile_pic or (is_small_square and len(image_parts) > 1):
-                                    profile_pics_found.append(img)
-                                    print(f"✏️  [IMAGE EDIT] Filtering out profile picture: {test_img.size[0]}x{test_img.size[1]}")
-                                    continue
-                        except:
-                            pass
+                                width, height = test_img.size
+                                img_size_str = f"{width}x{height}"
+                                
+                                # More aggressive filtering: filter small square images (likely profile pics)
+                                # Check if it's a small square (common profile picture sizes: 128x128, 256x256, 301x301, etc.)
+                                is_small_square = (
+                                    width <= 400 and 
+                                    height <= 400 and 
+                                    abs(width - height) <= 50  # Nearly square
+                                )
+                                
+                                # Also check if it's exactly a common profile picture size
+                                is_common_pfp_size = (width, height) in [
+                                    (128, 128), (256, 256), (301, 301), (512, 512),
+                                    (128, 128), (256, 256), (301, 301)
+                                ]
+                                
+                                # Filter if: it's marked as profile pic, OR it's a small square AND we have other images
+                                if is_profile_pic or (is_small_square and len(image_parts) > 1) or (is_common_pfp_size and len(image_parts) > 1):
+                                    should_filter = True
+                        except Exception as filter_error:
+                            print(f"⚠️  [IMAGE EDIT] Error checking image size: {filter_error}")
+                            # If we can't check, don't filter (better safe than sorry)
+                            should_filter = False
+                        
+                        if should_filter:
+                            profile_pics_found.append(img)
+                            print(f"✏️  [IMAGE EDIT] Filtering out profile picture: {img_size_str}")
+                            continue
                         
                         filtered_image_parts.append(img)
                     
