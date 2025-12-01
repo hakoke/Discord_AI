@@ -1993,6 +1993,13 @@ Generate a high-quality, high-resolution final image that:
                 }
             )
             print(f"✅ [IMAGE EDIT] Alternative API call successful")
+            print(f"🔍 [IMAGE EDIT] Alternative response type: {type(alt_response)}")
+            print(f"🔍 [IMAGE EDIT] Alternative has images attr: {hasattr(alt_response, 'images')}")
+            if hasattr(alt_response, 'images'):
+                print(f"🔍 [IMAGE EDIT] Alternative response.images: {alt_response.images}")
+            print(f"🔍 [IMAGE EDIT] Alternative has candidates attr: {hasattr(alt_response, 'candidates')}")
+            if hasattr(alt_response, 'candidates'):
+                print(f"🔍 [IMAGE EDIT] Alternative candidates count: {len(alt_response.candidates) if alt_response.candidates else 0}")
             
             # Check for response.images format first (same as image generation)
             if hasattr(alt_response, 'images') and alt_response.images:
@@ -2018,19 +2025,25 @@ Generate a high-quality, high-resolution final image that:
             # Check for image in alternative response candidates
             if hasattr(alt_response, 'candidates') and alt_response.candidates:
                 candidate = alt_response.candidates[0]
+                print(f"🔍 [IMAGE EDIT] Alternative: Found candidate")
                 
                 # Check finish_reason
                 if hasattr(candidate, 'finish_reason'):
                     finish_reason = candidate.finish_reason
-                    print(f"🔍 [IMAGE EDIT] Alternative finish_reason: {finish_reason}")
+                    print(f"🔍 [IMAGE EDIT] Alternative finish_reason: {finish_reason} (type: {type(finish_reason)})")
                     try:
                         finish_reason_str = str(finish_reason).lower()
                         if 'safety' in finish_reason_str or 'block' in finish_reason_str or 'stop' in finish_reason_str or 'prohibited' in finish_reason_str:
                             print(f"⚠️  [IMAGE EDIT] Alternative method also blocked by content safety: {finish_reason}")
-                    except:
+                            # If blocked, skip to next method
+                            raise Exception(f"Alternative method blocked: {finish_reason}")
+                    except Exception as block_exc:
+                        if "blocked" in str(block_exc).lower():
+                            raise
                         pass
                 
                 if hasattr(candidate, 'content') and candidate.content:
+                    print(f"🔍 [IMAGE EDIT] Alternative: Candidate has content")
                     parts = candidate.content.parts
                     print(f"🔍 [IMAGE EDIT] Alternative: Checking {len(parts)} part(s)")
                     for part in parts:
@@ -2075,6 +2088,14 @@ Generate a high-quality, high-resolution final image that:
                             print(f"⚠️  [IMAGE EDIT] Alternative response contains text instead of image: {text_content}...")
             else:
                 print(f"⚠️  [IMAGE EDIT] Alternative response has no candidates")
+                # Check for prompt_feedback which might indicate blocking
+                if hasattr(alt_response, 'prompt_feedback') and alt_response.prompt_feedback:
+                    print(f"🔍 [IMAGE EDIT] Alternative prompt_feedback: {alt_response.prompt_feedback}")
+                    try:
+                        if hasattr(alt_response.prompt_feedback, 'block_reason'):
+                            print(f"⚠️  [IMAGE EDIT] Alternative method blocked: {alt_response.prompt_feedback.block_reason}")
+                    except:
+                        pass
         except Exception as alt_error:
             print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
         
@@ -13270,7 +13291,19 @@ Now decide: "{message.content}" -> """
                 print(f"🔍 [{username}] DEBUG: About to call queued_generate_content with image_model: {image_model}")
                 print(f"🔍 [{username}] DEBUG: content_parts type: {type(content_parts)}, length: {len(content_parts) if isinstance(content_parts, (list, tuple)) else 'N/A'}")
                 response = await queued_generate_content(image_model, content_parts)
-                print(f"🔍 [{username}] DEBUG: queued_generate_content (image) returned: type={type(response)}, has_text={hasattr(response, 'text') if response else False}")
+                # Safely check if response has text (don't access response.text directly as it may raise if finish_reason is invalid)
+                has_text_safe = False
+                if response:
+                    try:
+                        # Check if response has candidates with content parts
+                        if hasattr(response, 'candidates') and response.candidates:
+                            candidate = response.candidates[0]
+                            if hasattr(candidate, 'content') and candidate.content:
+                                parts = candidate.content.parts
+                                has_text_safe = any(hasattr(part, 'text') and part.text for part in parts)
+                    except:
+                        pass
+                print(f"🔍 [{username}] DEBUG: queued_generate_content (image) returned: type={type(response)}, has_text={has_text_safe}")
             except Exception as e:
                 print(f"🔍 [{username}] DEBUG: Exception in image model call: {e}")
                 # Handle rate limits on image generation
@@ -13295,7 +13328,19 @@ Now decide: "{message.content}" -> """
                 print(f"🔍 [{username}] About to call queued_generate_content with model: {active_model}")
                 print(f"🔍 [{username}] Response prompt length: {len(response_prompt) if response_prompt else 0}")
                 response = await queued_generate_content(active_model, response_prompt)
-                print(f"🔍 [{username}] queued_generate_content returned: type={type(response)}, has_text={hasattr(response, 'text') if response else False}")
+                # Safely check if response has text (don't access response.text directly as it may raise if finish_reason is invalid)
+                has_text_safe = False
+                if response:
+                    try:
+                        # Check if response has candidates with content parts
+                        if hasattr(response, 'candidates') and response.candidates:
+                            candidate = response.candidates[0]
+                            if hasattr(candidate, 'content') and candidate.content:
+                                parts = candidate.content.parts
+                                has_text_safe = any(hasattr(part, 'text') and part.text for part in parts)
+                    except:
+                        pass
+                print(f"🔍 [{username}] queued_generate_content returned: type={type(response)}, has_text={has_text_safe}")
             except Exception as e:
                 print(f"🔍 [{username}] DEBUG: Exception in text model call: {e}")
                 # Handle rate limits on text generation
@@ -13311,7 +13356,18 @@ Now decide: "{message.content}" -> """
         print(f"🔍 [{username}] After model call, generation_time={generation_time:.2f}s")
         
         # Safely extract response text - handle cases where response might be blocked
-        if not hasattr(response, 'text') or response.text is None:
+        # Safely check if response has text (don't access response.text directly as it may raise if finish_reason is invalid)
+        has_text = False
+        try:
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and candidate.content:
+                    parts = candidate.content.parts
+                    has_text = any(hasattr(part, 'text') and part.text for part in parts)
+        except:
+            pass
+        
+        if not has_text:
             print(f"⚠️  [{username}] AI response was blocked or empty, using fallback message")
             raw_ai_response = "I encountered an issue generating a response. The content may have been blocked by safety filters."
         else:
