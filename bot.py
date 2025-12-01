@@ -10563,6 +10563,9 @@ CURRENT CONVERSATION CONTEXT:
         profile_request_detected = bool(message_meta.get("profile_picture_focus"))
         media_preferences = message_meta.get("media") or {}
         
+        # Initialize image_parts early (will be populated later, but needed for video generation)
+        image_parts = []
+        
         # AI Video Generation (Veo 3) - Check if user wants AI-generated video (do this EARLY so AI can respond about it)
         generated_video = None
         video_generation_status = None
@@ -10760,7 +10763,7 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
 
         # AI-DRIVEN: First check if images/videos are present, then AI decides if we need them
         # This prevents unnecessary extraction/upload for unrelated requests (zero latency!)
-        image_parts = []
+        # Note: image_parts is already initialized earlier for video generation (line 10567)
         video_parts = []
         
         # First, check if media is present (without extracting yet)
