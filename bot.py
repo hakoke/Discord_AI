@@ -3601,6 +3601,7 @@ Definitions:
   * Browser video ("needs_video"): User mentions URLs, websites, "go to", "visit", "show me you", "record yourself", "browser", "selenium", "record this page", "record the website"
   * AI video ("needs_ai_video"): User asks to create/generate/make a video of a concept, scene, person, object, or idea. NO website/URL mentioned. Phrases like "make me a video of", "generate a video of", "create a video of", "video of [concept]" where [concept] is NOT a URL
 - CRITICAL: If user says "photo", "image", "picture", "a photo", "an image", "a picture", "realistic photo", etc., they want an IMAGE, NOT a video. Set needs_ai_video=false in these cases.
+- CRITICAL: If user is editing an image (has images attached and asks to "change", "edit", "transform", "make into", "turn into", "convert", "modify", "add", "remove", "replace", "swap", etc.), they want IMAGE EDITING, NOT video generation. Set needs_ai_video=false in these cases.
 - "forbid_*": true when they explicitly say NOT to provide that media ("no screenshots", "video only", etc.).
 - Durations: extract explicit numbers (e.g., "10 second video", "5 second clip"). For AI video, Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7). Round to nearest valid value: ≤5→4, ≤7→6, >7→8. Note any adjustments in "notes". Use null when unspecified.
 - "preferred_screenshot_count": extract explicit numbers (e.g., "take 3 screenshots"). Use null when unspecified.
@@ -10571,26 +10572,10 @@ CURRENT CONVERSATION CONTEXT:
         
         # AI Video Generation (Veo 3) - Check if user wants AI-generated video (do this EARLY so AI can respond about it)
         # NOTE: Video generation will be deferred until after images are extracted so it can use image context
-        # CRITICAL: Don't generate video if user is editing an image (they want image editing, not video)
         generated_video = None
         video_generation_status = None
         needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
         video_generation_deferred = False  # Flag to defer video generation until after images are extracted
-        
-        # CRITICAL: If user has images attached and is asking to edit/change/modify them, don't generate video
-        # Check for image editing keywords in the message
-        message_lower = plain_message.lower()
-        has_attachments = bool(message.attachments) or (message.reference is not None)
-        is_likely_image_edit = (
-            has_attachments and
-            any(edit_word in message_lower for edit_word in ['edit', 'change', 'make', 'transform', 'turn', 'convert', 'modify', 'add', 'remove', 'replace', 'swap', 'into', 'to be']) and
-            any(ref_word in message_lower for ref_word in ['this', 'that', 'the', 'these', 'those', 'photo', 'image', 'picture'])
-        )
-        
-        # Disable video generation if this looks like an image editing request
-        if is_likely_image_edit:
-            needs_ai_video = False
-            print(f"🎬 [{username}] Video generation disabled - user appears to be editing an image")
         
         if needs_ai_video and VEO_AVAILABLE:
             try:
@@ -11082,18 +11067,7 @@ Now decide: "{message.content}" -> """
         print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
         
         # Execute deferred video generation now that images are available
-        # CRITICAL: Don't generate video if user is editing an image
-        # Check if this looks like an image editing request (has images + editing keywords)
-        message_lower = plain_message.lower()
-        has_images_for_edit = len(image_parts) > 0
-        is_likely_image_edit_deferred = (
-            has_images_for_edit and
-            any(edit_word in message_lower for edit_word in ['edit', 'change', 'make', 'transform', 'turn', 'convert', 'modify', 'add', 'remove', 'replace', 'swap', 'into', 'to be']) and
-            any(ref_word in message_lower for ref_word in ['this', 'that', 'the', 'these', 'those', 'photo', 'image', 'picture'])
-        )
-        
-        # Only generate video if NOT editing an image
-        if video_generation_deferred and needs_ai_video and VEO_AVAILABLE and not is_likely_image_edit_deferred:
+        if video_generation_deferred and needs_ai_video and VEO_AVAILABLE:
             try:
                 # Filter out profile pictures from video generation (only use actual content images)
                 video_image_bytes = None
