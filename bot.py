@@ -10567,9 +10567,11 @@ CURRENT CONVERSATION CONTEXT:
         image_parts = []
         
         # AI Video Generation (Veo 3) - Check if user wants AI-generated video (do this EARLY so AI can respond about it)
+        # NOTE: Video generation will be deferred until after images are extracted so it can use image context
         generated_video = None
         video_generation_status = None
         needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
+        video_generation_deferred = False  # Flag to defer video generation until after images are extracted
         
         if needs_ai_video and VEO_AVAILABLE:
             try:
@@ -10641,13 +10643,13 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                             ai_video_duration = 8
                     
                     if len(video_prompt) > 10:
-                        # Pass images if available - AI can use them as reference (e.g., "make a video of this guy doing this")
-                        video_image_bytes = None
-                        if image_parts and len(image_parts) > 0:
-                            video_image_bytes = [img['data'] for img in image_parts]
-                            print(f"🎬 [{username}] Generating video with {len(video_image_bytes)} reference image(s) - AI will understand image references")
-                        print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
-                        generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id, image_bytes_list=video_image_bytes)
+                        # Defer video generation until after images are extracted (so we can use image context)
+                        # Store video generation parameters for later execution
+                        video_generation_deferred = True
+                        deferred_video_prompt = video_prompt
+                        deferred_video_duration = ai_video_duration
+                        deferred_user_id = user_id
+                        print(f"🎬 [{username}] Video generation deferred until after images are extracted (to use image context)")
                         
                         if generated_video:
                             await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
@@ -11059,6 +11061,60 @@ Now decide: "{message.content}" -> """
             print(f"📸 [{username}] Skipping media extraction (AI decision: not needed)")
         
         print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
+        
+        # Execute deferred video generation now that images are available
+        if video_generation_deferred and needs_ai_video and VEO_AVAILABLE:
+            try:
+                # Filter out profile pictures from video generation (only use actual content images)
+                video_image_bytes = None
+                filtered_video_images = []
+                for img in image_parts:
+                    is_profile_pic = (
+                        img.get('source') == 'discord_asset' and 
+                        img.get('discord_type') == 'profile_picture'
+                    )
+                    # Also check if it's a small square (likely profile picture)
+                    try:
+                        from PIL import Image
+                        img_data = img.get('data')
+                        if isinstance(img_data, bytes):
+                            test_img = Image.open(BytesIO(img_data))
+                            is_small_square = test_img.size[0] <= 400 and test_img.size[1] <= 400 and abs(test_img.size[0] - test_img.size[1]) <= 50
+                            if not (is_profile_pic or (is_small_square and len(image_parts) > 1)):
+                                filtered_video_images.append(img)
+                    except:
+                        # If we can't check, include it (better safe than sorry)
+                        if not is_profile_pic:
+                            filtered_video_images.append(img)
+                
+                if filtered_video_images:
+                    video_image_bytes = [img['data'] for img in filtered_video_images]
+                    print(f"🎬 [{username}] Generating video with {len(video_image_bytes)} reference image(s) (filtered from {len(image_parts)} total)")
+                else:
+                    print(f"🎬 [{username}] Generating video without image context (no suitable images found)")
+                
+                print(f"🎬 [{username}] Generating video with prompt: '{deferred_video_prompt[:100]}...', duration: {deferred_video_duration}s")
+                generated_video = await generate_video(deferred_video_prompt, duration_seconds=deferred_video_duration, user_id=deferred_user_id, image_bytes_list=video_image_bytes)
+                
+                if generated_video:
+                    await db.record_video_generation(deferred_user_id, deferred_video_duration, deferred_video_prompt, expiration_hours=24)
+                    video_count = len(await db.get_active_video_generations(deferred_user_id))
+                    VIDEO_LIMIT_EXCEPTIONS = {242681931332976640}
+                    user_id_int = int(deferred_user_id)
+                    user_video_limit = 5 if user_id_int not in VIDEO_LIMIT_EXCEPTIONS else float('inf')
+                    total_str = f"{user_video_limit}" if user_video_limit != float('inf') else "∞"
+                    
+                    video_generation_status = {
+                        'success': True,
+                        'count': video_count,
+                        'total': user_video_limit if user_video_limit != float('inf') else None,
+                        'expires_hours': 24
+                    }
+                    print(f"🎬 [{username}] ✅ Successfully generated video ({video_count}/{total_str})")
+            except Exception as deferred_video_error:
+                print(f"❌ [{username}] Error in deferred video generation: {deferred_video_error}")
+                import traceback
+                print(f"❌ [{username}] Traceback: {traceback.format_exc()}")
         
         # Extract URLs from message and fetch content if relevant
         webpage_contents = []
@@ -13393,31 +13449,53 @@ Now decide: "{message.content}" -> """
                     print(f"✏️  [IMAGE EDIT] Edit prompt: '{edit_prompt[:100]}...'")
                     print(f"✏️  [IMAGE EDIT] Using Nano Banana Pro model for editing")
                     
-                    # AI-DRIVEN: Prioritize the most relevant image for editing
-                    # 1. First, try to find non-Discord-asset images (actual content images, not profile pictures)
-                    # 2. If only Discord assets exist, use the first one (user explicitly wants to edit their profile)
-                    target_image = None
-                    target_image_idx = None
+                    # Filter out profile pictures unless explicitly requested
+                    # Profile pictures are usually small (301x301) and shouldn't be included in edits
+                    filtered_image_parts = []
+                    profile_pics_found = []
                     
-                    # Find the first non-Discord-asset image (prioritize actual content)
-                    for idx, img in enumerate(image_parts):
-                        if img.get('source') != 'discord_asset':
-                            target_image = img
-                            target_image_idx = idx
-                            print(f"✏️  [IMAGE EDIT] Selected image {idx + 1}/{len(image_parts)} for editing (non-Discord-asset)")
-                            break
+                    for img in image_parts:
+                        is_profile_pic = (
+                            img.get('source') == 'discord_asset' and 
+                            img.get('discord_type') == 'profile_picture'
+                        )
+                        
+                        # Check if image is suspiciously small (likely profile picture)
+                        try:
+                            img_data = img.get('data')
+                            if isinstance(img_data, bytes):
+                                from PIL import Image
+                                test_img = Image.open(BytesIO(img_data))
+                                is_small_square = test_img.size[0] <= 400 and test_img.size[1] <= 400 and abs(test_img.size[0] - test_img.size[1]) <= 50
+                                if is_profile_pic or (is_small_square and len(image_parts) > 1):
+                                    profile_pics_found.append(img)
+                                    print(f"✏️  [IMAGE EDIT] Filtering out profile picture: {test_img.size[0]}x{test_img.size[1]}")
+                                    continue
+                        except:
+                            pass
+                        
+                        filtered_image_parts.append(img)
                     
-                    # If no non-Discord-asset images, use the first image (likely user's profile picture)
-                    if target_image is None:
-                        target_image = image_parts[0]
-                        target_image_idx = 0
-                        print(f"✏️  [IMAGE EDIT] Selected image 1/{len(image_parts)} for editing (Discord asset - user's profile picture)")
+                    # If user explicitly mentions profile picture, include it
+                    edit_prompt_lower = edit_prompt.lower()
+                    mentions_profile = any(phrase in edit_prompt_lower for phrase in [
+                        'profile', 'profile picture', 'pfp', 'avatar', 'my picture', 'my photo'
+                    ])
                     
-                    # AI-DRIVEN: Pass ALL images to the model - let the AI decide what to do
+                    if mentions_profile and profile_pics_found:
+                        print(f"✏️  [IMAGE EDIT] User mentioned profile picture, including it")
+                        filtered_image_parts.extend(profile_pics_found)
+                    
+                    # If no images after filtering, use all images (fallback)
+                    if not filtered_image_parts:
+                        print(f"⚠️  [IMAGE EDIT] All images filtered out, using original image_parts")
+                        filtered_image_parts = image_parts
+                    
+                    # AI-DRIVEN: Pass filtered images to the model
                     # The AI understands references like "first photo", "second photo", "the black guy", etc.
                     # No hardcoding - the AI is smart and can handle any number of images
-                    all_image_bytes = [img['data'] for img in image_parts]
-                    print(f"✏️  [IMAGE EDIT] Passing {len(all_image_bytes)} image(s) to Nano Banana Pro (AI will decide what to do)")
+                    all_image_bytes = [img['data'] for img in filtered_image_parts]
+                    print(f"✏️  [IMAGE EDIT] Passing {len(all_image_bytes)} image(s) to Nano Banana Pro (filtered from {len(image_parts)} total, {len(profile_pics_found)} profile pics excluded)")
                     
                     try:
                         # Call the edit function which uses Nano Banana Pro - AI-driven, supports any number of images
