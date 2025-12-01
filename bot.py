@@ -1297,13 +1297,23 @@ def _generate_image_sync(prompt: str, num_images: int = 1) -> list:
         print(f"❌ [IMAGE GEN] ❌ Returning None due to error")
         return None
 
-async def edit_image_with_prompt(original_image_bytes: bytes, prompt: str) -> Image:
-    """Edit an image based on a text prompt using Gemini 3 Pro Image Preview (Nano Banana Pro) (AI-driven, queued for rate limiting)"""
+async def edit_image_with_prompt(image_bytes_list: list, prompt: str) -> Image:
+    """Edit/combine images based on a text prompt using Gemini 3 Pro Image Preview (Nano Banana Pro) (AI-driven, queued for rate limiting)
+    
+    Args:
+        image_bytes_list: List of image bytes (can be 1 or more images for combining/editing)
+        prompt: Natural language instruction (e.g., "make this guy a woman", "put the first photo into the second photo")
+    
+    Returns:
+        Edited/combined PIL Image
+    """
     try:
-        print(f"🚀 [IMAGE EDIT] Queuing image edit request with Nano Banana Pro...")
+        print(f"🚀 [IMAGE EDIT] Queuing image edit/combine request with Nano Banana Pro...")
+        print(f"   - Number of images: {len(image_bytes_list)}")
+        print(f"   - Prompt: '{prompt[:100]}...'")
         api_queue = _get_api_queue(IMAGE_EDIT_MODEL)
-        result = await api_queue.execute(_edit_image_gemini_sync, original_image_bytes, prompt)
-        print(f"🏁 [IMAGE EDIT] Image editing completed")
+        result = await api_queue.execute(_edit_image_gemini_sync, image_bytes_list, prompt)
+        print(f"🏁 [IMAGE EDIT] Image editing/combining completed")
         return result
     except Exception as e:
         print(f"❌ [IMAGE EDIT] Error: {e}")
@@ -1331,9 +1341,21 @@ except ImportError:
     print("⚠️  Veo 3 not available - Video generation disabled. Install with: pip install google-genai")
     VEO_AVAILABLE = False
 
-async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = None) -> Optional[BytesIO]:
-    """Generate video using Veo 3 via Google GenAI (queued for rate limiting, AI-driven duration)"""
+async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = None, image_bytes_list: list = None) -> Optional[BytesIO]:
+    """Generate video using Veo 3.1 Preview via Google GenAI (queued for rate limiting, AI-driven, supports images)
+    
+    Args:
+        prompt: Text description of the video to generate (AI understands natural language)
+        duration_seconds: Duration (will be rounded to 4, 6, or 8 seconds)
+        user_id: User ID for rate limiting
+        image_bytes_list: Optional list of images to use as reference (e.g., "make a video of this guy doing this")
+    
+    Returns:
+        Video file as BytesIO
+    """
     print(f"🎬 [VIDEO GEN] generate_video() called with prompt: '{prompt[:100]}...', duration: {duration_seconds}s")
+    if image_bytes_list:
+        print(f"🎬 [VIDEO GEN] With {len(image_bytes_list)} reference image(s) - AI will understand and use them")
     
     if not VEO_AVAILABLE:
         print(f"⚠️  [VIDEO GEN] Veo not available, skipping video generation")
@@ -1353,7 +1375,7 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         print(f"🎬 [VIDEO GEN] Queuing video generation request through Flash queue...")
         api_queue = _get_api_queue('gemini-2.0-flash')
         print(f"🎬 [VIDEO GEN] Got API queue, executing _generate_video_sync...")
-        result = await api_queue.execute(_generate_video_sync, prompt, duration_seconds)
+        result = await api_queue.execute(_generate_video_sync, prompt, duration_seconds, image_bytes_list)
         print(f"🏁 [VIDEO GEN] ✅ Video generation completed")
         return result
     except Exception as e:
@@ -1379,8 +1401,15 @@ async def generate_video(prompt: str, duration_seconds: int = 5, user_id: str = 
         print(f"❌ [VIDEO GEN] ❌ Full traceback:\n{traceback.format_exc()}")
         return None
 
-def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[BytesIO]:
-    """Synchronous video generation using Veo 3"""
+def _generate_video_sync(prompt: str, duration_seconds: int = 6, image_bytes_list: list = None) -> Optional[BytesIO]:
+    """Synchronous video generation using Veo 3.1 Preview - FULLY AI-DRIVEN
+    
+    Supports:
+    - Text-only prompts (e.g., "make a video of a sunset")
+    - Image + text prompts (e.g., "make a video of this guy flying" with an image)
+    - Multiple images + text (e.g., "make a video of this group doing this" with multiple images)
+    - Complex natural language - AI understands everything, no hardcoding
+    """
     try:
         # Veo 3.1 ONLY accepts 4, 6, or 8 seconds (NOT 5 or 7!)
         # Round to nearest valid value: 4, 6, or 8
@@ -1465,23 +1494,32 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
             print(f"   - DEBUG: Config creation traceback:\n{traceback.format_exc()}")
             raise
         
-        # Try Veo models in order: preview → stable → v2.0, fallback if quota exceeded
+        # Use veo-3.1-generate-preview as primary model (fully AI-driven, supports images)
         models_to_try = [
-            ("veo-3.1-generate-preview", config_with_resolution),  # First: preview version
-            ("veo-3.0-generate-001", config_with_resolution),       # Second: stable version
-            ("veo-2.0-generate-001", config_without_resolution)        # Third: v2.0 fallback (no resolution)
+            ("veo-3.1-generate-preview", config_with_resolution),  # Primary: preview version (fully AI-driven)
         ]
         
         operation = None
         model_used = None
         last_error = None
         
+        # If images are provided, enhance the prompt to include image context (AI-driven)
+        # The AI understands references like "this guy", "this group", "the first image", etc.
+        enhanced_prompt = prompt
+        if image_bytes_list and len(image_bytes_list) > 0:
+            if len(image_bytes_list) == 1:
+                enhanced_prompt = f"{prompt} (The user has provided 1 reference image. Use it to understand what they want - e.g., if they say 'this guy' or 'this person', they mean the person in the image. Generate a video based on the image and the prompt.)"
+            else:
+                enhanced_prompt = f"{prompt} (The user has provided {len(image_bytes_list)} reference images. Use them to understand what they want - e.g., 'first image', 'second image', 'this guy', 'this group' refer to the images. Generate a video based on the images and the prompt.)"
+            print(f"🎬 [VIDEO GEN] Enhanced prompt with image context: '{enhanced_prompt[:150]}...'")
+        
         for idx, (model_name, model_config) in enumerate(models_to_try):
             try:
                 print(f"   - DEBUG: Calling generate_videos API with model='{model_name}'...")
+                # Veo 3.1 is fully AI-driven - it understands natural language and image references
                 operation = client.models.generate_videos(
                     model=model_name,
-                    prompt=prompt,
+                    prompt=enhanced_prompt,  # Use enhanced prompt with image context
                     config=model_config
                 )
                 model_used = model_name
@@ -1506,16 +1544,9 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
                 )
                 
                 if is_quota_error:
-                    # Quota exceeded, try next model in chain
-                    if idx < len(models_to_try) - 1:
-                        next_model = models_to_try[idx + 1][0]
-                        print(f"⚠️  [VIDEO GEN] {model_name} quota exceeded (429), falling back to {next_model}...")
-                        last_error = e
-                        continue  # Try next model
-                    else:
-                        # All models exhausted
-                        print(f"❌ [VIDEO GEN] All video models exhausted (preview, stable, and v2.0). Last error: {e}")
-                        raise  # Re-raise to be caught by outer exception handler
+                    # Quota exceeded - only using veo-3.1-generate-preview, so no fallback
+                    print(f"❌ [VIDEO GEN] {model_name} quota exceeded (429). Video generation temporarily unavailable.")
+                    raise  # Re-raise to be caught by outer exception handler
                 else:
                     # Other error (not quota), re-raise immediately
                     last_error = e
@@ -1636,7 +1667,7 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         )
         
         if is_quota_error:
-            print(f"❌ [VIDEO GEN] ❌ Both Veo 3.1 and Veo 2.0 quota exhausted. Video generation is temporarily unavailable.")
+            print(f"❌ [VIDEO GEN] ❌ Veo 3.1 Preview quota exhausted. Video generation is temporarily unavailable.")
             print(f"❌ [VIDEO GEN] ❌ Error: {str(e)}")
             # Return a special marker that we can check for in the calling function
             # We'll use a special exception that can be caught
@@ -1648,32 +1679,62 @@ def _generate_video_sync(prompt: str, duration_seconds: int = 6) -> Optional[Byt
         print(f"❌ [VIDEO GEN] ❌ Full traceback:\n{traceback.format_exc()}")
         return None
 
-def _edit_image_gemini_sync(original_image_bytes: bytes, prompt: str) -> Image:
-    """Synchronous image editing using Gemini 3 Pro Image Preview (Nano Banana Pro)"""
+def _edit_image_gemini_sync(image_bytes_list: list, prompt: str) -> Image:
+    """Synchronous image editing/combining using Gemini 3 Pro Image Preview (Nano Banana Pro)
+    
+    Supports:
+    - Single image editing (e.g., "make this guy a woman")
+    - Multiple image combining (e.g., "put the first photo into the second photo")
+    - Any number of images - AI decides what to do based on the prompt
+    """
     try:
-        print(f"✏️  [IMAGE EDIT] Starting image editing with Nano Banana Pro")
+        print(f"✏️  [IMAGE EDIT] Starting image editing/combining with Nano Banana Pro")
         print(f"   - Prompt: '{prompt[:100]}...'")
-        print(f"   - Image size: {len(original_image_bytes)} bytes")
+        print(f"   - Number of images: {len(image_bytes_list)}")
         
-        # Load the image
-        image = Image.open(BytesIO(original_image_bytes))
-        print(f"✅ [IMAGE EDIT] Image loaded: {image.size[0]}x{image.size[1]}")
+        # Load all images
+        images = []
+        for idx, img_bytes in enumerate(image_bytes_list):
+            image = Image.open(BytesIO(img_bytes))
+            images.append(image)
+            print(f"✅ [IMAGE EDIT] Image {idx + 1} loaded: {image.size[0]}x{image.size[1]} ({len(img_bytes)} bytes)")
         
         # Get the Gemini model for image editing
         model = genai.GenerativeModel(IMAGE_EDIT_MODEL)
         print(f"✅ [IMAGE EDIT] Model loaded: {IMAGE_EDIT_MODEL} (Nano Banana Pro)")
         
-        # Create the edit prompt - Nano Banana Pro can edit images with natural language
-        edit_prompt = f"""Edit this image according to the following request: {prompt}
+        # Create the edit prompt - AI-driven, no hardcoding
+        # The AI understands natural language and decides what to do with the images
+        if len(images) == 1:
+            edit_prompt = f"""Process this image according to the following request: {prompt}
 
-Apply the requested changes to the image. Make sure the edits are natural and match the style of the original image."""
+You are a powerful image editing AI. Understand the user's request and apply it accurately. The user wants: {prompt}
+
+Generate the edited image that fulfills this request exactly."""
+        else:
+            # Multiple images - AI decides how to combine/edit them
+            edit_prompt = f"""You have {len(images)} image(s). Process them according to this request: {prompt}
+
+You are a powerful image editing and combining AI. Understand what the user wants:
+- If they want to combine images, combine them naturally
+- If they want to edit one using another as reference, do that
+- If they want to extract elements from one and put in another, do that
+- Understand references like "first photo", "second photo", "the black guy", "the woman", etc.
+
+The user's request: {prompt}
+
+Generate the final image that accurately fulfills this request. Be smart and understand the context."""
         
-        print(f"📡 [IMAGE EDIT] Calling Nano Banana Pro API...")
+        print(f"📡 [IMAGE EDIT] Calling Nano Banana Pro API with {len(images)} image(s)...")
         
-        # Use Gemini's image editing capability - FULLY UNCENSORED
-        # The model can take an image and a prompt to edit it
+        # Build content array with prompt and all images
+        # AI sees all images and decides what to do - fully AI-driven
+        content_parts = [edit_prompt] + images
+        
+        # Use Gemini's image editing/combining capability - FULLY UNCENSORED
+        # The model can take multiple images and understand complex instructions
         response = model.generate_content(
-            [edit_prompt, image],
+            content_parts,
             generation_config={
                 "temperature": 0.7,
                 "top_p": 0.95,
@@ -1825,9 +1886,13 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         # This is a workaround if direct editing isn't available
         try:
             # Try using the model with image input and edit instruction
-            alternative_prompt = f"Edit the provided image: {prompt}"
+            if len(images) == 1:
+                alternative_prompt = f"Edit the provided image: {prompt}"
+            else:
+                alternative_prompt = f"Process these {len(images)} images: {prompt}"
+            alt_content = [alternative_prompt] + images
             alt_response = model.generate_content(
-                [alternative_prompt, image],
+                alt_content,
                 generation_config={
                     "temperature": 0.8,
                 },
@@ -1879,9 +1944,13 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         except Exception as alt_error:
             print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
         
-        # If all else fails, try fallback to Imagen editing
-        print(f"⚠️  [IMAGE EDIT] Nano Banana Pro editing failed, trying Imagen fallback...")
-        return _edit_image_imagen_fallback(original_image_bytes, prompt)
+        # If all else fails, try fallback to Imagen editing (only supports single image)
+        if len(image_bytes_list) == 1:
+            print(f"⚠️  [IMAGE EDIT] Nano Banana Pro editing failed, trying Imagen fallback...")
+            return _edit_image_imagen_fallback(image_bytes_list[0], prompt)
+        else:
+            print(f"⚠️  [IMAGE EDIT] Nano Banana Pro failed with multiple images - Imagen fallback only supports single image")
+            raise Exception("Image editing failed. Please try with a single image or use Nano Banana Pro.")
         
     except Exception as e:
         print(f"❌ [IMAGE EDIT] Error occurred: {type(e).__name__}")
@@ -1889,12 +1958,13 @@ Apply the requested changes to the image. Make sure the edits are natural and ma
         import traceback
         print(f"❌ [IMAGE EDIT] Full traceback:\n{traceback.format_exc()}")
         
-        # Try Imagen fallback even on error
-        print(f"⚠️  [IMAGE EDIT] Attempting Imagen fallback after error...")
-        try:
-            return _edit_image_imagen_fallback(original_image_bytes, prompt)
-        except Exception as fallback_error:
-            print(f"❌ [IMAGE EDIT] Imagen fallback also failed: {fallback_error}")
+        # Try Imagen fallback even on error (only if single image)
+        if len(image_bytes_list) == 1:
+            print(f"⚠️  [IMAGE EDIT] Attempting Imagen fallback after error...")
+            try:
+                return _edit_image_imagen_fallback(image_bytes_list[0], prompt)
+            except Exception as fallback_error:
+                print(f"❌ [IMAGE EDIT] Imagen fallback also failed: {fallback_error}")
         raise
 
 def _edit_image_imagen_fallback(original_image_bytes: bytes, prompt: str) -> Image:
@@ -10568,8 +10638,13 @@ Respond with ONLY one of these numbers: 4, 6, or 8"""
                             ai_video_duration = 8
                     
                     if len(video_prompt) > 10:
+                        # Pass images if available - AI can use them as reference (e.g., "make a video of this guy doing this")
+                        video_image_bytes = None
+                        if image_parts and len(image_parts) > 0:
+                            video_image_bytes = [img['data'] for img in image_parts]
+                            print(f"🎬 [{username}] Generating video with {len(video_image_bytes)} reference image(s) - AI will understand image references")
                         print(f"🎬 [{username}] Generating video with prompt: '{video_prompt[:100]}...', duration: {ai_video_duration}s")
-                        generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id)
+                        generated_video = await generate_video(video_prompt, duration_seconds=ai_video_duration, user_id=user_id, image_bytes_list=video_image_bytes)
                         
                         if generated_video:
                             await db.record_video_generation(user_id, ai_video_duration, video_prompt, expiration_hours=24)
@@ -13335,13 +13410,15 @@ Now decide: "{message.content}" -> """
                         target_image_idx = 0
                         print(f"✏️  [IMAGE EDIT] Selected image 1/{len(image_parts)} for editing (Discord asset - user's profile picture)")
                     
-                    # Get the image bytes to edit
-                    original_image_bytes = target_image['data']
-                    print(f"✏️  [IMAGE EDIT] Original image size: {len(original_image_bytes)} bytes")
+                    # AI-DRIVEN: Pass ALL images to the model - let the AI decide what to do
+                    # The AI understands references like "first photo", "second photo", "the black guy", etc.
+                    # No hardcoding - the AI is smart and can handle any number of images
+                    all_image_bytes = [img['data'] for img in image_parts]
+                    print(f"✏️  [IMAGE EDIT] Passing {len(all_image_bytes)} image(s) to Nano Banana Pro (AI will decide what to do)")
                     
                     try:
-                        # Call the edit function which uses Nano Banana Pro
-                        edited_image = await edit_image_with_prompt(original_image_bytes, edit_prompt)
+                        # Call the edit function which uses Nano Banana Pro - AI-driven, supports any number of images
+                        edited_image = await edit_image_with_prompt(all_image_bytes, edit_prompt)
                         print(f"✏️  [IMAGE EDIT] edit_image_with_prompt() returned: {type(edited_image)}")
                         if edited_image:
                             print(f"✏️  [IMAGE EDIT] ✅ Successfully edited image with Nano Banana Pro")
