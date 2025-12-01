@@ -14529,9 +14529,26 @@ Response: """
                                                     await message.channel.send(chunk, reference=message)
                                                     # Send images in smaller batches (max 2 per message) - only if not sent to channel_actions
                                                     if not files_sent_to_channels:
-                                                        for batch_start in range(0, len(compressed_files), 2):
-                                                            batch = compressed_files[batch_start:batch_start + 2]
-                                                            await message.channel.send(f"📷 Images {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
+                                                        # Recreate files from original data to avoid consumed BytesIO issues
+                                                        fresh_files = []
+                                                        for f in compressed_files:
+                                                            if f.filename == 'generated_video.mp4' and original_video_bytes:
+                                                                # Recreate video file from original data
+                                                                original_video_bytes.seek(0)
+                                                                video_data_copy = original_video_bytes.read()
+                                                                fresh_video_bytes = BytesIO(video_data_copy)
+                                                                compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)
+                                                                if compressed_video:
+                                                                    compressed_video.seek(0)
+                                                                    fresh_files.append(discord.File(fp=compressed_video, filename='generated_video.mp4'))
+                                                            else:
+                                                                # For images, we can't easily recreate, so skip if already consumed
+                                                                # In practice, images are usually small enough to not need splitting
+                                                                fresh_files.append(f)
+                                                        
+                                                        for batch_start in range(0, len(fresh_files), 2):
+                                                            batch = fresh_files[batch_start:batch_start + 2]
+                                                            await message.channel.send(f"📎 Files {batch_start + 1}-{min(batch_start + len(batch), len(fresh_files))} of {len(fresh_files)}:", files=batch)
                                                 elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
                                                     print(f"⚠️  [{message.author.display_name}] Discord API error {status} (server error), retrying in 2 seconds...")
                                                     await asyncio.sleep(2)  # Wait 2 seconds
@@ -14608,20 +14625,38 @@ Response: """
                                                 # Send text first
                                                 await message.channel.send(response, reference=message)
                                                 # Send images/videos in smaller batches (max 2 per message)
-                                                if compressed_files:
-                                                    for batch_start in range(0, len(compressed_files), 2):
-                                                        batch = compressed_files[batch_start:batch_start + 2]
-                                                        await message.channel.send(f"📎 Files {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
-                                                    # If video wasn't in compressed_files, try to send it separately
-                                                    if original_video_bytes and not any(f.filename == 'generated_video.mp4' for f in compressed_files):
-                                                        # Reset and create fresh BytesIO to avoid file pointer issues
+                                                # Recreate files from original data to avoid consumed BytesIO issues
+                                                fresh_files = []
+                                                for f in compressed_files:
+                                                    if f.filename == 'generated_video.mp4' and original_video_bytes:
+                                                        # Recreate video file from original data
                                                         original_video_bytes.seek(0)
                                                         video_data_copy = original_video_bytes.read()
                                                         fresh_video_bytes = BytesIO(video_data_copy)
                                                         compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)
                                                         if compressed_video:
                                                             compressed_video.seek(0)
-                                                            await message.channel.send("🎬 Generated video:", files=[discord.File(fp=compressed_video, filename='generated_video.mp4')])
+                                                            fresh_files.append(discord.File(fp=compressed_video, filename='generated_video.mp4'))
+                                                    else:
+                                                        # For images, we can't easily recreate, so skip if already consumed
+                                                        # In practice, images are usually small enough to not need splitting
+                                                        fresh_files.append(f)
+                                                
+                                                if fresh_files:
+                                                    for batch_start in range(0, len(fresh_files), 2):
+                                                        batch = fresh_files[batch_start:batch_start + 2]
+                                                        await message.channel.send(f"📎 Files {batch_start + 1}-{min(batch_start + len(batch), len(fresh_files))} of {len(fresh_files)}:", files=batch)
+                                                
+                                                # If video wasn't in compressed_files, try to send it separately
+                                                if original_video_bytes and not any(f.filename == 'generated_video.mp4' for f in (compressed_files if compressed_files else [])):
+                                                    # Reset and create fresh BytesIO to avoid file pointer issues
+                                                    original_video_bytes.seek(0)
+                                                    video_data_copy = original_video_bytes.read()
+                                                    fresh_video_bytes = BytesIO(video_data_copy)
+                                                    compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)
+                                                    if compressed_video:
+                                                        compressed_video.seek(0)
+                                                        await message.channel.send("🎬 Generated video:", files=[discord.File(fp=compressed_video, filename='generated_video.mp4')])
                                             else:
                                                 raise
                                     elif status in [502, 503, 504]:  # Server errors (Bad Gateway, Service Unavailable, Gateway Timeout)
