@@ -10571,10 +10571,26 @@ CURRENT CONVERSATION CONTEXT:
         
         # AI Video Generation (Veo 3) - Check if user wants AI-generated video (do this EARLY so AI can respond about it)
         # NOTE: Video generation will be deferred until after images are extracted so it can use image context
+        # CRITICAL: Don't generate video if user is editing an image (they want image editing, not video)
         generated_video = None
         video_generation_status = None
         needs_ai_video = bool(media_preferences.get("needs_ai_video", False))
         video_generation_deferred = False  # Flag to defer video generation until after images are extracted
+        
+        # CRITICAL: If user has images attached and is asking to edit/change/modify them, don't generate video
+        # Check for image editing keywords in the message
+        message_lower = plain_message.lower()
+        has_attachments = bool(message.attachments) or (message.reference is not None)
+        is_likely_image_edit = (
+            has_attachments and
+            any(edit_word in message_lower for edit_word in ['edit', 'change', 'make', 'transform', 'turn', 'convert', 'modify', 'add', 'remove', 'replace', 'swap', 'into', 'to be']) and
+            any(ref_word in message_lower for ref_word in ['this', 'that', 'the', 'these', 'those', 'photo', 'image', 'picture'])
+        )
+        
+        # Disable video generation if this looks like an image editing request
+        if is_likely_image_edit:
+            needs_ai_video = False
+            print(f"🎬 [{username}] Video generation disabled - user appears to be editing an image")
         
         if needs_ai_video and VEO_AVAILABLE:
             try:
@@ -11066,7 +11082,18 @@ Now decide: "{message.content}" -> """
         print(f"📸 [{username}] Final image count: {len(image_parts)} image(s) available")
         
         # Execute deferred video generation now that images are available
-        if video_generation_deferred and needs_ai_video and VEO_AVAILABLE:
+        # CRITICAL: Don't generate video if user is editing an image
+        # Check if this looks like an image editing request (has images + editing keywords)
+        message_lower = plain_message.lower()
+        has_images_for_edit = len(image_parts) > 0
+        is_likely_image_edit_deferred = (
+            has_images_for_edit and
+            any(edit_word in message_lower for edit_word in ['edit', 'change', 'make', 'transform', 'turn', 'convert', 'modify', 'add', 'remove', 'replace', 'swap', 'into', 'to be']) and
+            any(ref_word in message_lower for ref_word in ['this', 'that', 'the', 'these', 'those', 'photo', 'image', 'picture'])
+        )
+        
+        # Only generate video if NOT editing an image
+        if video_generation_deferred and needs_ai_video and VEO_AVAILABLE and not is_likely_image_edit_deferred:
             try:
                 # Filter out profile pictures from video generation (only use actual content images)
                 video_image_bytes = None
@@ -11079,9 +11106,10 @@ Now decide: "{message.content}" -> """
                     # Also check if it's a small square (likely profile picture)
                     try:
                         from PIL import Image
+                        from io import BytesIO as BytesIO_local
                         img_data = img.get('data')
                         if isinstance(img_data, bytes):
-                            test_img = Image.open(BytesIO(img_data))
+                            test_img = Image.open(BytesIO_local(img_data))
                             is_small_square = test_img.size[0] <= 400 and test_img.size[1] <= 400 and abs(test_img.size[0] - test_img.size[1]) <= 50
                             if not (is_profile_pic or (is_small_square and len(image_parts) > 1)):
                                 filtered_video_images.append(img)
@@ -13470,7 +13498,8 @@ Now decide: "{message.content}" -> """
                             img_data = img.get('data')
                             if isinstance(img_data, bytes):
                                 from PIL import Image
-                                test_img = Image.open(BytesIO(img_data))
+                                from io import BytesIO as BytesIO_local
+                                test_img = Image.open(BytesIO_local(img_data))
                                 width, height = test_img.size
                                 img_size_str = f"{width}x{height}"
                                 
