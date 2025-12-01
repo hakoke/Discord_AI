@@ -1755,12 +1755,18 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
         # Log raw response structure for debugging
         try:
             response_dict = {}
-            for attr in ['candidates', 'images', 'text', 'parts']:
+            for attr in ['candidates', 'images', 'text', 'parts', 'prompt_feedback']:
                 if hasattr(response, attr):
-                    response_dict[attr] = f"<{type(getattr(response, attr)).__name__}>"
+                    attr_value = getattr(response, attr)
+                    if attr == 'candidates' and attr_value:
+                        response_dict[attr] = f"<list with {len(attr_value)} candidate(s)>"
+                    elif attr == 'images' and attr_value:
+                        response_dict[attr] = f"<list with {len(attr_value)} image(s)>"
+                    else:
+                        response_dict[attr] = f"<{type(attr_value).__name__}>"
             print(f"🔍 [IMAGE EDIT] Response structure: {json.dumps(response_dict, indent=2)}")
-        except:
-            pass
+        except Exception as debug_error:
+            print(f"⚠️  [IMAGE EDIT] Error logging response structure: {debug_error}")
         
         # Check for response.images format (as ChatGPT suggested)
         if hasattr(response, 'images') and response.images:
@@ -1809,6 +1815,17 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
                     print(f"🔍 [IMAGE EDIT] Finish reason name: {finish_reason.name}")
                 if hasattr(finish_reason, 'value'):
                     print(f"🔍 [IMAGE EDIT] Finish reason value: {finish_reason.value}")
+                # Check if finish_reason indicates blocking (even with BLOCK_NONE, some edge cases might occur)
+                try:
+                    finish_reason_str = str(finish_reason).lower()
+                    if 'safety' in finish_reason_str or 'block' in finish_reason_str or 'stop' in finish_reason_str:
+                        print(f"⚠️  [IMAGE EDIT] Finish reason suggests content was blocked: {finish_reason}")
+                except:
+                    pass
+            
+            # Check for prompt_feedback which might indicate why image wasn't returned
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                print(f"🔍 [IMAGE EDIT] Prompt feedback: {response.prompt_feedback}")
             
             if hasattr(candidate, 'content') and candidate.content:
                 parts = candidate.content.parts
@@ -1816,6 +1833,7 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
                 
                 for i, part in enumerate(parts):
                     print(f"🔍 [IMAGE EDIT] Part {i} type: {type(part)}")
+                    print(f"🔍 [IMAGE EDIT] Part {i} attributes: {[attr for attr in dir(part) if not attr.startswith('_')]}")
                     print(f"🔍 [IMAGE EDIT] Part {i} has inline_data: {hasattr(part, 'inline_data')}")
                     print(f"🔍 [IMAGE EDIT] Part {i} has text: {hasattr(part, 'text')}")
                     
@@ -1824,6 +1842,11 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
                         print(f"🔍 [IMAGE EDIT] Part {i} has function_call: {part.function_call}")
                     if hasattr(part, 'function_response'):
                         print(f"🔍 [IMAGE EDIT] Part {i} has function_response: {part.function_response}")
+                    
+                    # Check for inline_data
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        print(f"🔍 [IMAGE EDIT] Part {i} inline_data type: {type(part.inline_data)}")
+                        print(f"🔍 [IMAGE EDIT] Part {i} inline_data attributes: {[attr for attr in dir(part.inline_data) if not attr.startswith('_')]}")
                     
                     if hasattr(part, 'inline_data') and part.inline_data:
                         print(f"🔍 [IMAGE EDIT] Found inline_data, extracting image...")
@@ -1871,6 +1894,21 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
                         print(f"⚠️  [IMAGE EDIT] Response contains text part: {text_content}...")
                         print(f"⚠️  [IMAGE EDIT] This suggests Nano Banana Pro returned text instead of an edited image.")
                         print(f"⚠️  [IMAGE EDIT] The model may not support direct image editing, or the response format is different.")
+                    
+                    # Check for other possible image locations
+                    # Sometimes images might be in different attributes
+                    for attr_name in ['image', 'image_data', 'data', 'blob', 'file_data']:
+                        if hasattr(part, attr_name):
+                            attr_value = getattr(part, attr_name)
+                            print(f"🔍 [IMAGE EDIT] Part {i} has {attr_name}: {type(attr_value)}")
+                            try:
+                                if isinstance(attr_value, bytes) and len(attr_value) > 100:
+                                    # Might be image data
+                                    result_image = Image.open(BytesIO(attr_value))
+                                    print(f"🎉 [IMAGE EDIT] Found image in {attr_name}! Size: {result_image.size[0]}x{result_image.size[1]}")
+                                    return result_image
+                            except:
+                                pass
         
         # Check if we got any text response that might explain the issue
         try:
@@ -1879,22 +1917,73 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
         except:
             pass
         
+        # Check response.parts directly (sometimes response has parts at top level)
+        try:
+            if hasattr(response, 'parts') and response.parts:
+                print(f"🔍 [IMAGE EDIT] Response has top-level parts: {len(response.parts)}")
+                for i, part in enumerate(response.parts):
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        try:
+                            image_data = part.inline_data.data
+                            if isinstance(image_data, str):
+                                image_bytes = base64.b64decode(image_data)
+                            elif isinstance(image_data, bytes):
+                                image_bytes = image_data
+                            else:
+                                continue
+                            if isinstance(image_bytes, BytesIO):
+                                image_bytes = image_bytes.read()
+                            result_image = Image.open(BytesIO(image_bytes))
+                            print(f"🎉 [IMAGE EDIT] Found image in response.parts! Size: {result_image.size[0]}x{result_image.size[1]}")
+                            return result_image
+                        except Exception as parts_error:
+                            print(f"⚠️  [IMAGE EDIT] Error extracting from response.parts: {parts_error}")
+        except:
+            pass
+        
         # Fallback: if no image in response, return None (will trigger Imagen fallback)
         print(f"⚠️  [IMAGE EDIT] No image found in response, trying alternative approach...")
         
-        # Alternative: Use the model's image generation with the original as reference
-        # This is a workaround if direct editing isn't available
+        # Alternative: Use image generation with the original image(s) as reference/context
+        # Gemini 3 Pro Image Preview might work better when we ask it to generate a new image
+        # based on the original image + edit instruction, rather than trying to "edit" directly
         try:
-            # Try using the model with image input and edit instruction
+            print(f"🔄 [IMAGE EDIT] Trying alternative: Generate new image based on original + edit instruction...")
+            # Create a prompt that asks the model to generate an edited version
             if len(images) == 1:
-                alternative_prompt = f"Edit the provided image: {prompt}"
+                alternative_prompt = f"""Generate a new image that is an edited version of the provided image.
+
+Original image description: The user has provided 1 image.
+
+Edit instruction: {prompt}
+
+Generate a high-quality, high-resolution image that shows the edited version. The new image should:
+- Be based on the original image
+- Apply the edit instruction: {prompt}
+- Maintain or improve the original quality and resolution
+- Be realistic and accurate to the edit request"""
             else:
-                alternative_prompt = f"Process these {len(images)} images: {prompt}"
+                alternative_prompt = f"""Generate a new image based on the provided {len(images)} image(s).
+
+The user has provided {len(images)} image(s).
+
+Edit/combine instruction: {prompt}
+
+Generate a high-quality, high-resolution final image that:
+- Combines or edits the provided images according to: {prompt}
+- Understands references like "first photo", "second photo", "the black guy", "the woman", etc.
+- Maintains or improves the original quality and resolution
+- Is realistic and accurate to the request"""
+            
+            # Use the image generation model instead, with images as context
+            gen_model = genai.GenerativeModel(IMAGE_GEN_MODEL)
             alt_content = [alternative_prompt] + images
-            alt_response = model.generate_content(
+            alt_response = gen_model.generate_content(
                 alt_content,
                 generation_config={
-                    "temperature": 0.8,
+                    "temperature": 0.7,
+                    "top_p": 0.95,
+                    "top_k": 40,
                 },
                 safety_settings={
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -1903,6 +1992,7 @@ IMPORTANT: Generate a high-quality, high-resolution final image that accurately 
                     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
                 }
             )
+            print(f"✅ [IMAGE EDIT] Alternative API call successful")
             
             # Check for image in alternative response
             if hasattr(alt_response, 'candidates') and alt_response.candidates:
