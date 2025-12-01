@@ -14507,8 +14507,11 @@ Response: """
                                             # Compress video if present
                                             if original_video_bytes:
                                                 print(f"📹 [{message.author.display_name}] Compressing video for retry...")
+                                                # Create fresh BytesIO to avoid file pointer issues
                                                 original_video_bytes.seek(0)
-                                                compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
+                                                video_data_copy = original_video_bytes.read()
+                                                fresh_video_bytes = BytesIO(video_data_copy)
+                                                compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
                                                 if compressed_video:
                                                     compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
                                                     print(f"✅ [{message.author.display_name}] Video compressed to {compressed_size_mb:.2f}MB for retry")
@@ -14585,8 +14588,11 @@ Response: """
                                         # Compress video if present
                                         if 'original_video_bytes' in locals() and original_video_bytes:
                                             print(f"📹 [{message.author.display_name}] Compressing video for retry...")
+                                            # Create fresh BytesIO to avoid file pointer issues
                                             original_video_bytes.seek(0)
-                                            compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
+                                            video_data_copy = original_video_bytes.read()
+                                            fresh_video_bytes = BytesIO(video_data_copy)
+                                            compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)  # More aggressive compression for retry
                                             if compressed_video:
                                                 compressed_size_mb = len(compressed_video.getvalue()) / (1024 * 1024)
                                                 print(f"✅ [{message.author.display_name}] Video compressed to {compressed_size_mb:.2f}MB for retry")
@@ -14608,7 +14614,11 @@ Response: """
                                                         await message.channel.send(f"📎 Files {batch_start + 1}-{min(batch_start + len(batch), len(compressed_files))} of {len(compressed_files)}:", files=batch)
                                                     # If video wasn't in compressed_files, try to send it separately
                                                     if original_video_bytes and not any(f.filename == 'generated_video.mp4' for f in compressed_files):
-                                                        compressed_video = compress_video_for_discord(original_video_bytes, max_size_mb=15.0)
+                                                        # Reset and create fresh BytesIO to avoid file pointer issues
+                                                        original_video_bytes.seek(0)
+                                                        video_data_copy = original_video_bytes.read()
+                                                        fresh_video_bytes = BytesIO(video_data_copy)
+                                                        compressed_video = compress_video_for_discord(fresh_video_bytes, max_size_mb=15.0)
                                                         if compressed_video:
                                                             compressed_video.seek(0)
                                                             await message.channel.send("🎬 Generated video:", files=[discord.File(fp=compressed_video, filename='generated_video.mp4')])
