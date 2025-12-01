@@ -1994,27 +1994,64 @@ Generate a high-quality, high-resolution final image that:
             )
             print(f"✅ [IMAGE EDIT] Alternative API call successful")
             
-            # Check for image in alternative response
+            # Check for response.images format first (same as image generation)
+            if hasattr(alt_response, 'images') and alt_response.images:
+                print(f"🔍 [IMAGE EDIT] Alternative: Found response.images")
+                try:
+                    for i, img in enumerate(alt_response.images):
+                        if hasattr(img, 'data'):
+                            image_data = img.data
+                            if isinstance(image_data, str):
+                                image_bytes = base64.b64decode(image_data)
+                            elif isinstance(image_data, bytes):
+                                image_bytes = image_data
+                            else:
+                                continue
+                            if isinstance(image_bytes, BytesIO):
+                                image_bytes = image_bytes.read()
+                            result_image = Image.open(BytesIO(image_bytes))
+                            print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method via response.images)!")
+                            return result_image
+                except Exception as images_error:
+                    print(f"⚠️  [IMAGE EDIT] Error extracting from alternative response.images: {images_error}")
+            
+            # Check for image in alternative response candidates
             if hasattr(alt_response, 'candidates') and alt_response.candidates:
                 candidate = alt_response.candidates[0]
+                
+                # Check finish_reason
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason = candidate.finish_reason
+                    print(f"🔍 [IMAGE EDIT] Alternative finish_reason: {finish_reason}")
+                    try:
+                        finish_reason_str = str(finish_reason).lower()
+                        if 'safety' in finish_reason_str or 'block' in finish_reason_str or 'stop' in finish_reason_str or 'prohibited' in finish_reason_str:
+                            print(f"⚠️  [IMAGE EDIT] Alternative method also blocked by content safety: {finish_reason}")
+                    except:
+                        pass
+                
                 if hasattr(candidate, 'content') and candidate.content:
                     parts = candidate.content.parts
+                    print(f"🔍 [IMAGE EDIT] Alternative: Checking {len(parts)} part(s)")
                     for part in parts:
                         if hasattr(part, 'inline_data') and part.inline_data:
                             try:
                                 image_data = part.inline_data.data
+                                print(f"🔍 [IMAGE EDIT] Alternative: Found inline_data, type: {type(image_data)}")
                                 
                                 # Handle different data types - Gemini returns raw bytes
                                 if isinstance(image_data, str):
                                     # If it's a string, try base64 decode
                                     try:
                                         image_bytes = base64.b64decode(image_data)
-                                    except:
-                                        print(f"⚠️  [IMAGE EDIT] Failed to decode base64 in alternative")
+                                        print(f"🔍 [IMAGE EDIT] Alternative: Decoded base64, {len(image_bytes)} bytes")
+                                    except Exception as decode_err:
+                                        print(f"⚠️  [IMAGE EDIT] Failed to decode base64 in alternative: {decode_err}")
                                         continue
                                 elif isinstance(image_data, bytes):
                                     # If it's already bytes, use directly (Gemini returns raw image bytes)
                                     image_bytes = image_data
+                                    print(f"🔍 [IMAGE EDIT] Alternative: Using raw bytes, {len(image_bytes)} bytes")
                                 elif isinstance(image_data, BytesIO):
                                     image_bytes = image_data.read()
                                 else:
@@ -2026,11 +2063,18 @@ Generate a high-quality, high-resolution final image that:
                                     image_bytes = image_bytes.read()
                                 
                                 result_image = Image.open(BytesIO(image_bytes))
-                                print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method)!")
+                                print(f"🎉 [IMAGE EDIT] Successfully edited image (alternative method)! Size: {result_image.size[0]}x{result_image.size[1]}")
                                 return result_image
                             except Exception as alt_extract_error:
                                 print(f"⚠️  [IMAGE EDIT] Error extracting from alternative response: {alt_extract_error}")
+                                import traceback
+                                print(f"⚠️  [IMAGE EDIT] Alternative traceback: {traceback.format_exc()}")
                                 continue
+                        elif hasattr(part, 'text'):
+                            text_content = part.text[:200] if part.text else 'None'
+                            print(f"⚠️  [IMAGE EDIT] Alternative response contains text instead of image: {text_content}...")
+            else:
+                print(f"⚠️  [IMAGE EDIT] Alternative response has no candidates")
         except Exception as alt_error:
             print(f"⚠️  [IMAGE EDIT] Alternative method failed: {alt_error}")
         
