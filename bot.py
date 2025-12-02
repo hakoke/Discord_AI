@@ -136,20 +136,14 @@ try:
     import vertexai
     from vertexai.preview.vision_models import ImageGenerationModel
     
-    # Project configuration - hardcoded since repo is private
-    PROJECT_NAME = 'airy-boulevard-478121-f1'
-    # Try multiple paths: repo root, Windows path, or env var
-    JSON_KEY_PATH = None
-    possible_paths = [
-        'airy-boulevard-478121-f1-44b0fdce331a.json',  # Repo root (Railway)
-        r'C:\Users\ynkk4\OneDrive\Desktop\Discord_AI\airy-boulevard-478121-f1-44b0fdce331a.json',  # Windows local
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            JSON_KEY_PATH = path
-            break
+    # Project configuration - use environment variables only
+    # Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS in your environment
+    project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+    if not project_id:
+        raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
     
-    project_id = os.getenv('GOOGLE_CLOUD_PROJECT') or PROJECT_NAME
+    # JSON key path from environment variable
+    JSON_KEY_PATH = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
     location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
     
     # Allow runtime override of Imagen model choices via env vars
@@ -177,12 +171,11 @@ try:
     )
 
     
-    # PRIORITY 1: Check for hardcoded credentials file (repo is private)
-    credentials_path = None
-    if os.path.exists(JSON_KEY_PATH):
-        credentials_path = JSON_KEY_PATH
+    # Load credentials from environment variable
+    credentials_path = JSON_KEY_PATH
+    if credentials_path and os.path.exists(credentials_path):
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-        print(f"✅ Using hardcoded credentials file: {credentials_path}")
+        print(f"✅ Using credentials file from GOOGLE_APPLICATION_CREDENTIALS: {credentials_path}")
         
         # Verify the file is valid JSON
         try:
@@ -193,28 +186,12 @@ try:
                 print(f"   - Client email: {verify_json.get('client_email', 'NOT FOUND')}")
         except Exception as verify_error:
             print(f"   ⚠️ Could not verify credentials file: {verify_error}")
-    
-    # PRIORITY 2: Check for local credentials file (if specified in env var)
-    elif os.getenv('GOOGLE_APPLICATION_CREDENTIALS') and os.path.exists(os.getenv('GOOGLE_APPLICATION_CREDENTIALS')):
-        local_creds_file = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-        credentials_path = local_creds_file
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-        print(f"✅ Using local credentials file from env var: {credentials_path}")
-        
-        # Verify the file is valid JSON
-        try:
-            with open(credentials_path, 'r') as f:
-                verify_json = json.load(f)
-                print(f"   - JSON keys: {list(verify_json.keys())}")
-                print(f"   - Project ID: {verify_json.get('project_id', 'NOT FOUND')}")
-                print(f"   - Client email: {verify_json.get('client_email', 'NOT FOUND')}")
-        except Exception as verify_error:
-            print(f"   ⚠️ Could not verify credentials file: {verify_error}")
-    
-    # PRIORITY 3: Check environment variable for credentials path
     elif os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
         credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-        print(f"✅ Using credentials path from environment: {credentials_path}")
+        if os.path.exists(credentials_path):
+            print(f"✅ Using credentials file from GOOGLE_APPLICATION_CREDENTIALS: {credentials_path}")
+        else:
+            print(f"⚠️  GOOGLE_APPLICATION_CREDENTIALS points to non-existent file: {credentials_path}")
     
     # PRIORITY 4: Check for credentials JSON string (legacy support)
     elif os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON') or os.getenv('credentials json'):
@@ -2133,9 +2110,10 @@ def _edit_image_imagen_fallback(original_image_bytes: bytes, prompt: str) -> Ima
         import vertexai
         from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
         
-        # Use hardcoded project name or env var
-        PROJECT_NAME = 'airy-boulevard-478121-f1'
-        project_id = os.getenv('GOOGLE_CLOUD_PROJECT') or PROJECT_NAME
+        # Use environment variable for project ID
+        project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+        if not project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required for Imagen fallback")
         location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
         
         vertexai.init(project=project_id, location=location)
